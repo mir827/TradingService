@@ -81,6 +81,14 @@ function shortTicker(symbol: string) {
   return symbol.replace(/\.K[QS]$/i, '');
 }
 
+function getDisplayCode(item: Pick<SymbolItem, 'symbol' | 'code'>) {
+  return item.code ?? shortTicker(item.symbol);
+}
+
+function getOptionLabel(item: SymbolItem) {
+  return `${getDisplayCode(item)} · ${item.name} (${item.market})`;
+}
+
 function marketExchangeText(market: MarketType) {
   if (market === 'CRYPTO') return 'BINANCE';
   return 'KRX';
@@ -440,6 +448,8 @@ function App() {
   };
 
   const selectedMarket = selectedSymbolMeta?.market ?? 'CRYPTO';
+  const selectedCode = selectedSymbolMeta ? getDisplayCode(selectedSymbolMeta) : shortTicker(selectedSymbol);
+  const selectedName = selectedSymbolMeta?.name ?? shortTicker(selectedSymbol);
   const exchangeText = marketExchangeText(selectedMarket);
 
   return (
@@ -454,7 +464,7 @@ function App() {
           <select value={selectedSymbol} onChange={(e) => setSelectedSymbol(e.target.value)}>
             {watchlistSymbols.map((item) => (
               <option key={item.symbol} value={item.symbol}>
-                {shortTicker(item.symbol)} · {item.market}
+                {getOptionLabel(item)}
               </option>
             ))}
           </select>
@@ -515,7 +525,7 @@ function App() {
           <div className="chart-header">
             <div className="chart-title-block">
               <strong>
-                {shortTicker(selectedSymbol)} · {selectedInterval}
+                {selectedCode} · {selectedName} · {selectedInterval}
               </strong>
               <span>{exchangeText} · 실시간 데이터</span>
             </div>
@@ -568,7 +578,7 @@ function App() {
                   <input
                     value={watchQuery}
                     onChange={(e) => setWatchQuery(e.target.value)}
-                    placeholder="KOSPI/KOSDAQ/코인 검색 (예: 삼성, 005930, BTC)"
+                    placeholder="종목 코드/종목명 검색 (예: 005930, 삼성전자, BTC)"
                   />
                 </div>
                 <ul className="watchlist-list">
@@ -583,7 +593,7 @@ function App() {
                         onClick={() => setSelectedSymbol(item.symbol)}
                       >
                         <div>
-                          <strong>{shortTicker(item.symbol)}</strong>
+                          <strong>{getDisplayCode(item)}</strong>
                           <small>
                             {item.name} · {item.market}
                           </small>
@@ -613,7 +623,7 @@ function App() {
                         {filteredSearchResults.map((item) => (
                           <li key={item.symbol} onClick={() => handlePickSymbol(item)}>
                             <div>
-                              <strong>{shortTicker(item.symbol)}</strong>
+                              <strong>{getDisplayCode(item)}</strong>
                               <small>{item.name}</small>
                             </div>
                             <span className="market-pill">{item.market}</span>
@@ -628,7 +638,9 @@ function App() {
 
             {watchTab === 'detail' ? (
               <div className="panel-content">
-                <h4>{shortTicker(selectedSymbol)} 상세</h4>
+                <h4>
+                  {selectedCode} · {selectedName} 상세
+                </h4>
                 <dl>
                   <div>
                     <dt>현재가</dt>
@@ -664,11 +676,11 @@ function App() {
                 <p>알림 엔진 UI를 TradingView 스타일로 맞추는 단계입니다.</p>
                 <ul className="alert-list">
                   <li>
-                    <span>{shortTicker(selectedSymbol)}</span>
+                    <span>{selectedCode}</span>
                     <span>가격이 기준선 돌파 시 알림</span>
                   </li>
                   <li>
-                    <span>{shortTicker(selectedSymbol)}</span>
+                    <span>{selectedCode}</span>
                     <span>변동률 임계치 도달 시 알림</span>
                   </li>
                 </ul>

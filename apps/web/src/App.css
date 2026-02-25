@@ -75,7 +75,8 @@ select {
 
 .top-controls select {
   padding: 7px 9px;
-  min-width: 160px;
+  min-width: 240px;
+  max-width: 320px;
 }
 
 .intervals {
