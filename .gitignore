@@ -6,3 +6,4 @@ npm-debug.log*
 
 apps/web/dist
 apps/api/dist
+outputs/
