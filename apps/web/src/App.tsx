@@ -8,6 +8,8 @@ import {
   type ISeriesApi,
   type CandlestickData,
   type HistogramData,
+  type MouseEventParams,
+  type Time,
   type UTCTimestamp,
 } from 'lightweight-charts';
 import './App.css';
@@ -36,8 +38,27 @@ type Quote = {
   volume: number;
 };
 
+type WatchTab = 'watchlist' | 'detail' | 'alerts';
+type BottomTab = 'pine' | 'strategy' | 'trading';
+
 const intervals = ['1', '5', '15', '60', '240', '1D', '1W'];
-const toolbarItems = ['↖', '＋', '✏️', '📐', '📎', '😊', '⚡', '🧲'];
+const leftTools = [
+  { key: 'cursor', icon: '↖', label: '커서' },
+  { key: 'crosshair', icon: '＋', label: '크로스헤어' },
+  { key: 'trend', icon: '／', label: '추세선' },
+  { key: 'horizontal', icon: '―', label: '수평선' },
+  { key: 'fib', icon: '📐', label: '피보나치' },
+  { key: 'brush', icon: '✏️', label: '브러시' },
+  { key: 'emoji', icon: '😊', label: '아이콘' },
+  { key: 'magnet', icon: '🧲', label: '자석' },
+];
+const topActions = ['지표', '비교', '알림', '리플레이'];
+const bottomTabs: Array<{ id: BottomTab; label: string }> = [
+  { id: 'pine', label: 'Pine Editor' },
+  { id: 'strategy', label: '전략 테스터' },
+  { id: 'trading', label: '트레이딩 패널' },
+];
+
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? '';
 
 function formatPrice(value: number) {
@@ -45,11 +66,19 @@ function formatPrice(value: number) {
   return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
 }
 
+function formatVolume(value: number) {
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(2)}K`;
+  return value.toLocaleString('en-US');
+}
+
 function App() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  const candleMapRef = useRef<Map<number, Candle>>(new Map());
 
   const [symbols, setSymbols] = useState<SymbolItem[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState('BTCUSDT');
@@ -58,6 +87,13 @@ function App() {
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [activeTool, setActiveTool] = useState('cursor');
+  const [watchTab, setWatchTab] = useState<WatchTab>('watchlist');
+  const [watchQuery, setWatchQuery] = useState('');
+  const [bottomTab, setBottomTab] = useState<BottomTab>('pine');
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
+  const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
 
   useEffect(() => {
     fetch(`${apiBase}/api/symbols`)
@@ -124,6 +160,29 @@ function App() {
       },
     });
 
+    const onCrosshairMove = (param: MouseEventParams<Time>) => {
+      const rawTime = param.time;
+      const bar = param.seriesData.get(candleSeries) as CandlestickData<Time> | undefined;
+
+      if (typeof rawTime !== 'number' || !bar) {
+        setHoveredCandle(null);
+        return;
+      }
+
+      const matched = candleMapRef.current.get(rawTime);
+
+      setHoveredCandle({
+        time: rawTime,
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+        volume: matched?.volume ?? 0,
+      });
+    };
+
+    chart.subscribeCrosshairMove(onCrosshairMove);
+
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     volumeSeriesRef.current = volumeSeries;
@@ -133,6 +192,7 @@ function App() {
 
     return () => {
       observer.disconnect();
+      chart.unsubscribeCrosshairMove(onCrosshairMove);
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
@@ -160,6 +220,7 @@ function App() {
 
         if (!canceled) {
           setCandles(data.candles ?? []);
+          setHoveredCandle(null);
         }
       } catch {
         if (!canceled) {
@@ -215,6 +276,8 @@ function App() {
   }, [symbols]);
 
   useEffect(() => {
+    candleMapRef.current = new Map(candles.map((candle) => [candle.time, candle]));
+
     if (!candles.length || !candleSeriesRef.current || !volumeSeriesRef.current || !chartRef.current) return;
 
     const candleData: CandlestickData[] = candles.map((candle) => ({
@@ -237,6 +300,8 @@ function App() {
   }, [candles]);
 
   const selectedQuote = quotes[selectedSymbol];
+  const latestCandle = candles.at(-1) ?? null;
+  const displayCandle = hoveredCandle ?? latestCandle;
 
   const watchlist = useMemo(
     () =>
@@ -251,10 +316,23 @@ function App() {
     [symbols, quotes],
   );
 
+  const filteredWatchlist = useMemo(
+    () => watchlist.filter((item) => item.symbol.toLowerCase().includes(watchQuery.toLowerCase())),
+    [watchQuery, watchlist],
+  );
+
+  const priceDiff = displayCandle ? displayCandle.close - displayCandle.open : 0;
+  const priceDiffPercent =
+    displayCandle && displayCandle.open !== 0 ? ((displayCandle.close - displayCandle.open) / displayCandle.open) * 100 : 0;
+
   return (
     <div className="tv-app">
       <header className="tv-topbar">
-        <div className="brand">TradingService</div>
+        <div className="brand-wrap">
+          <div className="brand">TradingService</div>
+          <span className="phase-chip">Phase 1</span>
+        </div>
+
         <div className="top-controls">
           <select value={selectedSymbol} onChange={(e) => setSelectedSymbol(e.target.value)}>
             {symbols.map((item) => (
@@ -263,6 +341,7 @@ function App() {
               </option>
             ))}
           </select>
+
           <div className="intervals">
             {intervals.map((interval) => (
               <button
@@ -274,7 +353,14 @@ function App() {
               </button>
             ))}
           </div>
+
+          <div className="top-actions">
+            {topActions.map((action) => (
+              <button key={action}>{action}</button>
+            ))}
+          </div>
         </div>
+
         <div className="quote-summary">
           {selectedQuote ? (
             <>
@@ -287,65 +373,178 @@ function App() {
           ) : (
             <span className="muted">시세 로딩중...</span>
           )}
+
+          <button className="panel-toggle" onClick={() => setRightPanelCollapsed((prev) => !prev)}>
+            {rightPanelCollapsed ? '패널 열기' : '패널 닫기'}
+          </button>
         </div>
       </header>
 
-      <main className="tv-main">
+      <main className={`tv-main ${rightPanelCollapsed ? 'right-collapsed' : ''}`}>
         <aside className="left-toolbar">
-          {toolbarItems.map((item) => (
-            <button key={item}>{item}</button>
+          {leftTools.map((item) => (
+            <button
+              key={item.key}
+              className={item.key === activeTool ? 'active' : ''}
+              onClick={() => setActiveTool(item.key)}
+              title={item.label}
+            >
+              {item.icon}
+            </button>
           ))}
         </aside>
 
         <section className="center-panel">
           <div className="chart-header">
-            <div className="chart-title">{selectedSymbol} · {selectedInterval}</div>
+            <div className="chart-title-block">
+              <strong>
+                {selectedSymbol} · {selectedInterval}
+              </strong>
+              <span>BINANCE · 실시간 데이터</span>
+            </div>
+
             <div className="chart-meta">
-              <span>오픈 {selectedQuote ? formatPrice(selectedQuote.lastPrice) : '--'}</span>
-              <span>고가 {selectedQuote ? formatPrice(selectedQuote.highPrice) : '--'}</span>
-              <span>저가 {selectedQuote ? formatPrice(selectedQuote.lowPrice) : '--'}</span>
-              <span>거래량 {selectedQuote ? selectedQuote.volume.toLocaleString('en-US') : '--'}</span>
+              <span>O {displayCandle ? formatPrice(displayCandle.open) : '--'}</span>
+              <span>H {displayCandle ? formatPrice(displayCandle.high) : '--'}</span>
+              <span>L {displayCandle ? formatPrice(displayCandle.low) : '--'}</span>
+              <span>C {displayCandle ? formatPrice(displayCandle.close) : '--'}</span>
+              <span className={priceDiff >= 0 ? 'up' : 'down'}>
+                {priceDiff >= 0 ? '+' : ''}
+                {priceDiff.toFixed(2)} ({priceDiffPercent.toFixed(2)}%)
+              </span>
+              <span>Vol {displayCandle ? formatVolume(displayCandle.volume) : '--'}</span>
             </div>
           </div>
 
           <div className="chart-area" ref={containerRef} />
 
           <div className="status-row">
-            {loading ? '데이터를 불러오는 중...' : '실시간 UI 프로토타입'}
-            {error ? <span className="error"> · {error}</span> : null}
+            <span>{loading ? '데이터를 불러오는 중...' : '실시간 UI 프로토타입'}</span>
+            <span className="status-time">
+              {displayCandle ? new Date(displayCandle.time * 1000).toLocaleString('ko-KR') : '시간 정보 없음'}
+            </span>
+            {error ? <span className="error">{error}</span> : null}
           </div>
         </section>
 
-        <aside className="right-panel">
-          <h3>관심종목</h3>
-          <ul>
-            {watchlist.map((item) => (
-              <li
-                key={item.symbol}
-                className={item.symbol === selectedSymbol ? 'selected' : ''}
-                onClick={() => setSelectedSymbol(item.symbol)}
-              >
-                <div>
-                  <strong>{item.symbol}</strong>
-                  <small>{item.name}</small>
+        {!rightPanelCollapsed ? (
+          <aside className="right-panel">
+            <div className="right-panel-header">
+              <h3>시장 패널</h3>
+            </div>
+
+            <div className="watch-tabs">
+              <button className={watchTab === 'watchlist' ? 'active' : ''} onClick={() => setWatchTab('watchlist')}>
+                관심종목
+              </button>
+              <button className={watchTab === 'detail' ? 'active' : ''} onClick={() => setWatchTab('detail')}>
+                상세정보
+              </button>
+              <button className={watchTab === 'alerts' ? 'active' : ''} onClick={() => setWatchTab('alerts')}>
+                알림
+              </button>
+            </div>
+
+            {watchTab === 'watchlist' ? (
+              <>
+                <div className="watch-search-wrap">
+                  <input
+                    value={watchQuery}
+                    onChange={(e) => setWatchQuery(e.target.value)}
+                    placeholder="심볼 검색 (예: BTC)"
+                  />
                 </div>
-                <div className="watch-value">
-                  <span>{item.lastPrice ? formatPrice(item.lastPrice) : '--'}</span>
-                  <span className={item.changePercent && item.changePercent >= 0 ? 'up' : 'down'}>
-                    {item.changePercent ? `${item.changePercent >= 0 ? '+' : ''}${item.changePercent.toFixed(2)}%` : '--'}
-                  </span>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </aside>
+                <ul>
+                  {filteredWatchlist.map((item) => (
+                    <li
+                      key={item.symbol}
+                      className={item.symbol === selectedSymbol ? 'selected' : ''}
+                      onClick={() => setSelectedSymbol(item.symbol)}
+                    >
+                      <div>
+                        <strong>{item.symbol}</strong>
+                        <small>{item.name}</small>
+                      </div>
+                      <div className="watch-value">
+                        <span>{item.lastPrice ? formatPrice(item.lastPrice) : '--'}</span>
+                        <span className={item.changePercent && item.changePercent >= 0 ? 'up' : 'down'}>
+                          {item.changePercent
+                            ? `${item.changePercent >= 0 ? '+' : ''}${item.changePercent.toFixed(2)}%`
+                            : '--'}
+                        </span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
+
+            {watchTab === 'detail' ? (
+              <div className="panel-content">
+                <h4>{selectedSymbol} 상세</h4>
+                <dl>
+                  <div>
+                    <dt>현재가</dt>
+                    <dd>{selectedQuote ? formatPrice(selectedQuote.lastPrice) : '--'}</dd>
+                  </div>
+                  <div>
+                    <dt>24H 변동</dt>
+                    <dd className={selectedQuote && selectedQuote.changePercent >= 0 ? 'up' : 'down'}>
+                      {selectedQuote
+                        ? `${selectedQuote.changePercent >= 0 ? '+' : ''}${selectedQuote.changePercent.toFixed(2)}%`
+                        : '--'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>24H 고가</dt>
+                    <dd>{selectedQuote ? formatPrice(selectedQuote.highPrice) : '--'}</dd>
+                  </div>
+                  <div>
+                    <dt>24H 저가</dt>
+                    <dd>{selectedQuote ? formatPrice(selectedQuote.lowPrice) : '--'}</dd>
+                  </div>
+                  <div>
+                    <dt>24H 거래량</dt>
+                    <dd>{selectedQuote ? formatVolume(selectedQuote.volume) : '--'}</dd>
+                  </div>
+                </dl>
+              </div>
+            ) : null}
+
+            {watchTab === 'alerts' ? (
+              <div className="panel-content">
+                <h4>가격 알림</h4>
+                <p>알림 엔진 UI를 TradingView 스타일로 맞추는 단계입니다.</p>
+                <ul className="alert-list">
+                  <li>
+                    <span>{selectedSymbol}</span>
+                    <span>가격이 70,000 이상</span>
+                  </li>
+                  <li>
+                    <span>{selectedSymbol}</span>
+                    <span>1H 변동 +3% 이상</span>
+                  </li>
+                </ul>
+              </div>
+            ) : null}
+          </aside>
+        ) : null}
       </main>
 
       <footer className="tv-bottom-panel">
-        <button>Pine Editor</button>
-        <button>전략 테스터</button>
-        <button>트레이딩 패널</button>
-        <div className="phase-note">Phase 1 목표: TradingView 스타일 UI + 차트 상호작용 구현</div>
+        <div className="bottom-tabs">
+          {bottomTabs.map((tab) => (
+            <button key={tab.id} className={bottomTab === tab.id ? 'active' : ''} onClick={() => setBottomTab(tab.id)}>
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="bottom-content">
+          {bottomTab === 'pine' ? 'Pine Script 편집기 연동 준비 중 (키워드 자동완성 / 저장소 연결 예정)' : null}
+          {bottomTab === 'strategy' ? '전략 백테스트 레이아웃 구현 중 (체결/수익률 패널 추가 예정)' : null}
+          {bottomTab === 'trading' ? '트레이딩 패널 구현 중 (주문창/포지션/체결내역 패널 예정)' : null}
+        </div>
       </footer>
     </div>
   );
