@@ -1,23 +1,27 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ColorType,
-  createChart,
-  HistogramSeries,
   CandlestickSeries,
-  type IChartApi,
-  type ISeriesApi,
+  ColorType,
+  HistogramSeries,
+  createChart,
   type CandlestickData,
   type HistogramData,
+  type IChartApi,
+  type ISeriesApi,
   type MouseEventParams,
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts';
 import './App.css';
 
+type MarketType = 'CRYPTO' | 'KOSPI' | 'KOSDAQ';
+
 type SymbolItem = {
   symbol: string;
+  code?: string;
   name: string;
-  market: 'CRYPTO' | 'STOCK';
+  market: MarketType;
+  exchange?: string;
 };
 
 type Candle = {
@@ -73,6 +77,15 @@ function formatVolume(value: number) {
   return value.toLocaleString('en-US');
 }
 
+function shortTicker(symbol: string) {
+  return symbol.replace(/\.K[QS]$/i, '');
+}
+
+function marketExchangeText(market: MarketType) {
+  if (market === 'CRYPTO') return 'BINANCE';
+  return 'KRX';
+}
+
 function App() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -80,7 +93,7 @@ function App() {
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const candleMapRef = useRef<Map<number, Candle>>(new Map());
 
-  const [symbols, setSymbols] = useState<SymbolItem[]>([]);
+  const [watchlistSymbols, setWatchlistSymbols] = useState<SymbolItem[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState('BTCUSDT');
   const [selectedInterval, setSelectedInterval] = useState('60');
   const [candles, setCandles] = useState<Candle[]>([]);
@@ -91,6 +104,8 @@ function App() {
   const [activeTool, setActiveTool] = useState('cursor');
   const [watchTab, setWatchTab] = useState<WatchTab>('watchlist');
   const [watchQuery, setWatchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SymbolItem[]>([]);
+  const [searching, setSearching] = useState(false);
   const [bottomTab, setBottomTab] = useState<BottomTab>('pine');
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
@@ -98,7 +113,17 @@ function App() {
   useEffect(() => {
     fetch(`${apiBase}/api/symbols`)
       .then((res) => res.json())
-      .then((data: { symbols: SymbolItem[] }) => setSymbols(data.symbols ?? []))
+      .then((data: { symbols: SymbolItem[] }) => {
+        const nextSymbols = data.symbols ?? [];
+        setWatchlistSymbols(nextSymbols);
+        setSelectedSymbol((prev) => {
+          if (nextSymbols.some((item) => item.symbol === prev)) {
+            return prev;
+          }
+
+          return nextSymbols[0]?.symbol ?? prev;
+        });
+      })
       .catch(() => {
         setError('심볼 목록을 불러오지 못했습니다. API 상태를 확인해주세요.');
       });
@@ -240,24 +265,38 @@ function App() {
     };
   }, [selectedSymbol, selectedInterval]);
 
+  const quoteTargetSymbols = useMemo(() => {
+    const set = new Set<string>();
+
+    watchlistSymbols.forEach((item) => {
+      set.add(item.symbol);
+    });
+
+    if (selectedSymbol) {
+      set.add(selectedSymbol);
+    }
+
+    return [...set].slice(0, 40);
+  }, [selectedSymbol, watchlistSymbols]);
+
   useEffect(() => {
-    if (!symbols.length) return;
+    if (!quoteTargetSymbols.length) return;
 
     let canceled = false;
 
     const pullQuotes = async () => {
       try {
         const entries = await Promise.all(
-          symbols.map(async (item) => {
-            const res = await fetch(`${apiBase}/api/quote?symbol=${item.symbol}`);
-            if (!res.ok) throw new Error(item.symbol);
+          quoteTargetSymbols.map(async (symbol) => {
+            const res = await fetch(`${apiBase}/api/quote?symbol=${encodeURIComponent(symbol)}`);
+            if (!res.ok) throw new Error(symbol);
             const quote = (await res.json()) as Quote;
-            return [item.symbol, quote] as const;
+            return [symbol, quote] as const;
           }),
         );
 
         if (!canceled) {
-          setQuotes(Object.fromEntries(entries));
+          setQuotes((prev) => ({ ...prev, ...Object.fromEntries(entries) }));
         }
       } catch {
         if (!canceled) {
@@ -273,7 +312,50 @@ function App() {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [symbols]);
+  }, [quoteTargetSymbols]);
+
+  useEffect(() => {
+    const query = watchQuery.trim();
+
+    if (query.length < 2) {
+      setSearchResults([]);
+      setSearching(false);
+      return;
+    }
+
+    let canceled = false;
+
+    const timer = window.setTimeout(async () => {
+      setSearching(true);
+
+      try {
+        const response = await fetch(
+          `${apiBase}/api/search?query=${encodeURIComponent(query)}&market=ALL&limit=30`,
+        );
+
+        if (!response.ok) throw new Error('search failed');
+
+        const data = (await response.json()) as { items: SymbolItem[] };
+
+        if (!canceled) {
+          setSearchResults(data.items ?? []);
+        }
+      } catch {
+        if (!canceled) {
+          setSearchResults([]);
+        }
+      } finally {
+        if (!canceled) {
+          setSearching(false);
+        }
+      }
+    }, 250);
+
+    return () => {
+      canceled = true;
+      window.clearTimeout(timer);
+    };
+  }, [watchQuery]);
 
   useEffect(() => {
     candleMapRef.current = new Map(candles.map((candle) => [candle.time, candle]));
@@ -303,9 +385,14 @@ function App() {
   const latestCandle = candles.at(-1) ?? null;
   const displayCandle = hoveredCandle ?? latestCandle;
 
+  const selectedSymbolMeta = useMemo(
+    () => watchlistSymbols.find((item) => item.symbol === selectedSymbol) ?? searchResults.find((item) => item.symbol === selectedSymbol),
+    [searchResults, selectedSymbol, watchlistSymbols],
+  );
+
   const watchlist = useMemo(
     () =>
-      symbols.map((item) => {
+      watchlistSymbols.map((item) => {
         const quote = quotes[item.symbol];
         return {
           ...item,
@@ -313,17 +400,47 @@ function App() {
           changePercent: quote?.changePercent,
         };
       }),
-    [symbols, quotes],
+    [watchlistSymbols, quotes],
   );
 
-  const filteredWatchlist = useMemo(
-    () => watchlist.filter((item) => item.symbol.toLowerCase().includes(watchQuery.toLowerCase())),
-    [watchQuery, watchlist],
+  const filteredWatchlist = useMemo(() => {
+    const normalized = watchQuery.toLowerCase().trim();
+    if (!normalized) return watchlist;
+
+    return watchlist.filter((item) => {
+      const haystack = `${item.symbol} ${item.name} ${item.code ?? ''}`.toLowerCase();
+      return haystack.includes(normalized);
+    });
+  }, [watchQuery, watchlist]);
+
+  const filteredSearchResults = useMemo(
+    () =>
+      searchResults.filter(
+        (item) => !watchlistSymbols.some((watchItem) => watchItem.symbol === item.symbol),
+      ),
+    [searchResults, watchlistSymbols],
   );
 
   const priceDiff = displayCandle ? displayCandle.close - displayCandle.open : 0;
   const priceDiffPercent =
     displayCandle && displayCandle.open !== 0 ? ((displayCandle.close - displayCandle.open) / displayCandle.open) * 100 : 0;
+
+  const handlePickSymbol = (item: SymbolItem) => {
+    setWatchlistSymbols((prev) => {
+      if (prev.some((saved) => saved.symbol === item.symbol)) {
+        return prev;
+      }
+
+      return [item, ...prev].slice(0, 40);
+    });
+
+    setSelectedSymbol(item.symbol);
+    setWatchQuery('');
+    setSearchResults([]);
+  };
+
+  const selectedMarket = selectedSymbolMeta?.market ?? 'CRYPTO';
+  const exchangeText = marketExchangeText(selectedMarket);
 
   return (
     <div className="tv-app">
@@ -335,9 +452,9 @@ function App() {
 
         <div className="top-controls">
           <select value={selectedSymbol} onChange={(e) => setSelectedSymbol(e.target.value)}>
-            {symbols.map((item) => (
+            {watchlistSymbols.map((item) => (
               <option key={item.symbol} value={item.symbol}>
-                {item.symbol}
+                {shortTicker(item.symbol)} · {item.market}
               </option>
             ))}
           </select>
@@ -398,9 +515,9 @@ function App() {
           <div className="chart-header">
             <div className="chart-title-block">
               <strong>
-                {selectedSymbol} · {selectedInterval}
+                {shortTicker(selectedSymbol)} · {selectedInterval}
               </strong>
-              <span>BINANCE · 실시간 데이터</span>
+              <span>{exchangeText} · 실시간 데이터</span>
             </div>
 
             <div className="chart-meta">
@@ -451,44 +568,74 @@ function App() {
                   <input
                     value={watchQuery}
                     onChange={(e) => setWatchQuery(e.target.value)}
-                    placeholder="심볼 검색 (예: BTC)"
+                    placeholder="KOSPI/KOSDAQ/코인 검색 (예: 삼성, 005930, BTC)"
                   />
                 </div>
-                <ul>
-                  {filteredWatchlist.map((item) => (
-                    <li
-                      key={item.symbol}
-                      className={item.symbol === selectedSymbol ? 'selected' : ''}
-                      onClick={() => setSelectedSymbol(item.symbol)}
-                    >
-                      <div>
-                        <strong>{item.symbol}</strong>
-                        <small>{item.name}</small>
-                      </div>
-                      <div className="watch-value">
-                        <span>{item.lastPrice ? formatPrice(item.lastPrice) : '--'}</span>
-                        <span className={item.changePercent && item.changePercent >= 0 ? 'up' : 'down'}>
-                          {item.changePercent
-                            ? `${item.changePercent >= 0 ? '+' : ''}${item.changePercent.toFixed(2)}%`
-                            : '--'}
-                        </span>
-                      </div>
-                    </li>
-                  ))}
+                <ul className="watchlist-list">
+                  {filteredWatchlist.map((item) => {
+                    const hasLastPrice = typeof item.lastPrice === 'number';
+                    const hasChangePercent = typeof item.changePercent === 'number';
+
+                    return (
+                      <li
+                        key={item.symbol}
+                        className={item.symbol === selectedSymbol ? 'selected' : ''}
+                        onClick={() => setSelectedSymbol(item.symbol)}
+                      >
+                        <div>
+                          <strong>{shortTicker(item.symbol)}</strong>
+                          <small>
+                            {item.name} · {item.market}
+                          </small>
+                        </div>
+                        <div className="watch-value">
+                          <span>{hasLastPrice ? formatPrice(item.lastPrice) : '--'}</span>
+                          <span className={hasChangePercent && item.changePercent >= 0 ? 'up' : 'down'}>
+                            {hasChangePercent
+                              ? `${item.changePercent >= 0 ? '+' : ''}${item.changePercent.toFixed(2)}%`
+                              : '--'}
+                          </span>
+                        </div>
+                      </li>
+                    );
+                  })}
                 </ul>
+
+                {watchQuery.trim().length >= 2 ? (
+                  <div className="search-section">
+                    <div className="search-section-title">KOSPI/KOSDAQ 검색결과</div>
+                    {searching ? <div className="search-state">검색 중...</div> : null}
+                    {!searching && filteredSearchResults.length === 0 ? (
+                      <div className="search-state">추가 가능한 결과가 없습니다.</div>
+                    ) : null}
+                    {!searching && filteredSearchResults.length ? (
+                      <ul className="search-result-list">
+                        {filteredSearchResults.map((item) => (
+                          <li key={item.symbol} onClick={() => handlePickSymbol(item)}>
+                            <div>
+                              <strong>{shortTicker(item.symbol)}</strong>
+                              <small>{item.name}</small>
+                            </div>
+                            <span className="market-pill">{item.market}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
+                ) : null}
               </>
             ) : null}
 
             {watchTab === 'detail' ? (
               <div className="panel-content">
-                <h4>{selectedSymbol} 상세</h4>
+                <h4>{shortTicker(selectedSymbol)} 상세</h4>
                 <dl>
                   <div>
                     <dt>현재가</dt>
                     <dd>{selectedQuote ? formatPrice(selectedQuote.lastPrice) : '--'}</dd>
                   </div>
                   <div>
-                    <dt>24H 변동</dt>
+                    <dt>변동률</dt>
                     <dd className={selectedQuote && selectedQuote.changePercent >= 0 ? 'up' : 'down'}>
                       {selectedQuote
                         ? `${selectedQuote.changePercent >= 0 ? '+' : ''}${selectedQuote.changePercent.toFixed(2)}%`
@@ -496,15 +643,15 @@ function App() {
                     </dd>
                   </div>
                   <div>
-                    <dt>24H 고가</dt>
+                    <dt>고가</dt>
                     <dd>{selectedQuote ? formatPrice(selectedQuote.highPrice) : '--'}</dd>
                   </div>
                   <div>
-                    <dt>24H 저가</dt>
+                    <dt>저가</dt>
                     <dd>{selectedQuote ? formatPrice(selectedQuote.lowPrice) : '--'}</dd>
                   </div>
                   <div>
-                    <dt>24H 거래량</dt>
+                    <dt>거래량</dt>
                     <dd>{selectedQuote ? formatVolume(selectedQuote.volume) : '--'}</dd>
                   </div>
                 </dl>
@@ -517,12 +664,12 @@ function App() {
                 <p>알림 엔진 UI를 TradingView 스타일로 맞추는 단계입니다.</p>
                 <ul className="alert-list">
                   <li>
-                    <span>{selectedSymbol}</span>
-                    <span>가격이 70,000 이상</span>
+                    <span>{shortTicker(selectedSymbol)}</span>
+                    <span>가격이 기준선 돌파 시 알림</span>
                   </li>
                   <li>
-                    <span>{selectedSymbol}</span>
-                    <span>1H 변동 +3% 이상</span>
+                    <span>{shortTicker(selectedSymbol)}</span>
+                    <span>변동률 임계치 도달 시 알림</span>
                   </li>
                 </ul>
               </div>

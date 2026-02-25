@@ -75,7 +75,7 @@ select {
 
 .top-controls select {
   padding: 7px 9px;
-  min-width: 108px;
+  min-width: 160px;
 }
 
 .intervals {
@@ -285,6 +285,65 @@ select {
   color: #d1d4dc;
   padding: 7px 9px;
   font-size: 12px;
+}
+
+.watchlist-list {
+  max-height: 42%;
+  overflow: auto;
+}
+
+.search-section {
+  border-top: 1px solid #1f2533;
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.search-section-title {
+  font-size: 11px;
+  color: #8f96a6;
+}
+
+.search-state {
+  font-size: 12px;
+  color: #7d8595;
+  padding: 4px 2px;
+}
+
+.search-result-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid #242a38;
+  border-radius: 6px;
+}
+
+.search-result-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  border-bottom: 1px solid #1d2230;
+  cursor: pointer;
+}
+
+.search-result-list li:last-child {
+  border-bottom: none;
+}
+
+.search-result-list li:hover {
+  background: #1b2130;
+}
+
+.market-pill {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid #355d96;
+  color: #9ec7ff;
+  background: #223a5f;
 }
 
 .right-panel ul {
