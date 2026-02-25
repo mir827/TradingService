@@ -1,0 +1,21 @@
+{
+  "name": "tradingservice",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TradingView-like trading platform (phase 1)",
+  "workspaces": [
+    "apps/web",
+    "apps/api"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:web": "npm run dev --workspace @tradingservice/web",
+    "dev:api": "npm run dev --workspace @tradingservice/api",
+    "build": "npm run build --workspace @tradingservice/api && npm run build --workspace @tradingservice/web",
+    "lint": "npm run lint --workspace @tradingservice/web",
+    "start": "npm run start --workspace @tradingservice/api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
