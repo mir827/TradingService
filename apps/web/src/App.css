@@ -288,8 +288,49 @@ select {
   font-size: 12px;
 }
 
+.watch-filters {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px 2px;
+}
+
+.watch-filters button {
+  border: 1px solid #2b2f3a;
+  background: #1e222d;
+  color: #aeb5c2;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.watch-filters button.active {
+  color: #fff;
+  background: #2e5ef8;
+  border-color: #2e5ef8;
+}
+
+.watchlist-head {
+  display: grid;
+  grid-template-columns: 1.2fr 0.8fr 0.7fr;
+  gap: 4px;
+  padding: 6px 8px;
+  border-top: 1px solid #202636;
+  border-bottom: 1px solid #202636;
+}
+
+.watchlist-head button {
+  border: 0;
+  background: transparent;
+  color: #8f97a7;
+  text-align: left;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
 .watchlist-list {
-  max-height: 42%;
+  max-height: 34%;
   overflow: auto;
 }
 
@@ -379,10 +420,20 @@ select {
 .watch-value {
   text-align: right;
   font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
 }
 
-.watch-value span {
+.watch-value span,
+.watch-value small {
   display: block;
+}
+
+.watch-value small {
+  font-size: 10px;
+  color: #8f97a7;
 }
 
 .panel-content {

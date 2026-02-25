@@ -44,6 +44,9 @@ type Quote = {
 
 type WatchTab = 'watchlist' | 'detail' | 'alerts';
 type BottomTab = 'pine' | 'strategy' | 'trading';
+type WatchSortKey = 'symbol' | 'price' | 'changePercent';
+type WatchSortDir = 'asc' | 'desc';
+type WatchMarketFilter = 'ALL' | MarketType;
 
 const intervals = ['1', '5', '15', '60', '240', '1D', '1W'];
 const leftTools = [
@@ -75,6 +78,11 @@ function formatVolume(value: number) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(2)}K`;
   return value.toLocaleString('en-US');
+}
+
+function formatSigned(value: number, digits = 2) {
+  const sign = value > 0 ? '+' : value < 0 ? '-' : '';
+  return `${sign}${Math.abs(value).toFixed(digits)}`;
 }
 
 function shortTicker(symbol: string) {
@@ -112,6 +120,9 @@ function App() {
   const [activeTool, setActiveTool] = useState('cursor');
   const [watchTab, setWatchTab] = useState<WatchTab>('watchlist');
   const [watchQuery, setWatchQuery] = useState('');
+  const [watchSortKey, setWatchSortKey] = useState<WatchSortKey>('symbol');
+  const [watchSortDir, setWatchSortDir] = useState<WatchSortDir>('asc');
+  const [watchMarketFilter, setWatchMarketFilter] = useState<WatchMarketFilter>('ALL');
   const [searchResults, setSearchResults] = useState<SymbolItem[]>([]);
   const [searching, setSearching] = useState(false);
   const [bottomTab, setBottomTab] = useState<BottomTab>('pine');
@@ -402,10 +413,15 @@ function App() {
     () =>
       watchlistSymbols.map((item) => {
         const quote = quotes[item.symbol];
+        const hasQuote = quote && Number.isFinite(quote.lastPrice) && Number.isFinite(quote.changePercent);
+        const previousClose = hasQuote ? quote.lastPrice / (1 + quote.changePercent / 100) : undefined;
+        const changeValue = hasQuote && previousClose ? quote.lastPrice - previousClose : undefined;
+
         return {
           ...item,
           lastPrice: quote?.lastPrice,
           changePercent: quote?.changePercent,
+          changeValue,
         };
       }),
     [watchlistSymbols, quotes],
@@ -413,13 +429,38 @@ function App() {
 
   const filteredWatchlist = useMemo(() => {
     const normalized = watchQuery.toLowerCase().trim();
-    if (!normalized) return watchlist;
 
-    return watchlist.filter((item) => {
+    let result = watchlist.filter((item) => {
       const haystack = `${item.symbol} ${item.name} ${item.code ?? ''}`.toLowerCase();
-      return haystack.includes(normalized);
+      return normalized ? haystack.includes(normalized) : true;
     });
-  }, [watchQuery, watchlist]);
+
+    if (watchMarketFilter !== 'ALL') {
+      result = result.filter((item) => item.market === watchMarketFilter);
+    }
+
+    const direction = watchSortDir === 'asc' ? 1 : -1;
+
+    result = [...result].sort((a, b) => {
+      if (watchSortKey === 'symbol') {
+        const aCode = getDisplayCode(a);
+        const bCode = getDisplayCode(b);
+        return aCode.localeCompare(bCode) * direction;
+      }
+
+      if (watchSortKey === 'price') {
+        const aValue = a.lastPrice ?? Number.NEGATIVE_INFINITY;
+        const bValue = b.lastPrice ?? Number.NEGATIVE_INFINITY;
+        return (aValue - bValue) * direction;
+      }
+
+      const aValue = a.changePercent ?? Number.NEGATIVE_INFINITY;
+      const bValue = b.changePercent ?? Number.NEGATIVE_INFINITY;
+      return (aValue - bValue) * direction;
+    });
+
+    return result;
+  }, [watchMarketFilter, watchQuery, watchSortDir, watchSortKey, watchlist]);
 
   const filteredSearchResults = useMemo(
     () =>
@@ -432,6 +473,16 @@ function App() {
   const priceDiff = displayCandle ? displayCandle.close - displayCandle.open : 0;
   const priceDiffPercent =
     displayCandle && displayCandle.open !== 0 ? ((displayCandle.close - displayCandle.open) / displayCandle.open) * 100 : 0;
+
+  const toggleWatchSort = (key: WatchSortKey) => {
+    if (watchSortKey === key) {
+      setWatchSortDir((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+      return;
+    }
+
+    setWatchSortKey(key);
+    setWatchSortDir(key === 'symbol' ? 'asc' : 'desc');
+  };
 
   const handlePickSymbol = (item: SymbolItem) => {
     setWatchlistSymbols((prev) => {
@@ -581,6 +632,33 @@ function App() {
                     placeholder="종목 코드/종목명 검색 (예: 005930, 삼성전자, BTC)"
                   />
                 </div>
+                <div className="watch-filters">
+                  {(['ALL', 'KOSPI', 'KOSDAQ', 'CRYPTO'] as const).map((market) => (
+                    <button
+                      key={market}
+                      className={watchMarketFilter === market ? 'active' : ''}
+                      onClick={() => setWatchMarketFilter(market)}
+                    >
+                      {market}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="watchlist-head">
+                  <button onClick={() => toggleWatchSort('symbol')}>
+                    심볼
+                    {watchSortKey === 'symbol' ? (watchSortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+                  </button>
+                  <button onClick={() => toggleWatchSort('price')}>
+                    현재가
+                    {watchSortKey === 'price' ? (watchSortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+                  </button>
+                  <button onClick={() => toggleWatchSort('changePercent')}>
+                    변동%
+                    {watchSortKey === 'changePercent' ? (watchSortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+                  </button>
+                </div>
+
                 <ul className="watchlist-list">
                   {filteredWatchlist.map((item) => {
                     const hasLastPrice = typeof item.lastPrice === 'number';
@@ -601,10 +679,13 @@ function App() {
                         <div className="watch-value">
                           <span>{hasLastPrice ? formatPrice(item.lastPrice) : '--'}</span>
                           <span className={hasChangePercent && item.changePercent >= 0 ? 'up' : 'down'}>
-                            {hasChangePercent
-                              ? `${item.changePercent >= 0 ? '+' : ''}${item.changePercent.toFixed(2)}%`
-                              : '--'}
+                            {hasChangePercent ? `${formatSigned(item.changePercent, 2)}%` : '--'}
                           </span>
+                          <small className={hasChangePercent && item.changePercent >= 0 ? 'up' : 'down'}>
+                            {typeof item.changeValue === 'number'
+                              ? formatSigned(item.changeValue)
+                              : '--'}
+                          </small>
                         </div>
                       </li>
                     );
@@ -613,7 +694,7 @@ function App() {
 
                 {watchQuery.trim().length >= 2 ? (
                   <div className="search-section">
-                    <div className="search-section-title">KOSPI/KOSDAQ 검색결과</div>
+                    <div className="search-section-title">검색결과 (코드/종목명)</div>
                     {searching ? <div className="search-state">검색 중...</div> : null}
                     {!searching && filteredSearchResults.length === 0 ? (
                       <div className="search-state">추가 가능한 결과가 없습니다.</div>
