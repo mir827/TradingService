@@ -346,6 +346,11 @@ select {
   color: #8f96a6;
 }
 
+.search-shortcut {
+  font-size: 10px;
+  color: #64708a;
+}
+
 .search-state {
   font-size: 12px;
   color: #7d8595;
@@ -375,8 +380,21 @@ select {
   border-bottom: none;
 }
 
-.search-result-list li:hover {
+.search-result-list li:hover,
+.search-result-list li.active {
   background: #1b2130;
+}
+
+.search-result-list li.active {
+  outline: 1px solid #315fb6;
+  outline-offset: -1px;
+}
+
+.search-result-list mark {
+  background: transparent;
+  color: #ffcc66;
+  font-weight: 600;
+  padding: 0;
 }
 
 .market-pill {

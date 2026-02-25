@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import {
   CandlestickSeries,
   ColorType,
@@ -48,6 +48,12 @@ type WatchSortKey = 'symbol' | 'price' | 'changePercent';
 type WatchSortDir = 'asc' | 'desc';
 type WatchMarketFilter = 'ALL' | MarketType;
 
+type WatchPrefs = {
+  watchSortKey: WatchSortKey;
+  watchSortDir: WatchSortDir;
+  watchMarketFilter: WatchMarketFilter;
+};
+
 const intervals = ['1', '5', '15', '60', '240', '1D', '1W'];
 const leftTools = [
   { key: 'cursor', icon: '↖', label: '커서' },
@@ -67,6 +73,54 @@ const bottomTabs: Array<{ id: BottomTab; label: string }> = [
 ];
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? '';
+const WATCH_PREFS_STORAGE_KEY = 'tradingservice.watchprefs.v1';
+
+function getStoredWatchPrefs(): Partial<WatchPrefs> {
+  if (typeof window === 'undefined') return {};
+
+  try {
+    const raw = window.localStorage.getItem(WATCH_PREFS_STORAGE_KEY);
+    if (!raw) return {};
+
+    const parsed = JSON.parse(raw) as Partial<WatchPrefs>;
+
+    return {
+      watchSortKey:
+        parsed.watchSortKey === 'symbol' ||
+        parsed.watchSortKey === 'price' ||
+        parsed.watchSortKey === 'changePercent'
+          ? parsed.watchSortKey
+          : undefined,
+      watchSortDir: parsed.watchSortDir === 'asc' || parsed.watchSortDir === 'desc' ? parsed.watchSortDir : undefined,
+      watchMarketFilter:
+        parsed.watchMarketFilter === 'ALL' ||
+        parsed.watchMarketFilter === 'CRYPTO' ||
+        parsed.watchMarketFilter === 'KOSPI' ||
+        parsed.watchMarketFilter === 'KOSDAQ'
+          ? parsed.watchMarketFilter
+          : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function renderMatchedText(text: string, query: string): ReactNode {
+  const normalized = query.trim();
+  if (!normalized) return text;
+
+  const matcher = new RegExp(`(${escapeRegExp(normalized)})`, 'ig');
+  const parts = text.split(matcher);
+  const normalizedLower = normalized.toLowerCase();
+
+  return parts.map((part, index) =>
+    part.toLowerCase() === normalizedLower ? <mark key={`${part}-${index}`}>{part}</mark> : <span key={`${part}-${index}`}>{part}</span>,
+  );
+}
 
 function formatPrice(value: number) {
   if (value >= 1000) return value.toLocaleString('en-US', { maximumFractionDigits: 2 });
@@ -120,14 +174,27 @@ function App() {
   const [activeTool, setActiveTool] = useState('cursor');
   const [watchTab, setWatchTab] = useState<WatchTab>('watchlist');
   const [watchQuery, setWatchQuery] = useState('');
-  const [watchSortKey, setWatchSortKey] = useState<WatchSortKey>('symbol');
-  const [watchSortDir, setWatchSortDir] = useState<WatchSortDir>('asc');
-  const [watchMarketFilter, setWatchMarketFilter] = useState<WatchMarketFilter>('ALL');
+  const [watchSortKey, setWatchSortKey] = useState<WatchSortKey>(() => getStoredWatchPrefs().watchSortKey ?? 'symbol');
+  const [watchSortDir, setWatchSortDir] = useState<WatchSortDir>(() => getStoredWatchPrefs().watchSortDir ?? 'asc');
+  const [watchMarketFilter, setWatchMarketFilter] = useState<WatchMarketFilter>(() => getStoredWatchPrefs().watchMarketFilter ?? 'ALL');
   const [searchResults, setSearchResults] = useState<SymbolItem[]>([]);
+  const [activeSearchIndex, setActiveSearchIndex] = useState(0);
   const [searching, setSearching] = useState(false);
   const [bottomTab, setBottomTab] = useState<BottomTab>('pine');
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const payload: WatchPrefs = {
+      watchSortKey,
+      watchSortDir,
+      watchMarketFilter,
+    };
+
+    window.localStorage.setItem(WATCH_PREFS_STORAGE_KEY, JSON.stringify(payload));
+  }, [watchMarketFilter, watchSortDir, watchSortKey]);
 
   useEffect(() => {
     fetch(`${apiBase}/api/symbols`)
@@ -338,6 +405,7 @@ function App() {
 
     if (query.length < 2) {
       setSearchResults([]);
+      setActiveSearchIndex(0);
       setSearching(false);
       return;
     }
@@ -358,10 +426,12 @@ function App() {
 
         if (!canceled) {
           setSearchResults(data.items ?? []);
+          setActiveSearchIndex(0);
         }
       } catch {
         if (!canceled) {
           setSearchResults([]);
+          setActiveSearchIndex(0);
         }
       } finally {
         if (!canceled) {
@@ -470,6 +540,15 @@ function App() {
     [searchResults, watchlistSymbols],
   );
 
+  useEffect(() => {
+    if (!filteredSearchResults.length) {
+      setActiveSearchIndex(0);
+      return;
+    }
+
+    setActiveSearchIndex((prev) => Math.min(prev, filteredSearchResults.length - 1));
+  }, [filteredSearchResults]);
+
   const priceDiff = displayCandle ? displayCandle.close - displayCandle.open : 0;
   const priceDiffPercent =
     displayCandle && displayCandle.open !== 0 ? ((displayCandle.close - displayCandle.open) / displayCandle.open) * 100 : 0;
@@ -496,6 +575,43 @@ function App() {
     setSelectedSymbol(item.symbol);
     setWatchQuery('');
     setSearchResults([]);
+    setActiveSearchIndex(0);
+  };
+
+  const handleSearchInputKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (!filteredSearchResults.length) {
+      if (event.key === 'Escape') {
+        setWatchQuery('');
+        setSearchResults([]);
+      }
+      return;
+    }
+
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setActiveSearchIndex((prev) => Math.min(prev + 1, filteredSearchResults.length - 1));
+      return;
+    }
+
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setActiveSearchIndex((prev) => Math.max(prev - 1, 0));
+      return;
+    }
+
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      const picked = filteredSearchResults[activeSearchIndex];
+      if (picked) {
+        handlePickSymbol(picked);
+      }
+      return;
+    }
+
+    if (event.key === 'Escape') {
+      setWatchQuery('');
+      setSearchResults([]);
+    }
   };
 
   const selectedMarket = selectedSymbolMeta?.market ?? 'CRYPTO';
@@ -629,7 +745,9 @@ function App() {
                   <input
                     value={watchQuery}
                     onChange={(e) => setWatchQuery(e.target.value)}
+                    onKeyDown={handleSearchInputKeyDown}
                     placeholder="종목 코드/종목명 검색 (예: 005930, 삼성전자, BTC)"
+                    autoComplete="off"
                   />
                 </div>
                 <div className="watch-filters">
@@ -695,17 +813,23 @@ function App() {
                 {watchQuery.trim().length >= 2 ? (
                   <div className="search-section">
                     <div className="search-section-title">검색결과 (코드/종목명)</div>
+                    <div className="search-shortcut">↑↓ 선택 · Enter 추가 · Esc 초기화</div>
                     {searching ? <div className="search-state">검색 중...</div> : null}
                     {!searching && filteredSearchResults.length === 0 ? (
                       <div className="search-state">추가 가능한 결과가 없습니다.</div>
                     ) : null}
                     {!searching && filteredSearchResults.length ? (
                       <ul className="search-result-list">
-                        {filteredSearchResults.map((item) => (
-                          <li key={item.symbol} onClick={() => handlePickSymbol(item)}>
+                        {filteredSearchResults.map((item, index) => (
+                          <li
+                            key={item.symbol}
+                            className={index === activeSearchIndex ? 'active' : ''}
+                            onMouseEnter={() => setActiveSearchIndex(index)}
+                            onClick={() => handlePickSymbol(item)}
+                          >
                             <div>
-                              <strong>{getDisplayCode(item)}</strong>
-                              <small>{item.name}</small>
+                              <strong>{renderMatchedText(getDisplayCode(item), watchQuery)}</strong>
+                              <small>{renderMatchedText(item.name, watchQuery)}</small>
                             </div>
                             <span className="market-pill">{item.market}</span>
                           </li>
