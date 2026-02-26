@@ -304,6 +304,60 @@ select {
   transform: translateX(-0.5px);
 }
 
+.candle-hover-tooltip {
+  position: absolute;
+  z-index: 4;
+  pointer-events: none;
+  width: min(232px, calc(100% - 12px));
+  border: 1px solid #334765;
+  border-radius: 8px;
+  background: rgb(12 18 30 / 95%);
+  box-shadow: 0 8px 28px rgb(5 10 20 / 40%);
+  backdrop-filter: blur(4px);
+  padding: 8px 10px;
+  display: grid;
+  gap: 4px;
+  color: #d6dbe4;
+}
+
+.candle-hover-tooltip-time {
+  font-size: 11px;
+  color: #94a5be;
+  border-bottom: 1px solid #2a364d;
+  padding-bottom: 6px;
+  margin-bottom: 2px;
+}
+
+.candle-hover-tooltip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.candle-hover-tooltip-row span {
+  color: #a2afc3;
+}
+
+.candle-hover-tooltip-row strong {
+  font-size: 12px;
+  font-weight: 700;
+  color: #eff2f8;
+}
+
+.candle-hover-tooltip-change {
+  border-top: 1px dashed #2a364d;
+  margin-top: 4px;
+  padding-top: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.candle-hover-tooltip-volume {
+  font-size: 11px;
+  color: #92a0b4;
+}
+
 .status-row {
   border-top: 1px solid #2b2f3a;
   padding: 4px 12px;

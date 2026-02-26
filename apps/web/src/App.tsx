@@ -148,6 +148,9 @@ const ALERT_AUTO_CHECK_STORAGE_KEY = 'tradingservice.alerts.autocheck.v1';
 const DEFAULT_WATCHLIST_NAME = 'default';
 const ALERT_EVENT_DEDUP_WINDOW_MS = 10_000;
 const ALERT_EVENT_MAX_ITEMS = 20;
+const HOVER_TOOLTIP_WIDTH = 232;
+const HOVER_TOOLTIP_HEIGHT = 174;
+const HOVER_TOOLTIP_MARGIN = 14;
 
 function getStoredWatchPrefs(): Partial<WatchPrefs> {
   if (typeof window === 'undefined') return {};
@@ -265,6 +268,16 @@ function formatDrawingTime(time: UTCTimestamp) {
   });
 }
 
+function formatCandleDateTime(time: number) {
+  return new Date(time * 1000).toLocaleString('ko-KR', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 function App() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const verticalOverlayRef = useRef<HTMLDivElement | null>(null);
@@ -303,6 +316,7 @@ function App() {
   const [bottomTab, setBottomTab] = useState<BottomTab>('pine');
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
+  const [hoveredPoint, setHoveredPoint] = useState<{ x: number; y: number } | null>(null);
   const [horizontalLines, setHorizontalLines] = useState<HorizontalLineState[]>([]);
   const [verticalLines, setVerticalLines] = useState<VerticalLineState[]>([]);
   const [chartReady, setChartReady] = useState(false);
@@ -336,6 +350,11 @@ function App() {
   useEffect(() => {
     selectedIntervalRef.current = selectedInterval;
   }, [selectedInterval]);
+
+  const clearHoveredCandle = useCallback(() => {
+    setHoveredCandle(null);
+    setHoveredPoint(null);
+  }, []);
 
   const toHorizontalLineState = useCallback((line: { id?: string; price: number }) => {
     const normalizedPrice = Number(line.price);
@@ -700,10 +719,17 @@ function App() {
 
     const onCrosshairMove = (param: MouseEventParams<Time>) => {
       const rawTime = param.time;
+      const point = param.point;
       const bar = param.seriesData.get(candleSeries) as CandlestickData<Time> | undefined;
 
-      if (typeof rawTime !== 'number' || !bar) {
-        setHoveredCandle(null);
+      if (
+        typeof rawTime !== 'number' ||
+        !bar ||
+        !point ||
+        !Number.isFinite(point.x) ||
+        !Number.isFinite(point.y)
+      ) {
+        clearHoveredCandle();
         return;
       }
 
@@ -716,6 +742,10 @@ function App() {
         low: bar.low,
         close: bar.close,
         volume: matched?.volume ?? 0,
+      });
+      setHoveredPoint({
+        x: point.x,
+        y: point.y,
       });
     };
 
@@ -811,7 +841,7 @@ function App() {
       setVerticalLines([]);
       setChartReady(false);
     };
-  }, [persistDrawings, renderVerticalLines, snapshotHorizontalLines, snapshotVerticalLines, syncVerticalLinePositions]);
+  }, [clearHoveredCandle, persistDrawings, renderVerticalLines, snapshotHorizontalLines, snapshotVerticalLines, syncVerticalLinePositions]);
 
   useEffect(() => {
     if (!chartReady) return;
@@ -838,6 +868,7 @@ function App() {
     const loadCandles = async () => {
       setLoading(true);
       setError(null);
+      clearHoveredCandle();
 
       try {
         const response = await fetch(
@@ -852,7 +883,7 @@ function App() {
 
         if (!canceled) {
           setCandles(data.candles ?? []);
-          setHoveredCandle(null);
+          clearHoveredCandle();
         }
       } catch {
         if (!canceled) {
@@ -870,7 +901,7 @@ function App() {
     return () => {
       canceled = true;
     };
-  }, [selectedSymbol, selectedInterval]);
+  }, [clearHoveredCandle, selectedSymbol, selectedInterval]);
 
   const quoteTargetSymbols = useMemo(() => {
     const set = new Set<string>();
@@ -1020,6 +1051,30 @@ function App() {
   const selectedQuote = quotes[selectedSymbol];
   const latestCandle = candles.at(-1) ?? null;
   const displayCandle = hoveredCandle ?? latestCandle;
+  const hoveredCandleDiff = hoveredCandle ? hoveredCandle.close - hoveredCandle.open : 0;
+  const hoveredCandleDiffPercent =
+    hoveredCandle && hoveredCandle.open !== 0 ? ((hoveredCandle.close - hoveredCandle.open) / hoveredCandle.open) * 100 : 0;
+  const hoverTooltipStyle = useMemo(() => {
+    if (!hoveredPoint) return null;
+
+    const chartWidth = containerRef.current?.clientWidth ?? 0;
+    const chartHeight = containerRef.current?.clientHeight ?? 0;
+    let left = hoveredPoint.x + HOVER_TOOLTIP_MARGIN;
+    let top = hoveredPoint.y + HOVER_TOOLTIP_MARGIN;
+
+    if (chartWidth > 0 && left + HOVER_TOOLTIP_WIDTH > chartWidth - 6) {
+      left = hoveredPoint.x - HOVER_TOOLTIP_WIDTH - HOVER_TOOLTIP_MARGIN;
+    }
+
+    if (chartHeight > 0 && top + HOVER_TOOLTIP_HEIGHT > chartHeight - 6) {
+      top = chartHeight - HOVER_TOOLTIP_HEIGHT - 6;
+    }
+
+    left = Math.max(6, left);
+    top = Math.max(6, top);
+
+    return { left, top };
+  }, [hoveredPoint]);
   const watchlistAlertSymbols = useMemo(
     () =>
       [...new Set(watchlistSymbols.map((item) => item.symbol.trim().toUpperCase()).filter((symbol) => symbol.length > 0))].slice(
@@ -1658,9 +1713,35 @@ function App() {
             </div>
           </div>
 
-          <div className="chart-area">
+          <div className="chart-area" onMouseLeave={clearHoveredCandle}>
             <div className="chart-canvas" ref={containerRef} />
             <div className="vertical-lines-overlay" ref={verticalOverlayRef} />
+            {hoveredCandle && hoverTooltipStyle ? (
+              <div className="candle-hover-tooltip" style={hoverTooltipStyle}>
+                <div className="candle-hover-tooltip-time">{formatCandleDateTime(hoveredCandle.time)}</div>
+                <div className="candle-hover-tooltip-row">
+                  <span>시가 (O)</span>
+                  <strong>{formatPrice(hoveredCandle.open)}</strong>
+                </div>
+                <div className="candle-hover-tooltip-row">
+                  <span>고가 (H)</span>
+                  <strong>{formatPrice(hoveredCandle.high)}</strong>
+                </div>
+                <div className="candle-hover-tooltip-row">
+                  <span>저가 (L)</span>
+                  <strong>{formatPrice(hoveredCandle.low)}</strong>
+                </div>
+                <div className="candle-hover-tooltip-row">
+                  <span>종가 (C)</span>
+                  <strong>{formatPrice(hoveredCandle.close)}</strong>
+                </div>
+                <div className={`candle-hover-tooltip-change ${hoveredCandleDiff >= 0 ? 'up' : 'down'}`}>
+                  {hoveredCandleDiff >= 0 ? '+' : ''}
+                  {hoveredCandleDiff.toFixed(2)} ({hoveredCandleDiffPercent.toFixed(2)}%)
+                </div>
+                <div className="candle-hover-tooltip-volume">거래량 Vol {formatVolume(hoveredCandle.volume)}</div>
+              </div>
+            ) : null}
           </div>
 
           <div className="status-row">
