@@ -1,9 +1,8 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { app } from './index.js';
-
-type AlertRule = {
-  id: string;
-};
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { FastifyInstance } from 'fastify';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -12,31 +11,37 @@ function jsonResponse(payload: unknown, status = 200) {
   });
 }
 
-async function clearAlertRules() {
-  const response = await app.inject({
-    method: 'GET',
-    url: '/api/alerts/rules',
-  });
+let app!: FastifyInstance;
+let stateDir = '';
+let stateFile = '';
 
-  const body = response.json() as { rules?: AlertRule[] };
-  const rules = body.rules ?? [];
+async function createAppInstance() {
+  vi.resetModules();
+  const module = await import('./index.js');
+  return module.app as FastifyInstance;
+}
 
-  await Promise.all(
-    rules.map((rule) =>
-      app.inject({
-        method: 'DELETE',
-        url: `/api/alerts/rules/${rule.id}`,
-      }),
-    ),
-  );
+async function restartAppInstance() {
+  await app.close();
+  app = await createAppInstance();
 }
 
 beforeEach(async () => {
-  await clearAlertRules();
+  stateDir = await mkdtemp(join(tmpdir(), 'tradingservice-api-state-'));
+  stateFile = join(stateDir, 'runtime-state.json');
+  process.env.TRADINGSERVICE_STATE_FILE = stateFile;
+  app = await createAppInstance();
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.restoreAllMocks();
+  if (app) {
+    await app.close();
+  }
+  delete process.env.TRADINGSERVICE_STATE_FILE;
+  if (stateDir) {
+    await rm(stateDir, { recursive: true, force: true });
+  }
 });
 
 describe('api health', () => {
@@ -158,6 +163,22 @@ describe('api market status', () => {
 });
 
 describe('api watchlist persistence', () => {
+  it('returns default watchlist when no state file exists', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/watchlist',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      name: string;
+      items: Array<{ symbol: string }>;
+    };
+
+    expect(body.name).toBe('default');
+    expect(body.items.some((item) => item.symbol === 'BTCUSDT')).toBe(true);
+  });
+
   it('saves and loads default watchlist with normalized symbols', async () => {
     const saveResponse = await app.inject({
       method: 'PUT',
@@ -218,6 +239,57 @@ describe('api watchlist persistence', () => {
 
     expect(loadResponse.statusCode).toBe(200);
     expect(loadResponse.json()).toEqual(saved);
+  });
+
+  it('persists watchlist across app recreation', async () => {
+    const saveResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/watchlist',
+      payload: {
+        name: 'persisted-list',
+        items: [
+          {
+            symbol: 'solusdt',
+            name: ' Solana / USDT ',
+            market: 'CRYPTO',
+            exchange: 'BINANCE',
+          },
+        ],
+      },
+    });
+
+    expect(saveResponse.statusCode).toBe(200);
+    expect(saveResponse.json()).toEqual({
+      name: 'persisted-list',
+      items: [
+        {
+          symbol: 'SOLUSDT',
+          name: 'Solana / USDT',
+          market: 'CRYPTO',
+          exchange: 'BINANCE',
+        },
+      ],
+    });
+
+    await restartAppInstance();
+
+    const loadResponse = await app.inject({
+      method: 'GET',
+      url: '/api/watchlist?name=persisted-list',
+    });
+
+    expect(loadResponse.statusCode).toBe(200);
+    expect(loadResponse.json()).toEqual({
+      name: 'persisted-list',
+      items: [
+        {
+          symbol: 'SOLUSDT',
+          name: 'Solana / USDT',
+          market: 'CRYPTO',
+          exchange: 'BINANCE',
+        },
+      ],
+    });
   });
 
   it('supports custom watchlist names', async () => {
@@ -424,6 +496,81 @@ describe('api alerts rules', () => {
     expect(secondBody.suppressedByCooldown).toBe(1);
     expect(secondBody.triggered).toHaveLength(1);
     expect(secondBody.triggered[0].metric).toBe('changePercent');
+  });
+
+  it('persists alert cooldown and lastTriggeredAt across app recreation', async () => {
+    const nowSpy = vi.spyOn(Date, 'now');
+    nowSpy.mockReturnValue(1_750_000_000_000);
+
+    const createRule = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'BTCUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 100,
+        cooldownSec: 120,
+      },
+    });
+
+    expect(createRule.statusCode).toBe(201);
+
+    const firstCheck = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check',
+      payload: {
+        symbol: 'BTCUSDT',
+        values: {
+          symbol: 'BTCUSDT',
+          lastPrice: 200,
+          changePercent: 0.2,
+        },
+      },
+    });
+
+    expect(firstCheck.statusCode).toBe(200);
+    const firstBody = firstCheck.json() as {
+      evaluatedAt: number;
+      triggeredCount: number;
+      suppressedByCooldown: number;
+    };
+    expect(firstBody.triggeredCount).toBe(1);
+    expect(firstBody.suppressedByCooldown).toBe(0);
+
+    await restartAppInstance();
+
+    nowSpy.mockReturnValue(1_750_000_030_000);
+
+    const secondCheck = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check',
+      payload: {
+        symbol: 'BTCUSDT',
+        values: {
+          symbol: 'BTCUSDT',
+          lastPrice: 200,
+          changePercent: 0.2,
+        },
+      },
+    });
+
+    expect(secondCheck.statusCode).toBe(200);
+    const secondBody = secondCheck.json() as {
+      triggeredCount: number;
+      suppressedByCooldown: number;
+    };
+    expect(secondBody.triggeredCount).toBe(0);
+    expect(secondBody.suppressedByCooldown).toBe(1);
+
+    const listResponse = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/rules?symbol=BTCUSDT',
+    });
+
+    expect(listResponse.statusCode).toBe(200);
+    const listedRule = (listResponse.json() as { rules: Array<{ lastTriggeredAt: number | null }> }).rules[0];
+    expect(listedRule.lastTriggeredAt).toBe(firstBody.evaluatedAt);
   });
 });
 
@@ -725,6 +872,50 @@ describe('api drawings persistence', () => {
     });
   });
 
+  it('persists drawings across app recreation', async () => {
+    const saveResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/drawings',
+      payload: {
+        symbol: 'ethusdt',
+        interval: '240',
+        drawings: [
+          { id: 'persist-h', type: 'horizontal', price: 2500 },
+          { id: 'persist-v', type: 'vertical', time: 1735700000 },
+        ],
+      },
+    });
+
+    expect(saveResponse.statusCode).toBe(200);
+    expect(saveResponse.json()).toEqual({
+      symbol: 'ETHUSDT',
+      interval: '240',
+      drawings: [
+        { id: 'persist-h', type: 'horizontal', price: 2500 },
+        { id: 'persist-v', type: 'vertical', time: 1735700000 },
+      ],
+      lines: [{ id: 'persist-h', price: 2500 }],
+    });
+
+    await restartAppInstance();
+
+    const loadResponse = await app.inject({
+      method: 'GET',
+      url: '/api/drawings?symbol=ETHUSDT&interval=240',
+    });
+
+    expect(loadResponse.statusCode).toBe(200);
+    expect(loadResponse.json()).toEqual({
+      symbol: 'ETHUSDT',
+      interval: '240',
+      drawings: [
+        { id: 'persist-h', type: 'horizontal', price: 2500 },
+        { id: 'persist-v', type: 'vertical', time: 1735700000 },
+      ],
+      lines: [{ id: 'persist-h', price: 2500 }],
+    });
+  });
+
   it('rejects invalid drawings query/body payloads', async () => {
     const invalidQuery = await app.inject({
       method: 'GET',
@@ -757,9 +948,4 @@ describe('api drawings persistence', () => {
 
     expect(invalidVerticalDrawing.statusCode).toBe(400);
   });
-});
-
-afterAll(async () => {
-  await clearAlertRules();
-  await app.close();
 });

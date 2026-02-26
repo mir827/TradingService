@@ -1,5 +1,7 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 
@@ -127,6 +129,8 @@ const candleCache = new Map<string, { expiresAt: number; value: Candle[] }>();
 const alertRuleStore = new Map<string, AlertRule>();
 const drawingStore = new Map<string, DrawingItem[]>();
 const watchlistStore = new Map<string, SymbolItem[]>();
+const DEFAULT_RUNTIME_STATE_FILE = './outputs/runtime-state.json';
+const RUNTIME_STATE_VERSION = 1;
 
 const cryptoIntervalMap: Record<string, string> = {
   '1': '1m',
@@ -288,6 +292,37 @@ const alertCheckWatchlistBodySchema = z.object({
   symbols: z.array(z.string().trim().min(1)).min(1).max(40),
 });
 
+const persistedAlertRuleSchema = z.object({
+  id: z.string().trim().min(1),
+  symbol: z.string().trim().min(1),
+  metric: z.enum(['price', 'changePercent']),
+  operator: z.enum(['>=', '<=', '>', '<']),
+  threshold: z.coerce.number().finite(),
+  cooldownSec: z.coerce.number().int().min(0).max(86400),
+  createdAt: z.coerce.number().int().nonnegative(),
+  lastTriggeredAt: z.union([z.coerce.number().int().nonnegative(), z.null()]),
+});
+
+const persistedWatchlistEntrySchema = z.object({
+  name: z.string().trim().min(1),
+  items: z.array(z.unknown()),
+});
+
+const persistedDrawingEntrySchema = z.object({
+  symbol: z.string().trim().min(1),
+  interval: z.string().trim().min(1),
+  drawings: z.array(z.unknown()),
+});
+
+const persistedRuntimeStateSchema = z
+  .object({
+    version: z.coerce.number().int().min(1).optional(),
+    alertRules: z.array(z.unknown()).optional(),
+    watchlists: z.array(z.unknown()).optional(),
+    drawings: z.array(z.unknown()).optional(),
+  })
+  .passthrough();
+
 function stripTags(html: string) {
   return html
     .replace(/<[^>]*>/g, ' ')
@@ -348,6 +383,11 @@ function normalizeInterval(interval: string) {
   return interval.trim().toUpperCase();
 }
 
+function resolveRuntimeStateFilePath() {
+  const overridePath = process.env.TRADINGSERVICE_STATE_FILE?.trim();
+  return resolve(process.cwd(), overridePath || DEFAULT_RUNTIME_STATE_FILE);
+}
+
 function normalizeSymbolItem(item: SymbolItem): SymbolItem {
   const code = item.code?.trim();
   const exchange = item.exchange?.trim();
@@ -386,6 +426,18 @@ function setWatchlistItems(name: string, items: SymbolItem[]) {
 
 function createDrawingStoreKey(symbol: string, interval: string) {
   return `${symbol}:${interval}`;
+}
+
+function parseDrawingStoreKey(key: string) {
+  const separatorIndex = key.indexOf(':');
+  if (separatorIndex <= 0 || separatorIndex >= key.length - 1) {
+    return null;
+  }
+
+  return {
+    symbol: key.slice(0, separatorIndex),
+    interval: key.slice(separatorIndex + 1),
+  };
 }
 
 function createDrawingLineId() {
@@ -434,6 +486,185 @@ function toLegacyDrawingLines(drawings: DrawingItem[]): DrawingLine[] {
       id: drawing.id,
       price: drawing.price,
     }));
+}
+
+function createRuntimeStatePayload() {
+  return {
+    version: RUNTIME_STATE_VERSION,
+    alertRules: [...alertRuleStore.values()].map(serializeAlertRule),
+    watchlists: [...watchlistStore.entries()].map(([name, items]) => ({
+      name,
+      items: items.map(cloneSymbolItem),
+    })),
+    drawings: [...drawingStore.entries()]
+      .map(([key, drawings]) => {
+        const parsedKey = parseDrawingStoreKey(key);
+        if (!parsedKey) {
+          return null;
+        }
+
+        return {
+          symbol: parsedKey.symbol,
+          interval: parsedKey.interval,
+          drawings: drawings.map((drawing) => ({ ...drawing })),
+        };
+      })
+      .filter((entry): entry is { symbol: string; interval: string; drawings: DrawingItem[] } => Boolean(entry)),
+  };
+}
+
+async function writeRuntimeStateFile() {
+  const stateFile = resolveRuntimeStateFilePath();
+  const tempFile = `${stateFile}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  try {
+    await mkdir(dirname(stateFile), { recursive: true });
+    await writeFile(tempFile, `${JSON.stringify(createRuntimeStatePayload(), null, 2)}\n`, 'utf8');
+    await rename(tempFile, stateFile);
+  } catch (error) {
+    app.log.warn({ error, stateFile }, 'Unable to persist runtime state');
+    try {
+      await rm(tempFile, { force: true });
+    } catch {}
+  }
+}
+
+let persistRuntimeStateQueue: Promise<void> = Promise.resolve();
+
+function persistRuntimeState() {
+  persistRuntimeStateQueue = persistRuntimeStateQueue.then(async () => {
+    await writeRuntimeStateFile();
+  });
+  return persistRuntimeStateQueue;
+}
+
+async function loadRuntimeStateFromDisk() {
+  const stateFile = resolveRuntimeStateFilePath();
+  let rawState = '';
+
+  try {
+    rawState = await readFile(stateFile, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+
+    app.log.warn({ error, stateFile }, 'Unable to read runtime state file. Starting with empty state.');
+    return;
+  }
+
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(rawState);
+  } catch (error) {
+    app.log.warn({ error, stateFile }, 'Runtime state file is malformed JSON. Starting with empty state.');
+    return;
+  }
+
+  const parsedState = persistedRuntimeStateSchema.safeParse(parsedJson);
+  if (!parsedState.success) {
+    app.log.warn(
+      { stateFile, issues: parsedState.error.issues },
+      'Runtime state file failed validation. Starting with empty state.',
+    );
+    return;
+  }
+
+  alertRuleStore.clear();
+  watchlistStore.clear();
+  drawingStore.clear();
+
+  let skippedAlertRules = 0;
+  for (const rawRule of parsedState.data.alertRules ?? []) {
+    const parsedRule = persistedAlertRuleSchema.safeParse(rawRule);
+    if (!parsedRule.success) {
+      skippedAlertRules += 1;
+      continue;
+    }
+
+    const normalizedRule: AlertRule = {
+      id: parsedRule.data.id.trim(),
+      symbol: normalizeSymbol(parsedRule.data.symbol),
+      metric: parsedRule.data.metric,
+      operator: parsedRule.data.operator,
+      threshold: parsedRule.data.threshold,
+      cooldownSec: parsedRule.data.cooldownSec,
+      createdAt: parsedRule.data.createdAt,
+      lastTriggeredAt: parsedRule.data.lastTriggeredAt,
+    };
+
+    alertRuleStore.set(normalizedRule.id, normalizedRule);
+  }
+
+  let skippedWatchlists = 0;
+  let skippedWatchlistItems = 0;
+  for (const rawWatchlist of parsedState.data.watchlists ?? []) {
+    const parsedWatchlist = persistedWatchlistEntrySchema.safeParse(rawWatchlist);
+    if (!parsedWatchlist.success) {
+      skippedWatchlists += 1;
+      continue;
+    }
+
+    const name = normalizeWatchlistName(parsedWatchlist.data.name);
+    const normalizedItems: SymbolItem[] = [];
+
+    for (const rawItem of parsedWatchlist.data.items) {
+      const parsedItem = symbolItemSchema.safeParse(rawItem);
+      if (!parsedItem.success) {
+        skippedWatchlistItems += 1;
+        continue;
+      }
+
+      normalizedItems.push(normalizeSymbolItem(parsedItem.data));
+    }
+
+    watchlistStore.set(name, normalizedItems.map(cloneSymbolItem));
+  }
+
+  let skippedDrawingCollections = 0;
+  let skippedDrawings = 0;
+  for (const rawDrawingEntry of parsedState.data.drawings ?? []) {
+    const parsedDrawingEntry = persistedDrawingEntrySchema.safeParse(rawDrawingEntry);
+    if (!parsedDrawingEntry.success) {
+      skippedDrawingCollections += 1;
+      continue;
+    }
+
+    const symbol = normalizeSymbol(parsedDrawingEntry.data.symbol);
+    const interval = normalizeInterval(parsedDrawingEntry.data.interval);
+    const normalizedDrawings: DrawingItem[] = [];
+
+    for (const rawDrawing of parsedDrawingEntry.data.drawings) {
+      const parsedDrawing = drawingItemSchema.safeParse(rawDrawing);
+      if (!parsedDrawing.success) {
+        skippedDrawings += 1;
+        continue;
+      }
+
+      normalizedDrawings.push(...normalizeDrawingItems([parsedDrawing.data]));
+    }
+
+    drawingStore.set(createDrawingStoreKey(symbol, interval), normalizedDrawings);
+  }
+
+  app.log.info(
+    {
+      stateFile,
+      restored: {
+        alertRules: alertRuleStore.size,
+        watchlists: watchlistStore.size,
+        drawingSets: drawingStore.size,
+      },
+      skipped: {
+        alertRules: skippedAlertRules,
+        watchlists: skippedWatchlists,
+        watchlistItems: skippedWatchlistItems,
+        drawingCollections: skippedDrawingCollections,
+        drawings: skippedDrawings,
+      },
+    },
+    'Loaded runtime state from disk',
+  );
 }
 
 function getKrxStatus(checkedAt: number): Omit<MarketStatusPayload, 'market' | 'checkedAt'> {
@@ -833,6 +1064,12 @@ async function fetchLiveQuote(symbol: string) {
 }
 
 try {
+  await loadRuntimeStateFromDisk();
+} catch (error) {
+  app.log.warn({ error }, 'Unable to restore runtime state. Starting with empty state.');
+}
+
+try {
   await refreshKrxSymbols();
   app.log.info(`Loaded ${krxSymbols.length} KRX symbols`);
 } catch (error) {
@@ -879,6 +1116,7 @@ app.put('/api/watchlist', async (request, reply) => {
 
   const name = normalizeWatchlistName(parsed.data.name);
   const items = setWatchlistItems(name, parsed.data.items);
+  await persistRuntimeState();
 
   return {
     name,
@@ -1021,6 +1259,7 @@ app.put('/api/drawings', async (request, reply) => {
     : normalizeDrawingLines(parsed.data.lines ?? []);
 
   drawingStore.set(key, drawings);
+  await persistRuntimeState();
 
   return { symbol, interval, drawings, lines: toLegacyDrawingLines(drawings) };
 });
@@ -1061,6 +1300,7 @@ app.post('/api/alerts/rules', async (request, reply) => {
   };
 
   alertRuleStore.set(rule.id, rule);
+  await persistRuntimeState();
 
   return reply.code(201).send({ rule: serializeAlertRule(rule) });
 });
@@ -1078,6 +1318,7 @@ app.delete('/api/alerts/rules/:id', async (request, reply) => {
   }
 
   alertRuleStore.delete(parsed.data.id);
+  await persistRuntimeState();
   return { ok: true };
 });
 
@@ -1138,6 +1379,9 @@ app.post('/api/alerts/check', async (request, reply) => {
 
   const now = Date.now();
   const { triggered, suppressedByCooldown } = evaluateAlertRules(rules, quoteBySymbol, now);
+  if (triggered.length > 0) {
+    await persistRuntimeState();
+  }
 
   return {
     evaluatedAt: now,
@@ -1177,6 +1421,9 @@ app.post('/api/alerts/check-watchlist', async (request, reply) => {
   const rules = [...alertRuleStore.values()].filter((rule) => checkedSet.has(rule.symbol));
   const checkedAt = Date.now();
   const { triggered } = evaluateAlertRules(rules, quoteBySymbol, checkedAt);
+  if (triggered.length > 0) {
+    await persistRuntimeState();
+  }
 
   return {
     checkedAt,
