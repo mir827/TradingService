@@ -49,6 +49,22 @@ type Quote = {
   volume: number;
 };
 
+type MarketStatusState = 'OPEN' | 'CLOSED';
+type MarketStatusReason = 'WEEKEND' | 'OUT_OF_SESSION' | 'SESSION_ACTIVE';
+
+type MarketStatus = {
+  market: MarketType;
+  status: MarketStatusState;
+  reason: MarketStatusReason;
+  checkedAt: number;
+  timezone: string;
+  session: {
+    open: string;
+    close: string;
+    text: string;
+  };
+};
+
 type AlertMetric = 'price' | 'changePercent';
 type AlertOperator = '>=' | '<=' | '>' | '<';
 
@@ -181,6 +197,12 @@ function formatAlertValue(metric: AlertMetric, value: number) {
   return `${value.toFixed(2)}%`;
 }
 
+function formatMarketStatusReason(reason: MarketStatusReason) {
+  if (reason === 'WEEKEND') return '주말';
+  if (reason === 'OUT_OF_SESSION') return '장외 시간';
+  return '세션 진행중';
+}
+
 function App() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -195,6 +217,8 @@ function App() {
   const [selectedInterval, setSelectedInterval] = useState('60');
   const [candles, setCandles] = useState<Candle[]>([]);
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
+  const [marketStatus, setMarketStatus] = useState<MarketStatus | null>(null);
+  const [marketStatusError, setMarketStatusError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -580,6 +604,38 @@ function App() {
     () => watchlistSymbols.find((item) => item.symbol === selectedSymbol) ?? searchResults.find((item) => item.symbol === selectedSymbol),
     [searchResults, selectedSymbol, watchlistSymbols],
   );
+  const selectedMarket = selectedSymbolMeta?.market ?? 'CRYPTO';
+
+  useEffect(() => {
+    let canceled = false;
+
+    const loadMarketStatus = async () => {
+      setMarketStatusError(null);
+
+      try {
+        const response = await fetch(
+          `${apiBase}/api/market-status?market=${encodeURIComponent(selectedMarket)}`,
+        );
+        if (!response.ok) throw new Error('market status fetch failed');
+
+        const data = (await response.json()) as MarketStatus;
+        if (!canceled) {
+          setMarketStatus(data);
+        }
+      } catch {
+        if (!canceled) {
+          setMarketStatus(null);
+          setMarketStatusError('시장 상태 확인 실패');
+        }
+      }
+    };
+
+    void loadMarketStatus();
+
+    return () => {
+      canceled = true;
+    };
+  }, [selectedMarket, selectedSymbol]);
 
   const watchlist = useMemo(
     () =>
@@ -654,6 +710,11 @@ function App() {
   const priceDiff = displayCandle ? displayCandle.close - displayCandle.open : 0;
   const priceDiffPercent =
     displayCandle && displayCandle.open !== 0 ? ((displayCandle.close - displayCandle.open) / displayCandle.open) * 100 : 0;
+  const marketStatusBadgeText = marketStatus?.status === 'OPEN' ? '장중' : marketStatus?.status === 'CLOSED' ? '휴장' : '상태확인';
+  const marketStatusBadgeClass = marketStatus?.status === 'OPEN' ? 'open' : marketStatus?.status === 'CLOSED' ? 'closed' : 'pending';
+  const marketStatusHint = marketStatus
+    ? `${formatMarketStatusReason(marketStatus.reason)} · ${marketStatus.session.text} · ${marketStatus.timezone}`
+    : marketStatusError ?? '시장 상태 확인 중...';
 
   const toggleWatchSort = (key: WatchSortKey) => {
     if (watchSortKey === key) {
@@ -852,7 +913,6 @@ function App() {
     }
   }, [clearHorizontalLines, selectedInterval, selectedSymbol]);
 
-  const selectedMarket = selectedSymbolMeta?.market ?? 'CRYPTO';
   const selectedCode = selectedSymbolMeta ? getDisplayCode(selectedSymbolMeta) : shortTicker(selectedSymbol);
   const selectedName = selectedSymbolMeta?.name ?? shortTicker(selectedSymbol);
   const exchangeText = marketExchangeText(selectedMarket);
@@ -929,9 +989,13 @@ function App() {
         <section className="center-panel">
           <div className="chart-header">
             <div className="chart-title-block">
-              <strong>
+              <strong className="chart-title-main">
                 {selectedCode} · {selectedName} · {selectedInterval}
               </strong>
+              <div className="market-status-row">
+                <span className={`market-status-badge ${marketStatusBadgeClass}`}>{marketStatusBadgeText}</span>
+                <span className="market-status-text">{marketStatusHint}</span>
+              </div>
               <span>{exchangeText} · 실시간 데이터</span>
             </div>
 

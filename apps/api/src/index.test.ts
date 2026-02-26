@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { app } from './index.js';
 
 type AlertRule = {
@@ -28,6 +28,10 @@ beforeEach(async () => {
   await clearAlertRules();
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe('api health', () => {
   it('returns service status', async () => {
     const response = await app.inject({
@@ -46,6 +50,103 @@ describe('api health', () => {
     expect(body.ok).toBe(true);
     expect(body.service).toBe('tradingservice-api');
     expect(typeof body.krxSymbolCount).toBe('number');
+  });
+});
+
+describe('api market status', () => {
+  it('returns KOSPI open in-session and closed out-of-session on weekday', async () => {
+    const nowSpy = vi.spyOn(Date, 'now');
+    const inSession = new Date('2025-02-24T10:00:00+09:00').getTime();
+    nowSpy.mockReturnValue(inSession);
+
+    const openResponse = await app.inject({
+      method: 'GET',
+      url: '/api/market-status?market=KOSPI',
+    });
+
+    expect(openResponse.statusCode).toBe(200);
+    expect(openResponse.json()).toEqual({
+      market: 'KOSPI',
+      status: 'OPEN',
+      reason: 'SESSION_ACTIVE',
+      checkedAt: inSession,
+      timezone: 'Asia/Seoul',
+      session: {
+        open: '09:00',
+        close: '15:30',
+        text: '09:00-15:30 KST',
+      },
+    });
+
+    const outOfSession = new Date('2025-02-24T08:40:00+09:00').getTime();
+    nowSpy.mockReturnValue(outOfSession);
+
+    const closedResponse = await app.inject({
+      method: 'GET',
+      url: '/api/market-status?market=KOSPI',
+    });
+
+    expect(closedResponse.statusCode).toBe(200);
+    expect(closedResponse.json()).toEqual({
+      market: 'KOSPI',
+      status: 'CLOSED',
+      reason: 'OUT_OF_SESSION',
+      checkedAt: outOfSession,
+      timezone: 'Asia/Seoul',
+      session: {
+        open: '09:00',
+        close: '15:30',
+        text: '09:00-15:30 KST',
+      },
+    });
+  });
+
+  it('returns KOSDAQ closed on weekend', async () => {
+    const weekend = new Date('2025-02-23T11:00:00+09:00').getTime();
+    vi.spyOn(Date, 'now').mockReturnValue(weekend);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/market-status?market=KOSDAQ',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      market: 'KOSDAQ',
+      status: 'CLOSED',
+      reason: 'WEEKEND',
+      checkedAt: weekend,
+      timezone: 'Asia/Seoul',
+      session: {
+        open: '09:00',
+        close: '15:30',
+        text: '09:00-15:30 KST',
+      },
+    });
+  });
+
+  it('returns CRYPTO open 24/7', async () => {
+    const checkedAt = new Date('2025-02-23T11:00:00+09:00').getTime();
+    vi.spyOn(Date, 'now').mockReturnValue(checkedAt);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/market-status?market=CRYPTO',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      market: 'CRYPTO',
+      status: 'OPEN',
+      reason: 'SESSION_ACTIVE',
+      checkedAt,
+      timezone: 'UTC',
+      session: {
+        open: '00:00',
+        close: '23:59',
+        text: '24/7',
+      },
+    });
   });
 });
 

@@ -45,6 +45,22 @@ type AlertRule = {
   lastTriggeredAt: number | null;
 };
 
+type MarketStatusState = 'OPEN' | 'CLOSED';
+type MarketStatusReason = 'WEEKEND' | 'OUT_OF_SESSION' | 'SESSION_ACTIVE';
+
+type MarketStatusPayload = {
+  market: MarketType;
+  status: MarketStatusState;
+  reason: MarketStatusReason;
+  checkedAt: number;
+  timezone: string;
+  session: {
+    open: string;
+    close: string;
+    text: string;
+  };
+};
+
 export const app = Fastify({ logger: true });
 
 await app.register(cors, {
@@ -122,6 +138,21 @@ const krxRangeMap: Record<string, string> = {
   '1W': '5y',
 };
 
+const KRX_TIMEZONE = 'Asia/Seoul';
+const KRX_SESSION_OPEN = '09:00';
+const KRX_SESSION_CLOSE = '15:30';
+const KRX_SESSION_TEXT = `${KRX_SESSION_OPEN}-${KRX_SESSION_CLOSE} KST`;
+const KRX_SESSION_OPEN_MINUTE = 9 * 60;
+const KRX_SESSION_CLOSE_MINUTE = 15 * 60 + 30;
+
+const krxTimeFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: KRX_TIMEZONE,
+  weekday: 'short',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+});
+
 const candleQuerySchema = z.object({
   symbol: z.string().default('BTCUSDT'),
   interval: z.string().default('60'),
@@ -130,6 +161,10 @@ const candleQuerySchema = z.object({
 
 const quoteQuerySchema = z.object({
   symbol: z.string().default('BTCUSDT'),
+});
+
+const marketStatusQuerySchema = z.object({
+  market: z.enum(['CRYPTO', 'KOSPI', 'KOSDAQ']),
 });
 
 const searchQuerySchema = z.object({
@@ -215,6 +250,50 @@ function createAlertRuleId() {
 
 function normalizeSymbol(symbol: string) {
   return symbol.trim().toUpperCase();
+}
+
+function getKrxStatus(checkedAt: number): Omit<MarketStatusPayload, 'market' | 'checkedAt'> {
+  const parts = krxTimeFormatter.formatToParts(new Date(checkedAt));
+  const weekday = parts.find((part) => part.type === 'weekday')?.value ?? '';
+  const hour = Number(parts.find((part) => part.type === 'hour')?.value ?? '0');
+  const minute = Number(parts.find((part) => part.type === 'minute')?.value ?? '0');
+  const currentMinute = hour * 60 + minute;
+  const weekend = weekday === 'Sat' || weekday === 'Sun';
+  const inSession = currentMinute >= KRX_SESSION_OPEN_MINUTE && currentMinute <= KRX_SESSION_CLOSE_MINUTE;
+
+  return {
+    status: !weekend && inSession ? 'OPEN' : 'CLOSED',
+    reason: weekend ? 'WEEKEND' : inSession ? 'SESSION_ACTIVE' : 'OUT_OF_SESSION',
+    timezone: KRX_TIMEZONE,
+    session: {
+      open: KRX_SESSION_OPEN,
+      close: KRX_SESSION_CLOSE,
+      text: KRX_SESSION_TEXT,
+    },
+  };
+}
+
+function getMarketStatus(market: MarketType, checkedAt = Date.now()): MarketStatusPayload {
+  if (market === 'CRYPTO') {
+    return {
+      market,
+      status: 'OPEN',
+      reason: 'SESSION_ACTIVE',
+      checkedAt,
+      timezone: 'UTC',
+      session: {
+        open: '00:00',
+        close: '23:59',
+        text: '24/7',
+      },
+    };
+  }
+
+  return {
+    market,
+    checkedAt,
+    ...getKrxStatus(checkedAt),
+  };
 }
 
 function serializeAlertRule(rule: AlertRule) {
@@ -638,6 +717,16 @@ app.get('/api/quote', async (request, reply) => {
     app.log.error({ error, symbol }, 'Failed to fetch quote');
     return reply.code(502).send({ error: 'Failed to fetch quote data from upstream exchange' });
   }
+});
+
+app.get('/api/market-status', async (request, reply) => {
+  const parsed = marketStatusQuerySchema.safeParse(request.query);
+
+  if (!parsed.success) {
+    return reply.code(400).send({ error: 'Invalid query', detail: parsed.error.format() });
+  }
+
+  return getMarketStatus(parsed.data.market, Date.now());
 });
 
 app.get('/api/alerts/rules', async (request, reply) => {

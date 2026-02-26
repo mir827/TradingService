@@ -207,16 +207,63 @@ select {
 .chart-title-block {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
 }
 
 .chart-title-block strong {
   font-size: 14px;
 }
 
+.chart-title-main {
+  line-height: 1.2;
+}
+
 .chart-title-block span {
   font-size: 11px;
   color: #7f8797;
+}
+
+.market-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 18px;
+}
+
+.market-status-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  line-height: 1.2;
+}
+
+.market-status-badge.open {
+  color: #7df0c4;
+  background: #143127;
+  border-color: #1f5d47;
+}
+
+.market-status-badge.closed {
+  color: #ffb3b3;
+  background: #3a1f27;
+  border-color: #6f3341;
+}
+
+.market-status-badge.pending {
+  color: #9fb0ca;
+  background: #20273a;
+  border-color: #34405a;
+}
+
+.market-status-text {
+  font-size: 11px;
+  color: #8f97a7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 360px;
 }
 
 .chart-meta {
@@ -750,6 +797,10 @@ select {
 
   .watch-search-wrap input {
     padding: 6px 8px;
+  }
+
+  .market-status-text {
+    max-width: 220px;
   }
 }
 
