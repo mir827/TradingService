@@ -91,6 +91,7 @@ type AlertCheckEvent = {
 };
 
 type AlertHistorySource = 'manual' | 'watchlist';
+type AlertHistorySourceFilter = 'all' | AlertHistorySource;
 
 type AlertHistoryEvent = AlertCheckEvent & {
   source?: AlertHistorySource;
@@ -346,6 +347,8 @@ function App() {
   const [alertTriggeredEvents, setAlertTriggeredEvents] = useState<AlertCheckEvent[]>([]);
   const [alertLastCheckedAt, setAlertLastCheckedAt] = useState<number | null>(null);
   const [alertHistoryEvents, setAlertHistoryEvents] = useState<AlertHistoryEvent[]>([]);
+  const [alertHistorySymbolFilter, setAlertHistorySymbolFilter] = useState('');
+  const [alertHistorySourceFilter, setAlertHistorySourceFilter] = useState<AlertHistorySourceFilter>('all');
   const [alertsHistoryLoading, setAlertsHistoryLoading] = useState(false);
   const [alertsHistoryClearing, setAlertsHistoryClearing] = useState(false);
 
@@ -1032,7 +1035,18 @@ function App() {
     setAlertsHistoryLoading(true);
 
     try {
-      const response = await fetch(`${apiBase}/api/alerts/history?limit=50`);
+      const params = new URLSearchParams({ limit: '50' });
+      const normalizedSymbol = alertHistorySymbolFilter.trim().toUpperCase();
+
+      if (normalizedSymbol) {
+        params.set('symbol', normalizedSymbol);
+      }
+
+      if (alertHistorySourceFilter !== 'all') {
+        params.set('source', alertHistorySourceFilter);
+      }
+
+      const response = await fetch(`${apiBase}/api/alerts/history?${params.toString()}`);
       if (!response.ok) throw new Error('alert history fetch failed');
 
       const data = (await response.json()) as { events?: AlertHistoryEvent[] };
@@ -1043,7 +1057,7 @@ function App() {
     } finally {
       setAlertsHistoryLoading(false);
     }
-  }, []);
+  }, [alertHistorySourceFilter, alertHistorySymbolFilter]);
 
   useEffect(() => {
     setAlertMessage(null);
@@ -2199,13 +2213,44 @@ function App() {
                   <div className="alert-history">
                     <div className="alert-history-head">
                       <div className="alert-triggered-title">최근 알림 히스토리</div>
-                      <button
-                        type="button"
-                        onClick={handleClearAlertHistory}
-                        disabled={alertsHistoryClearing || alertsHistoryLoading || alertHistoryEvents.length === 0}
-                      >
-                        {alertsHistoryClearing ? '비우는 중...' : '히스토리 비우기'}
-                      </button>
+                      <div className="alert-history-head-actions">
+                        <button
+                          type="button"
+                          onClick={() => void loadAlertHistory()}
+                          disabled={alertsHistoryLoading || alertsHistoryClearing}
+                        >
+                          {alertsHistoryLoading ? '불러오는 중...' : '새로고침'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleClearAlertHistory}
+                          disabled={alertsHistoryClearing || alertsHistoryLoading || alertHistoryEvents.length === 0}
+                        >
+                          {alertsHistoryClearing ? '비우는 중...' : '히스토리 비우기'}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="alert-history-controls">
+                      <label>
+                        <span>심볼</span>
+                        <input
+                          type="text"
+                          value={alertHistorySymbolFilter}
+                          onChange={(event) => setAlertHistorySymbolFilter(event.target.value.toUpperCase())}
+                          placeholder="예: BTCUSDT"
+                        />
+                      </label>
+                      <label>
+                        <span>소스</span>
+                        <select
+                          value={alertHistorySourceFilter}
+                          onChange={(event) => setAlertHistorySourceFilter(event.target.value as AlertHistorySourceFilter)}
+                        >
+                          <option value="all">all</option>
+                          <option value="manual">manual</option>
+                          <option value="watchlist">watchlist</option>
+                        </select>
+                      </label>
                     </div>
                     {alertsHistoryLoading ? (
                       <p className="alert-empty">히스토리를 불러오는 중...</p>

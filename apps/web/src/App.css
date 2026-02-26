@@ -916,7 +916,13 @@ select {
   gap: 8px;
 }
 
-.alert-history-head button {
+.alert-history-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.alert-history-head-actions button {
   border: 1px solid #2d4766;
   background: #182638;
   color: #b7d8ff;
@@ -926,9 +932,37 @@ select {
   cursor: pointer;
 }
 
-.alert-history-head button:disabled {
+.alert-history-head-actions button:disabled {
   opacity: 0.55;
   cursor: default;
+}
+
+.alert-history-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px;
+  gap: 8px;
+}
+
+.alert-history-controls label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.alert-history-controls span {
+  font-size: 11px;
+  color: #8d95a5;
+}
+
+.alert-history-controls input,
+.alert-history-controls select {
+  border: 1px solid #2b2f3a;
+  background: #1e222d;
+  color: #d1d4dc;
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 5px 8px;
+  min-width: 0;
 }
 
 .alert-history-meta {
@@ -1006,6 +1040,10 @@ select {
   }
 
   .alert-form-row {
+    grid-template-columns: 1fr;
+  }
+
+  .alert-history-controls {
     grid-template-columns: 1fr;
   }
 }

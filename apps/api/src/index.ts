@@ -61,7 +61,7 @@ type AlertCheckEvent = {
 type AlertHistoryEventSource = 'manual' | 'watchlist';
 
 type AlertHistoryEvent = AlertCheckEvent & {
-  source: AlertHistoryEventSource;
+  source?: AlertHistoryEventSource;
   sourceSymbol?: string;
 };
 
@@ -303,8 +303,18 @@ const alertCheckWatchlistBodySchema = z.object({
 
 const alertHistoryQuerySchema = z.object({
   symbol: z.string().optional(),
+  fromTs: z.coerce.number().int().nonnegative().optional(),
+  toTs: z.coerce.number().int().nonnegative().optional(),
+  source: z.enum(['manual', 'watchlist']).optional(),
   limit: z.coerce.number().int().min(1).default(50).transform((value) => Math.min(value, 200)),
-});
+})
+  .refine(
+    (data) => !(typeof data.fromTs === 'number' && typeof data.toTs === 'number') || data.fromTs <= data.toTs,
+    {
+      message: 'fromTs must be less than or equal to toTs',
+      path: ['fromTs'],
+    },
+  );
 
 const persistedAlertRuleSchema = z.object({
   id: z.string().trim().min(1),
@@ -315,6 +325,19 @@ const persistedAlertRuleSchema = z.object({
   cooldownSec: z.coerce.number().int().min(0).max(86400),
   createdAt: z.coerce.number().int().nonnegative(),
   lastTriggeredAt: z.union([z.coerce.number().int().nonnegative(), z.null()]),
+});
+
+const persistedAlertHistoryEventSchema = z.object({
+  ruleId: z.string().trim().min(1),
+  symbol: z.string().trim().min(1),
+  metric: z.enum(['price', 'changePercent']),
+  operator: z.enum(['>=', '<=', '>', '<']),
+  threshold: z.coerce.number().finite(),
+  currentValue: z.coerce.number().finite(),
+  triggeredAt: z.coerce.number().int().nonnegative(),
+  cooldownSec: z.coerce.number().int().min(0).max(86400),
+  source: z.enum(['manual', 'watchlist']).optional(),
+  sourceSymbol: z.string().trim().min(1).optional(),
 });
 
 const persistedWatchlistEntrySchema = z.object({
@@ -332,6 +355,7 @@ const persistedRuntimeStateSchema = z
   .object({
     version: z.coerce.number().int().min(1).optional(),
     alertRules: z.array(z.unknown()).optional(),
+    alertHistory: z.array(z.unknown()).optional(),
     watchlists: z.array(z.unknown()).optional(),
     drawings: z.array(z.unknown()).optional(),
   })
@@ -502,10 +526,18 @@ function toLegacyDrawingLines(drawings: DrawingItem[]): DrawingLine[] {
     }));
 }
 
+function trimAlertHistoryOverflow() {
+  const overflow = alertHistoryStore.length - ALERT_HISTORY_MAX_EVENTS;
+  if (overflow > 0) {
+    alertHistoryStore.splice(0, overflow);
+  }
+}
+
 function createRuntimeStatePayload() {
   return {
     version: RUNTIME_STATE_VERSION,
     alertRules: [...alertRuleStore.values()].map(serializeAlertRule),
+    alertHistory: alertHistoryStore.map((eventItem) => ({ ...eventItem })),
     watchlists: [...watchlistStore.entries()].map(([name, items]) => ({
       name,
       items: items.map(cloneSymbolItem),
@@ -611,6 +643,33 @@ async function loadRuntimeStateFromDisk() {
     alertRuleStore.set(normalizedRule.id, normalizedRule);
   }
 
+  let skippedAlertHistoryEvents = 0;
+  for (const rawEvent of parsedState.data.alertHistory ?? []) {
+    const parsedEvent = persistedAlertHistoryEventSchema.safeParse(rawEvent);
+    if (!parsedEvent.success) {
+      skippedAlertHistoryEvents += 1;
+      continue;
+    }
+
+    const normalizedEvent: AlertHistoryEvent = {
+      ruleId: parsedEvent.data.ruleId.trim(),
+      symbol: normalizeSymbol(parsedEvent.data.symbol),
+      metric: parsedEvent.data.metric,
+      operator: parsedEvent.data.operator,
+      threshold: parsedEvent.data.threshold,
+      currentValue: parsedEvent.data.currentValue,
+      triggeredAt: parsedEvent.data.triggeredAt,
+      cooldownSec: parsedEvent.data.cooldownSec,
+      ...(parsedEvent.data.source ? { source: parsedEvent.data.source } : {}),
+      ...(parsedEvent.data.sourceSymbol
+        ? { sourceSymbol: normalizeSymbol(parsedEvent.data.sourceSymbol) }
+        : {}),
+    };
+
+    alertHistoryStore.push(normalizedEvent);
+  }
+  trimAlertHistoryOverflow();
+
   let skippedWatchlists = 0;
   let skippedWatchlistItems = 0;
   for (const rawWatchlist of parsedState.data.watchlists ?? []) {
@@ -667,11 +726,13 @@ async function loadRuntimeStateFromDisk() {
       stateFile,
       restored: {
         alertRules: alertRuleStore.size,
+        alertHistoryEvents: alertHistoryStore.length,
         watchlists: watchlistStore.size,
         drawingSets: drawingStore.size,
       },
       skipped: {
         alertRules: skippedAlertRules,
+        alertHistoryEvents: skippedAlertHistoryEvents,
         watchlists: skippedWatchlists,
         watchlistItems: skippedWatchlistItems,
         drawingCollections: skippedDrawingCollections,
@@ -760,17 +821,36 @@ function appendAlertHistoryEvents(
     });
   }
 
-  const overflow = alertHistoryStore.length - ALERT_HISTORY_MAX_EVENTS;
-  if (overflow > 0) {
-    alertHistoryStore.splice(0, overflow);
-  }
+  trimAlertHistoryOverflow();
 }
 
-function getAlertHistory(symbol: string | null, limit: number) {
+function getAlertHistory(
+  symbol: string | null,
+  source: AlertHistoryEventSource | null,
+  fromTs: number | null,
+  toTs: number | null,
+  limit: number,
+) {
   const normalizedSymbol = symbol ? normalizeSymbol(symbol) : null;
-  const filtered = normalizedSymbol
-    ? alertHistoryStore.filter((eventItem) => eventItem.symbol === normalizedSymbol)
-    : alertHistoryStore;
+  const filtered = alertHistoryStore.filter((eventItem) => {
+    if (normalizedSymbol && eventItem.symbol !== normalizedSymbol) {
+      return false;
+    }
+
+    if (source && eventItem.source !== source) {
+      return false;
+    }
+
+    if (typeof fromTs === 'number' && eventItem.triggeredAt < fromTs) {
+      return false;
+    }
+
+    if (typeof toTs === 'number' && eventItem.triggeredAt > toTs) {
+      return false;
+    }
+
+    return true;
+  });
   const total = filtered.length;
   const start = Math.max(total - limit, 0);
 
@@ -1500,7 +1580,10 @@ app.get('/api/alerts/history', async (request, reply) => {
   }
 
   const symbol = parsed.data.symbol ? normalizeSymbol(parsed.data.symbol) : null;
-  const { total, events } = getAlertHistory(symbol, parsed.data.limit);
+  const source = parsed.data.source ?? null;
+  const fromTs = parsed.data.fromTs ?? null;
+  const toTs = parsed.data.toTs ?? null;
+  const { total, events } = getAlertHistory(symbol, source, fromTs, toTs, parsed.data.limit);
 
   return {
     symbol,
@@ -1512,6 +1595,7 @@ app.get('/api/alerts/history', async (request, reply) => {
 
 app.delete('/api/alerts/history', async () => {
   const cleared = clearAlertHistory();
+  await persistRuntimeState();
   return { ok: true, cleared };
 });
 

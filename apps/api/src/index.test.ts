@@ -777,7 +777,11 @@ describe('api alerts watchlist checks', () => {
 });
 
 describe('api alerts history', () => {
-  it('appends manual/watchlist triggered events and supports symbol filtering', async () => {
+  it('appends manual/watchlist triggered events and supports symbol/source/time filters', async () => {
+    const nowSpy = vi.spyOn(Date, 'now');
+    const manualTriggeredAt = 1_750_010_000_000;
+    const watchlistTriggeredAt = 1_750_010_015_000;
+
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const rawUrl =
         typeof input === 'string'
@@ -825,6 +829,8 @@ describe('api alerts history', () => {
     expect(createBtcRule.statusCode).toBe(201);
     expect(createEthRule.statusCode).toBe(201);
 
+    nowSpy.mockReturnValue(manualTriggeredAt);
+
     const manualCheck = await app.inject({
       method: 'POST',
       url: '/api/alerts/check',
@@ -840,6 +846,8 @@ describe('api alerts history', () => {
 
     expect(manualCheck.statusCode).toBe(200);
     expect((manualCheck.json() as { triggeredCount: number }).triggeredCount).toBe(1);
+
+    nowSpy.mockReturnValue(watchlistTriggeredAt);
 
     const watchlistCheck = await app.inject({
       method: 'POST',
@@ -867,6 +875,7 @@ describe('api alerts history', () => {
         metric: string;
         threshold: number;
         currentValue: number;
+        triggeredAt: number;
         source: 'manual' | 'watchlist';
         sourceSymbol?: string;
       }>;
@@ -891,14 +900,16 @@ describe('api alerts history', () => {
       source: 'manual',
       sourceSymbol: 'BTCUSDT',
     });
+    expect(historyBody.events[0].triggeredAt).toBe(watchlistTriggeredAt);
+    expect(historyBody.events[1].triggeredAt).toBe(manualTriggeredAt);
 
-    const filteredResponse = await app.inject({
+    const symbolFilteredResponse = await app.inject({
       method: 'GET',
       url: '/api/alerts/history?symbol=btcusdt&limit=10',
     });
 
-    expect(filteredResponse.statusCode).toBe(200);
-    expect(filteredResponse.json()).toMatchObject({
+    expect(symbolFilteredResponse.statusCode).toBe(200);
+    expect(symbolFilteredResponse.json()).toMatchObject({
       symbol: 'BTCUSDT',
       limit: 10,
       total: 1,
@@ -911,10 +922,82 @@ describe('api alerts history', () => {
       ],
     });
 
+    const manualSourceResponse = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?source=manual&limit=10',
+    });
+
+    expect(manualSourceResponse.statusCode).toBe(200);
+    expect(manualSourceResponse.json()).toMatchObject({
+      symbol: null,
+      limit: 10,
+      total: 1,
+      events: [{ symbol: 'BTCUSDT', source: 'manual', triggeredAt: manualTriggeredAt }],
+    });
+
+    const watchlistSourceResponse = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?source=watchlist&limit=10',
+    });
+
+    expect(watchlistSourceResponse.statusCode).toBe(200);
+    expect(watchlistSourceResponse.json()).toMatchObject({
+      symbol: null,
+      limit: 10,
+      total: 1,
+      events: [{ symbol: 'ETHUSDT', source: 'watchlist', triggeredAt: watchlistTriggeredAt }],
+    });
+
+    const fromTsFilteredResponse = await app.inject({
+      method: 'GET',
+      url: `/api/alerts/history?fromTs=${watchlistTriggeredAt}`,
+    });
+
+    expect(fromTsFilteredResponse.statusCode).toBe(200);
+    expect(fromTsFilteredResponse.json()).toMatchObject({
+      symbol: null,
+      limit: 50,
+      total: 1,
+      events: [{ symbol: 'ETHUSDT', triggeredAt: watchlistTriggeredAt }],
+    });
+
+    const toTsFilteredResponse = await app.inject({
+      method: 'GET',
+      url: `/api/alerts/history?toTs=${manualTriggeredAt}`,
+    });
+
+    expect(toTsFilteredResponse.statusCode).toBe(200);
+    expect(toTsFilteredResponse.json()).toMatchObject({
+      symbol: null,
+      limit: 50,
+      total: 1,
+      events: [{ symbol: 'BTCUSDT', triggeredAt: manualTriggeredAt }],
+    });
+
+    const rangeFilteredResponse = await app.inject({
+      method: 'GET',
+      url: `/api/alerts/history?fromTs=${manualTriggeredAt}&toTs=${watchlistTriggeredAt}&limit=10`,
+    });
+
+    expect(rangeFilteredResponse.statusCode).toBe(200);
+    expect(rangeFilteredResponse.json()).toMatchObject({
+      symbol: null,
+      limit: 10,
+      total: 2,
+      events: [{ triggeredAt: watchlistTriggeredAt }, { triggeredAt: manualTriggeredAt }],
+    });
+
+    const invalidRangeResponse = await app.inject({
+      method: 'GET',
+      url: `/api/alerts/history?fromTs=${watchlistTriggeredAt}&toTs=${manualTriggeredAt}`,
+    });
+
+    expect(invalidRangeResponse.statusCode).toBe(400);
+
     expect(fetchSpy).toHaveBeenCalled();
   });
 
-  it('applies default/max limit and clears history', async () => {
+  it('keeps latest 500 events, applies default/max limit, and clears history', async () => {
     const createRule = await app.inject({
       method: 'POST',
       url: '/api/alerts/rules',
@@ -928,7 +1011,7 @@ describe('api alerts history', () => {
 
     expect(createRule.statusCode).toBe(201);
 
-    for (let i = 0; i < 55; i += 1) {
+    for (let i = 0; i < 520; i += 1) {
       const check = await app.inject({
         method: 'POST',
         url: '/api/alerts/check',
@@ -957,10 +1040,10 @@ describe('api alerts history', () => {
       events: Array<{ currentValue: number }>;
     };
     expect(defaultBody.limit).toBe(50);
-    expect(defaultBody.total).toBe(55);
+    expect(defaultBody.total).toBe(500);
     expect(defaultBody.events).toHaveLength(50);
-    expect(defaultBody.events[0].currentValue).toBe(154);
-    expect(defaultBody.events[49].currentValue).toBe(105);
+    expect(defaultBody.events[0].currentValue).toBe(619);
+    expect(defaultBody.events[49].currentValue).toBe(570);
 
     const maxLimitResponse = await app.inject({
       method: 'GET',
@@ -974,10 +1057,10 @@ describe('api alerts history', () => {
       events: Array<{ currentValue: number }>;
     };
     expect(maxBody.limit).toBe(200);
-    expect(maxBody.total).toBe(55);
-    expect(maxBody.events).toHaveLength(55);
-    expect(maxBody.events[0].currentValue).toBe(154);
-    expect(maxBody.events[54].currentValue).toBe(100);
+    expect(maxBody.total).toBe(500);
+    expect(maxBody.events).toHaveLength(200);
+    expect(maxBody.events[0].currentValue).toBe(619);
+    expect(maxBody.events[199].currentValue).toBe(420);
 
     const filteredResponse = await app.inject({
       method: 'GET',
@@ -988,8 +1071,8 @@ describe('api alerts history', () => {
     expect(filteredResponse.json()).toMatchObject({
       symbol: 'BTCUSDT',
       limit: 3,
-      total: 55,
-      events: [{ currentValue: 154 }, { currentValue: 153 }, { currentValue: 152 }],
+      total: 500,
+      events: [{ currentValue: 619 }, { currentValue: 618 }, { currentValue: 617 }],
     });
 
     const clearResponse = await app.inject({
@@ -998,7 +1081,7 @@ describe('api alerts history', () => {
     });
 
     expect(clearResponse.statusCode).toBe(200);
-    expect(clearResponse.json()).toEqual({ ok: true, cleared: 55 });
+    expect(clearResponse.json()).toEqual({ ok: true, cleared: 500 });
 
     const afterClearResponse = await app.inject({
       method: 'GET',
@@ -1009,6 +1092,91 @@ describe('api alerts history', () => {
     expect(afterClearResponse.json()).toEqual({
       symbol: null,
       limit: 200,
+      total: 0,
+      events: [],
+    });
+  });
+
+  it('persists alert history across app recreation and clear', async () => {
+    const createRule = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'BTCUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 100,
+      },
+    });
+
+    expect(createRule.statusCode).toBe(201);
+
+    const firstCheck = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check',
+      payload: {
+        symbol: 'BTCUSDT',
+        values: {
+          symbol: 'BTCUSDT',
+          lastPrice: 111,
+          changePercent: 0.1,
+        },
+      },
+    });
+
+    const secondCheck = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check',
+      payload: {
+        symbol: 'BTCUSDT',
+        values: {
+          symbol: 'BTCUSDT',
+          lastPrice: 222,
+          changePercent: 0.2,
+        },
+      },
+    });
+
+    expect(firstCheck.statusCode).toBe(200);
+    expect(secondCheck.statusCode).toBe(200);
+
+    await restartAppInstance();
+
+    const afterRestartResponse = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?limit=10',
+    });
+
+    expect(afterRestartResponse.statusCode).toBe(200);
+    expect(afterRestartResponse.json()).toMatchObject({
+      symbol: null,
+      limit: 10,
+      total: 2,
+      events: [
+        { symbol: 'BTCUSDT', currentValue: 222, source: 'manual' },
+        { symbol: 'BTCUSDT', currentValue: 111, source: 'manual' },
+      ],
+    });
+
+    const clearResponse = await app.inject({
+      method: 'DELETE',
+      url: '/api/alerts/history',
+    });
+
+    expect(clearResponse.statusCode).toBe(200);
+    expect(clearResponse.json()).toEqual({ ok: true, cleared: 2 });
+
+    await restartAppInstance();
+
+    const afterClearAndRestartResponse = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?limit=10',
+    });
+
+    expect(afterClearAndRestartResponse.statusCode).toBe(200);
+    expect(afterClearAndRestartResponse.json()).toEqual({
+      symbol: null,
+      limit: 10,
       total: 0,
       events: [],
     });
