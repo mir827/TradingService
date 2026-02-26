@@ -143,7 +143,7 @@ select {
 
 .tv-main {
   display: grid;
-  grid-template-columns: 52px minmax(0, 1fr) 320px;
+  grid-template-columns: 52px minmax(0, 1fr) clamp(260px, 28vw, 320px);
   min-height: 0;
 }
 
@@ -621,14 +621,35 @@ select {
 
 @media (max-width: 1200px) {
   .tv-main {
+    grid-template-columns: 52px minmax(0, 1fr) clamp(220px, 32vw, 260px);
+  }
+
+  .status-time {
+    display: none;
+  }
+}
+
+@media (max-width: 960px) {
+  .tv-main {
+    grid-template-columns: 52px minmax(0, 1fr) 220px;
+  }
+
+  .watch-tabs button {
+    padding: 5px 6px;
+    font-size: 11px;
+  }
+
+  .watch-search-wrap input {
+    padding: 6px 8px;
+  }
+}
+
+@media (max-width: 860px) {
+  .tv-main {
     grid-template-columns: 52px minmax(0, 1fr);
   }
 
   .right-panel {
-    display: none;
-  }
-
-  .status-time {
     display: none;
   }
 }
