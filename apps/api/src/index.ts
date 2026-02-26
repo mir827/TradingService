@@ -31,6 +31,20 @@ type Quote = {
   volume: number;
 };
 
+type AlertMetric = 'price' | 'changePercent';
+type AlertOperator = '>=' | '<=' | '>' | '<';
+
+type AlertRule = {
+  id: string;
+  symbol: string;
+  metric: AlertMetric;
+  operator: AlertOperator;
+  threshold: number;
+  cooldownSec: number;
+  createdAt: number;
+  lastTriggeredAt: number | null;
+};
+
 export const app = Fastify({ logger: true });
 
 await app.register(cors, {
@@ -64,6 +78,7 @@ let krxLoadedAtMs = 0;
 
 const quoteCache = new Map<string, { expiresAt: number; value: Quote }>();
 const candleCache = new Map<string, { expiresAt: number; value: Candle[] }>();
+const alertRuleStore = new Map<string, AlertRule>();
 
 const cryptoIntervalMap: Record<string, string> = {
   '1': '1m',
@@ -123,6 +138,33 @@ const searchQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });
 
+const alertRuleQuerySchema = z.object({
+  symbol: z.string().optional(),
+});
+
+const alertRuleCreateSchema = z.object({
+  symbol: z.string().min(1),
+  metric: z.enum(['price', 'changePercent']),
+  operator: z.enum(['>=', '<=', '>', '<']),
+  threshold: z.number().finite(),
+  cooldownSec: z.coerce.number().int().min(0).max(86400).default(0),
+});
+
+const alertRuleDeleteParamSchema = z.object({
+  id: z.string().min(1),
+});
+
+const alertCheckBodySchema = z.object({
+  symbol: z.string().optional(),
+  values: z
+    .object({
+      symbol: z.string().optional(),
+      lastPrice: z.number().finite(),
+      changePercent: z.number().finite(),
+    })
+    .optional(),
+});
+
 function stripTags(html: string) {
   return html
     .replace(/<[^>]*>/g, ' ')
@@ -165,6 +207,31 @@ function getCachedCandles(key: string) {
 
 function setCachedCandles(key: string, value: Candle[], ttlMs = 15000) {
   candleCache.set(key, { expiresAt: Date.now() + ttlMs, value });
+}
+
+function createAlertRuleId() {
+  return `alert_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeSymbol(symbol: string) {
+  return symbol.trim().toUpperCase();
+}
+
+function serializeAlertRule(rule: AlertRule) {
+  return {
+    ...rule,
+  };
+}
+
+function compareWithOperator(value: number, operator: AlertOperator, threshold: number) {
+  if (operator === '>=') return value >= threshold;
+  if (operator === '<=') return value <= threshold;
+  if (operator === '>') return value > threshold;
+  return value < threshold;
+}
+
+function selectMetricValue(metric: AlertMetric, values: { lastPrice: number; changePercent: number }) {
+  return metric === 'price' ? values.lastPrice : values.changePercent;
 }
 
 async function refreshKrxSymbols(force = false) {
@@ -443,6 +510,18 @@ async function fetchKrxQuote(symbol: string): Promise<Quote> {
   };
 }
 
+async function fetchLiveQuote(symbol: string) {
+  const cached = getCachedQuote(symbol);
+  if (cached) return cached;
+
+  const quote = isKrxSymbol(symbol)
+    ? await fetchKrxQuote(symbol)
+    : await fetchCryptoQuote(symbol);
+
+  setCachedQuote(symbol, quote);
+  return quote;
+}
+
 try {
   await refreshKrxSymbols();
   app.log.info(`Loaded ${krxSymbols.length} KRX symbols`);
@@ -553,24 +632,178 @@ app.get('/api/quote', async (request, reply) => {
   }
 
   const symbol = parsed.data.symbol.toUpperCase();
-  const cached = getCachedQuote(symbol);
-
-  if (cached) {
-    return cached;
-  }
-
   try {
-    const quote = isKrxSymbol(symbol)
-      ? await fetchKrxQuote(symbol)
-      : await fetchCryptoQuote(symbol);
-
-    setCachedQuote(symbol, quote);
-
-    return quote;
+    return await fetchLiveQuote(symbol);
   } catch (error) {
     app.log.error({ error, symbol }, 'Failed to fetch quote');
     return reply.code(502).send({ error: 'Failed to fetch quote data from upstream exchange' });
   }
+});
+
+app.get('/api/alerts/rules', async (request, reply) => {
+  const parsed = alertRuleQuerySchema.safeParse(request.query);
+
+  if (!parsed.success) {
+    return reply.code(400).send({ error: 'Invalid query', detail: parsed.error.format() });
+  }
+
+  const symbol = parsed.data.symbol ? normalizeSymbol(parsed.data.symbol) : null;
+  const rules = [...alertRuleStore.values()]
+    .filter((rule) => (symbol ? rule.symbol === symbol : true))
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .map(serializeAlertRule);
+
+  return { rules };
+});
+
+app.post('/api/alerts/rules', async (request, reply) => {
+  const parsed = alertRuleCreateSchema.safeParse(request.body);
+
+  if (!parsed.success) {
+    return reply.code(400).send({ error: 'Invalid body', detail: parsed.error.format() });
+  }
+
+  const now = Date.now();
+  const rule: AlertRule = {
+    id: createAlertRuleId(),
+    symbol: normalizeSymbol(parsed.data.symbol),
+    metric: parsed.data.metric,
+    operator: parsed.data.operator,
+    threshold: parsed.data.threshold,
+    cooldownSec: parsed.data.cooldownSec,
+    createdAt: now,
+    lastTriggeredAt: null,
+  };
+
+  alertRuleStore.set(rule.id, rule);
+
+  return reply.code(201).send({ rule: serializeAlertRule(rule) });
+});
+
+app.delete('/api/alerts/rules/:id', async (request, reply) => {
+  const parsed = alertRuleDeleteParamSchema.safeParse(request.params);
+
+  if (!parsed.success) {
+    return reply.code(400).send({ error: 'Invalid params', detail: parsed.error.format() });
+  }
+
+  const found = alertRuleStore.get(parsed.data.id);
+  if (!found) {
+    return reply.code(404).send({ error: 'Alert rule not found' });
+  }
+
+  alertRuleStore.delete(parsed.data.id);
+  return { ok: true };
+});
+
+app.post('/api/alerts/check', async (request, reply) => {
+  const parsed = alertCheckBodySchema.safeParse(request.body ?? {});
+
+  if (!parsed.success) {
+    return reply.code(400).send({ error: 'Invalid body', detail: parsed.error.format() });
+  }
+
+  const requestedSymbol = parsed.data.symbol ? normalizeSymbol(parsed.data.symbol) : null;
+  const rules = [...alertRuleStore.values()].filter((rule) =>
+    requestedSymbol ? rule.symbol === requestedSymbol : true,
+  );
+
+  if (!rules.length) {
+    return {
+      evaluatedAt: Date.now(),
+      checkedRuleCount: 0,
+      triggeredCount: 0,
+      suppressedByCooldown: 0,
+      triggered: [],
+    };
+  }
+
+  const quoteBySymbol = new Map<string, { lastPrice: number; changePercent: number }>();
+  const fallbackProvidedSymbol =
+    requestedSymbol ??
+    (rules.every((rule) => rule.symbol === rules[0].symbol) ? rules[0].symbol : null);
+  const providedSymbolRaw = parsed.data.values?.symbol ?? fallbackProvidedSymbol;
+  const providedSymbol = providedSymbolRaw ? normalizeSymbol(providedSymbolRaw) : null;
+
+  if (parsed.data.values && providedSymbol) {
+    quoteBySymbol.set(providedSymbol, {
+      lastPrice: parsed.data.values.lastPrice,
+      changePercent: parsed.data.values.changePercent,
+    });
+  }
+
+  const symbolsToFetch = [...new Set(rules.map((rule) => rule.symbol))].filter(
+    (symbol) => !quoteBySymbol.has(symbol),
+  );
+
+  try {
+    await Promise.all(
+      symbolsToFetch.map(async (symbol) => {
+        const quote = await fetchLiveQuote(symbol);
+        quoteBySymbol.set(symbol, {
+          lastPrice: quote.lastPrice,
+          changePercent: quote.changePercent,
+        });
+      }),
+    );
+  } catch (error) {
+    app.log.error({ error, symbolsToFetch }, 'Failed to fetch quotes for alert checks');
+    return reply.code(502).send({ error: 'Failed to evaluate alert rules due to quote fetch failure' });
+  }
+
+  const now = Date.now();
+  const triggered: Array<{
+    ruleId: string;
+    symbol: string;
+    metric: AlertMetric;
+    operator: AlertOperator;
+    threshold: number;
+    currentValue: number;
+    triggeredAt: number;
+    cooldownSec: number;
+  }> = [];
+  let suppressedByCooldown = 0;
+
+  for (const rule of rules) {
+    const values = quoteBySymbol.get(rule.symbol);
+    if (!values) continue;
+
+    const currentValue = selectMetricValue(rule.metric, values);
+    const met = compareWithOperator(currentValue, rule.operator, rule.threshold);
+
+    if (!met) continue;
+
+    const cooldownMs = rule.cooldownSec * 1000;
+    const inCooldown =
+      cooldownMs > 0 &&
+      typeof rule.lastTriggeredAt === 'number' &&
+      now - rule.lastTriggeredAt < cooldownMs;
+
+    if (inCooldown) {
+      suppressedByCooldown += 1;
+      continue;
+    }
+
+    rule.lastTriggeredAt = now;
+    triggered.push({
+      ruleId: rule.id,
+      symbol: rule.symbol,
+      metric: rule.metric,
+      operator: rule.operator,
+      threshold: rule.threshold,
+      currentValue,
+      triggeredAt: now,
+      cooldownSec: rule.cooldownSec,
+    });
+  }
+
+  return {
+    evaluatedAt: now,
+    checkedRuleCount: rules.length,
+    triggeredCount: triggered.length,
+    suppressedByCooldown,
+    triggered,
+  };
 });
 
 function isMainModule() {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import {
   CandlestickSeries,
   ColorType,
@@ -47,6 +47,31 @@ type Quote = {
   highPrice: number;
   lowPrice: number;
   volume: number;
+};
+
+type AlertMetric = 'price' | 'changePercent';
+type AlertOperator = '>=' | '<=' | '>' | '<';
+
+type AlertRule = {
+  id: string;
+  symbol: string;
+  metric: AlertMetric;
+  operator: AlertOperator;
+  threshold: number;
+  cooldownSec: number;
+  createdAt: number;
+  lastTriggeredAt: number | null;
+};
+
+type AlertCheckEvent = {
+  ruleId: string;
+  symbol: string;
+  metric: AlertMetric;
+  operator: AlertOperator;
+  threshold: number;
+  currentValue: number;
+  triggeredAt: number;
+  cooldownSec: number;
 };
 
 type WatchTab = 'watchlist' | 'detail' | 'alerts';
@@ -147,6 +172,15 @@ function formatVolume(value: number) {
   return value.toLocaleString('en-US');
 }
 
+function formatAlertMetric(metric: AlertMetric) {
+  return metric === 'price' ? '가격' : '변동률';
+}
+
+function formatAlertValue(metric: AlertMetric, value: number) {
+  if (metric === 'price') return formatPrice(value);
+  return `${value.toFixed(2)}%`;
+}
+
 function App() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -177,6 +211,17 @@ function App() {
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
   const [horizontalLines, setHorizontalLines] = useState<Array<Pick<HorizontalLine, 'id' | 'price'>>>([]);
+  const [alertRules, setAlertRules] = useState<AlertRule[]>([]);
+  const [alertsLoading, setAlertsLoading] = useState(false);
+  const [alertsSubmitting, setAlertsSubmitting] = useState(false);
+  const [alertsChecking, setAlertsChecking] = useState(false);
+  const [alertMetric, setAlertMetric] = useState<AlertMetric>('price');
+  const [alertOperator, setAlertOperator] = useState<AlertOperator>('>=');
+  const [alertThresholdInput, setAlertThresholdInput] = useState('');
+  const [alertCooldownInput, setAlertCooldownInput] = useState('60');
+  const [alertMessage, setAlertMessage] = useState<string | null>(null);
+  const [alertTriggeredEvents, setAlertTriggeredEvents] = useState<AlertCheckEvent[]>([]);
+  const [alertLastCheckedAt, setAlertLastCheckedAt] = useState<number | null>(null);
 
   useEffect(() => {
     activeToolRef.current = activeTool;
@@ -476,6 +521,33 @@ function App() {
     };
   }, [watchQuery]);
 
+  const loadAlertRules = useCallback(
+    async (symbol: string) => {
+      setAlertsLoading(true);
+
+      try {
+        const response = await fetch(`${apiBase}/api/alerts/rules?symbol=${encodeURIComponent(symbol)}`);
+        if (!response.ok) throw new Error('alert rules fetch failed');
+
+        const data = (await response.json()) as { rules: AlertRule[] };
+        setAlertRules(data.rules ?? []);
+      } catch {
+        setAlertRules([]);
+        setAlertMessage('알림 규칙을 불러오지 못했습니다.');
+      } finally {
+        setAlertsLoading(false);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    setAlertTriggeredEvents([]);
+    setAlertLastCheckedAt(null);
+    setAlertMessage(null);
+    void loadAlertRules(selectedSymbol);
+  }, [loadAlertRules, selectedSymbol]);
+
   useEffect(() => {
     candleMapRef.current = new Map(candles.map((candle) => [candle.time, candle]));
 
@@ -641,6 +713,112 @@ function App() {
     if (event.key === 'Escape') {
       setWatchQuery('');
       setSearchResults([]);
+    }
+  };
+
+  const handleCreateAlertRule = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    const threshold = Number(alertThresholdInput);
+    if (!Number.isFinite(threshold)) {
+      setAlertMessage('기준값을 숫자로 입력해주세요.');
+      return;
+    }
+
+    const cooldownSec = Number.parseInt(alertCooldownInput, 10);
+    if (!Number.isInteger(cooldownSec) || cooldownSec < 0) {
+      setAlertMessage('쿨다운은 0 이상의 정수여야 합니다.');
+      return;
+    }
+
+    setAlertsSubmitting(true);
+
+    try {
+      const response = await fetch(`${apiBase}/api/alerts/rules`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol: selectedSymbol,
+          metric: alertMetric,
+          operator: alertOperator,
+          threshold,
+          cooldownSec,
+        }),
+      });
+
+      if (!response.ok) throw new Error('create alert rule failed');
+
+      setAlertThresholdInput('');
+      setAlertMessage('알림 규칙이 추가되었습니다.');
+      await loadAlertRules(selectedSymbol);
+    } catch {
+      setAlertMessage('알림 규칙 생성에 실패했습니다.');
+    } finally {
+      setAlertsSubmitting(false);
+    }
+  };
+
+  const handleDeleteAlertRule = async (ruleId: string) => {
+    try {
+      const response = await fetch(`${apiBase}/api/alerts/rules/${encodeURIComponent(ruleId)}`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) throw new Error('delete alert rule failed');
+
+      setAlertMessage('알림 규칙을 삭제했습니다.');
+      setAlertRules((prev) => prev.filter((rule) => rule.id !== ruleId));
+      setAlertTriggeredEvents((prev) => prev.filter((eventItem) => eventItem.ruleId !== ruleId));
+    } catch {
+      setAlertMessage('알림 규칙 삭제에 실패했습니다.');
+    }
+  };
+
+  const handleCheckAlerts = async () => {
+    setAlertsChecking(true);
+
+    try {
+      const body: {
+        symbol: string;
+        values?: { symbol: string; lastPrice: number; changePercent: number };
+      } = {
+        symbol: selectedSymbol,
+      };
+
+      if (selectedQuote) {
+        body.values = {
+          symbol: selectedSymbol,
+          lastPrice: selectedQuote.lastPrice,
+          changePercent: selectedQuote.changePercent,
+        };
+      }
+
+      const response = await fetch(`${apiBase}/api/alerts/check`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) throw new Error('check alerts failed');
+
+      const data = (await response.json()) as {
+        evaluatedAt: number;
+        checkedRuleCount: number;
+        triggeredCount: number;
+        suppressedByCooldown: number;
+        triggered: AlertCheckEvent[];
+      };
+
+      setAlertTriggeredEvents(data.triggered ?? []);
+      setAlertLastCheckedAt(data.evaluatedAt ?? Date.now());
+      setAlertMessage(
+        `체크 완료: ${data.checkedRuleCount}개 규칙, ${data.triggeredCount}개 트리거, 쿨다운 억제 ${data.suppressedByCooldown}개`,
+      );
+      await loadAlertRules(selectedSymbol);
+    } catch {
+      setAlertMessage('알림 체크에 실패했습니다.');
+    } finally {
+      setAlertsChecking(false);
     }
   };
 
@@ -959,19 +1137,129 @@ function App() {
               ) : null}
 
               {watchTab === 'alerts' ? (
-                <div className="panel-content">
-                  <h4>가격 알림</h4>
-                  <p>알림 엔진 UI를 TradingView 스타일로 맞추는 단계입니다.</p>
-                  <ul className="alert-list">
-                    <li>
-                      <span>{selectedCode}</span>
-                      <span>가격이 기준선 돌파 시 알림</span>
-                    </li>
-                    <li>
-                      <span>{selectedCode}</span>
-                      <span>변동률 임계치 도달 시 알림</span>
-                    </li>
-                  </ul>
+                <div className="panel-content alerts-panel">
+                  <h4>
+                    {selectedCode} · 알림 규칙
+                  </h4>
+
+                  <form className="alert-form" onSubmit={handleCreateAlertRule}>
+                    <div className="alert-form-row">
+                      <label>
+                        <span>지표</span>
+                        <select value={alertMetric} onChange={(event) => setAlertMetric(event.target.value as AlertMetric)}>
+                          <option value="price">가격</option>
+                          <option value="changePercent">변동률</option>
+                        </select>
+                      </label>
+
+                      <label>
+                        <span>연산자</span>
+                        <select
+                          value={alertOperator}
+                          onChange={(event) => setAlertOperator(event.target.value as AlertOperator)}
+                        >
+                          <option value=">=">{'>='}</option>
+                          <option value="<=">{'<='}</option>
+                          <option value=">">{'>'}</option>
+                          <option value="<">{'<'}</option>
+                        </select>
+                      </label>
+                    </div>
+
+                    <div className="alert-form-row">
+                      <label>
+                        <span>기준값</span>
+                        <input
+                          type="number"
+                          step={alertMetric === 'price' ? '0.01' : '0.1'}
+                          value={alertThresholdInput}
+                          onChange={(event) => setAlertThresholdInput(event.target.value)}
+                          placeholder={alertMetric === 'price' ? '예: 50000' : '예: 3.5'}
+                        />
+                      </label>
+
+                      <label>
+                        <span>쿨다운(초)</span>
+                        <input
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={alertCooldownInput}
+                          onChange={(event) => setAlertCooldownInput(event.target.value)}
+                        />
+                      </label>
+                    </div>
+
+                    <div className="alert-actions">
+                      <button type="submit" disabled={alertsSubmitting}>
+                        {alertsSubmitting ? '추가 중...' : '규칙 추가'}
+                      </button>
+                      <button type="button" onClick={handleCheckAlerts} disabled={alertsChecking}>
+                        {alertsChecking ? '체크 중...' : 'Check now'}
+                      </button>
+                    </div>
+                  </form>
+
+                  {alertMessage ? <p className="alert-message">{alertMessage}</p> : null}
+                  {alertLastCheckedAt ? (
+                    <p className="alert-message muted">
+                      마지막 체크: {new Date(alertLastCheckedAt).toLocaleTimeString('ko-KR')}
+                    </p>
+                  ) : null}
+
+                  {alertsLoading ? (
+                    <p className="alert-empty">규칙을 불러오는 중...</p>
+                  ) : alertRules.length === 0 ? (
+                    <p className="alert-empty">현재 심볼의 알림 규칙이 없습니다.</p>
+                  ) : (
+                    <ul className="alert-list">
+                      {alertRules.map((rule) => (
+                        <li key={rule.id}>
+                          <div className="alert-rule-row">
+                            <strong>
+                              {formatAlertMetric(rule.metric)} {rule.operator} {formatAlertValue(rule.metric, rule.threshold)}
+                            </strong>
+                            <button type="button" onClick={() => handleDeleteAlertRule(rule.id)}>
+                              삭제
+                            </button>
+                          </div>
+                          <div className="alert-rule-sub">
+                            <span>심볼: {rule.symbol}</span>
+                            <span>쿨다운: {rule.cooldownSec}s</span>
+                            <span>
+                              마지막 트리거:{' '}
+                              {typeof rule.lastTriggeredAt === 'number'
+                                ? new Date(rule.lastTriggeredAt).toLocaleTimeString('ko-KR')
+                                : '-'}
+                            </span>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+
+                  {alertTriggeredEvents.length > 0 ? (
+                    <div className="alert-triggered">
+                      <div className="alert-triggered-title">트리거 결과</div>
+                      <ul className="alert-list">
+                        {alertTriggeredEvents.map((eventItem) => (
+                          <li key={`${eventItem.ruleId}-${eventItem.triggeredAt}`}>
+                            <div className="alert-rule-row">
+                              <strong>
+                                {formatAlertMetric(eventItem.metric)} {eventItem.operator}{' '}
+                                {formatAlertValue(eventItem.metric, eventItem.threshold)}
+                              </strong>
+                              <span>{eventItem.symbol}</span>
+                            </div>
+                            <div className="alert-rule-sub">
+                              <span>현재값: {formatAlertValue(eventItem.metric, eventItem.currentValue)}</span>
+                              <span>트리거: {new Date(eventItem.triggeredAt).toLocaleTimeString('ko-KR')}</span>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </div>
