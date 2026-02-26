@@ -13,6 +13,7 @@
     "dev:api": "npm run dev --workspace @tradingservice/api",
     "build": "npm run build --workspace @tradingservice/api && npm run build --workspace @tradingservice/web",
     "lint": "npm run lint --workspace @tradingservice/web",
+    "test": "npm run test --workspace @tradingservice/api && npm run test --workspace @tradingservice/web",
     "start": "npm run start --workspace @tradingservice/api"
   },
   "devDependencies": {

@@ -13,8 +13,14 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts';
 import './App.css';
-
-type MarketType = 'CRYPTO' | 'KOSPI' | 'KOSDAQ';
+import {
+  formatSigned,
+  getDisplayCode,
+  getOptionLabel,
+  marketExchangeText,
+  shortTicker,
+  type MarketType,
+} from './lib/symbol';
 
 type SymbolItem = {
   symbol: string;
@@ -132,28 +138,6 @@ function formatVolume(value: number) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(2)}K`;
   return value.toLocaleString('en-US');
-}
-
-function formatSigned(value: number, digits = 2) {
-  const sign = value > 0 ? '+' : value < 0 ? '-' : '';
-  return `${sign}${Math.abs(value).toFixed(digits)}`;
-}
-
-function shortTicker(symbol: string) {
-  return symbol.replace(/\.K[QS]$/i, '');
-}
-
-function getDisplayCode(item: Pick<SymbolItem, 'symbol' | 'code'>) {
-  return item.code ?? shortTicker(item.symbol);
-}
-
-function getOptionLabel(item: SymbolItem) {
-  return `${getDisplayCode(item)} · ${item.name} (${item.market})`;
-}
-
-function marketExchangeText(market: MarketType) {
-  if (market === 'CRYPTO') return 'BINANCE';
-  return 'KRX';
 }
 
 function App() {

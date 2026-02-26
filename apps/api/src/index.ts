@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 
 type MarketType = 'CRYPTO' | 'KOSPI' | 'KOSDAQ';
@@ -30,7 +31,7 @@ type Quote = {
   volume: number;
 };
 
-const app = Fastify({ logger: true });
+export const app = Fastify({ logger: true });
 
 await app.register(cors, {
   origin: true,
@@ -572,9 +573,17 @@ app.get('/api/quote', async (request, reply) => {
   }
 });
 
-const port = Number(process.env.PORT ?? 4100);
+function isMainModule() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return import.meta.url === pathToFileURL(entry).href;
+}
 
-app.listen({ port, host: '0.0.0.0' }).catch((err) => {
-  app.log.error(err);
-  process.exit(1);
-});
+if (isMainModule()) {
+  const port = Number(process.env.PORT ?? 4100);
+
+  app.listen({ port, host: '0.0.0.0' }).catch((err) => {
+    app.log.error(err);
+    process.exit(1);
+  });
+}
