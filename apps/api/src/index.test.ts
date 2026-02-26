@@ -150,6 +150,122 @@ describe('api market status', () => {
   });
 });
 
+describe('api watchlist persistence', () => {
+  it('saves and loads default watchlist with normalized symbols', async () => {
+    const saveResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/watchlist',
+      payload: {
+        items: [
+          {
+            symbol: ' btcusdt ',
+            name: ' Bitcoin / USDT ',
+            market: 'CRYPTO',
+            exchange: ' BINANCE ',
+          },
+          {
+            symbol: '005930.ks',
+            code: ' 005930 ',
+            name: ' 삼성전자 ',
+            market: 'KOSPI',
+            exchange: ' KRX ',
+          },
+        ],
+      },
+    });
+
+    expect(saveResponse.statusCode).toBe(200);
+
+    const saved = saveResponse.json() as {
+      name: string;
+      items: Array<{
+        symbol: string;
+        code?: string;
+        name: string;
+        market: string;
+        exchange?: string;
+      }>;
+    };
+
+    expect(saved.name).toBe('default');
+    expect(saved.items).toEqual([
+      {
+        symbol: 'BTCUSDT',
+        name: 'Bitcoin / USDT',
+        market: 'CRYPTO',
+        exchange: 'BINANCE',
+      },
+      {
+        symbol: '005930.KS',
+        code: '005930',
+        name: '삼성전자',
+        market: 'KOSPI',
+        exchange: 'KRX',
+      },
+    ]);
+
+    const loadResponse = await app.inject({
+      method: 'GET',
+      url: '/api/watchlist?name=default',
+    });
+
+    expect(loadResponse.statusCode).toBe(200);
+    expect(loadResponse.json()).toEqual(saved);
+  });
+
+  it('supports custom watchlist names', async () => {
+    const saveResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/watchlist',
+      payload: {
+        name: 'my-list',
+        items: [],
+      },
+    });
+
+    expect(saveResponse.statusCode).toBe(200);
+    expect(saveResponse.json()).toEqual({
+      name: 'my-list',
+      items: [],
+    });
+
+    const loadResponse = await app.inject({
+      method: 'GET',
+      url: '/api/watchlist?name=my-list',
+    });
+
+    expect(loadResponse.statusCode).toBe(200);
+    expect(loadResponse.json()).toEqual({
+      name: 'my-list',
+      items: [],
+    });
+  });
+
+  it('rejects invalid watchlist payloads', async () => {
+    const invalidBody = await app.inject({
+      method: 'PUT',
+      url: '/api/watchlist',
+      payload: {
+        items: [
+          {
+            symbol: 'BTCUSDT',
+            name: 'Bitcoin / USDT',
+          },
+        ],
+      },
+    });
+
+    expect(invalidBody.statusCode).toBe(400);
+
+    const invalidQuery = await app.inject({
+      method: 'GET',
+      url: '/api/watchlist?name=',
+    });
+
+    expect(invalidQuery.statusCode).toBe(400);
+  });
+});
+
 describe('api alerts rules', () => {
   it('supports create/list/delete flow', async () => {
     const listBefore = await app.inject({

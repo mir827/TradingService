@@ -137,6 +137,7 @@ const bottomTabs: Array<{ id: BottomTab; label: string }> = [
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? '';
 const WATCH_PREFS_STORAGE_KEY = 'tradingservice.watchprefs.v1';
+const DEFAULT_WATCHLIST_NAME = 'default';
 
 function getStoredWatchPrefs(): Partial<WatchPrefs> {
   if (typeof window === 'undefined') return {};
@@ -440,6 +441,24 @@ function App() {
     }
   }, [toDrawingPayload]);
 
+  const persistWatchlist = useCallback(async (items: SymbolItem[]) => {
+    const response = await fetch(`${apiBase}/api/watchlist`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: DEFAULT_WATCHLIST_NAME,
+        items,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error('persist watchlist failed');
+    }
+
+    const data = (await response.json()) as { items?: SymbolItem[] };
+    return data.items ?? items;
+  }, []);
+
   const loadDrawings = useCallback(
     async (symbol: string, interval: string): Promise<{ horizontalLines: HorizontalLineState[]; verticalLines: VerticalLineState[] }> => {
       try {
@@ -508,22 +527,68 @@ function App() {
   }, [watchMarketFilter, watchSortDir, watchSortKey]);
 
   useEffect(() => {
-    fetch(`${apiBase}/api/symbols`)
-      .then((res) => res.json())
-      .then((data: { symbols: SymbolItem[] }) => {
-        const nextSymbols = data.symbols ?? [];
-        setWatchlistSymbols(nextSymbols);
-        setSelectedSymbol((prev) => {
-          if (nextSymbols.some((item) => item.symbol === prev)) {
-            return prev;
-          }
+    let canceled = false;
 
-          return nextSymbols[0]?.symbol ?? prev;
-        });
-      })
-      .catch(() => {
-        setError('심볼 목록을 불러오지 못했습니다. API 상태를 확인해주세요.');
+    const applyWatchlist = (nextSymbols: SymbolItem[]) => {
+      if (canceled) return;
+
+      setWatchlistSymbols(nextSymbols);
+      setSelectedSymbol((prev) => {
+        if (nextSymbols.some((item) => item.symbol === prev)) {
+          return prev;
+        }
+
+        return nextSymbols[0]?.symbol ?? prev;
       });
+    };
+
+    const loadSymbolsFallback = async () => {
+      const response = await fetch(`${apiBase}/api/symbols`);
+      if (!response.ok) {
+        throw new Error('symbols fetch failed');
+      }
+
+      const data = (await response.json()) as { symbols?: SymbolItem[] };
+      return data.symbols ?? [];
+    };
+
+    const loadWatchlist = async () => {
+      try {
+        const watchlistResponse = await fetch(
+          `${apiBase}/api/watchlist?name=${encodeURIComponent(DEFAULT_WATCHLIST_NAME)}`,
+        );
+
+        if (!watchlistResponse.ok) {
+          throw new Error('watchlist fetch failed');
+        }
+
+        const watchlistData = (await watchlistResponse.json()) as { items?: SymbolItem[] };
+        const items = watchlistData.items ?? [];
+
+        if (items.length > 0) {
+          applyWatchlist(items);
+          return;
+        }
+
+        const fallbackSymbols = await loadSymbolsFallback();
+        applyWatchlist(fallbackSymbols);
+      } catch {
+        try {
+          const fallbackSymbols = await loadSymbolsFallback();
+          applyWatchlist(fallbackSymbols);
+        } catch {
+          if (!canceled) {
+            setError('심볼 목록을 불러오지 못했습니다. API 상태를 확인해주세요.');
+          }
+        }
+      }
+    };
+
+    void loadWatchlist();
+
+    return () => {
+      canceled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -1033,20 +1098,65 @@ function App() {
     setWatchSortDir(key === 'symbol' ? 'asc' : 'desc');
   };
 
-  const handlePickSymbol = (item: SymbolItem) => {
-    setWatchlistSymbols((prev) => {
-      if (prev.some((saved) => saved.symbol === item.symbol)) {
-        return prev;
+  const handlePickSymbol = useCallback(
+    async (item: SymbolItem) => {
+      const symbol = item.symbol.toUpperCase();
+      const nextItem = symbol === item.symbol ? item : { ...item, symbol };
+      const alreadyAdded = watchlistSymbols.some((saved) => saved.symbol === nextItem.symbol);
+      const nextWatchlist = alreadyAdded ? watchlistSymbols : [nextItem, ...watchlistSymbols].slice(0, 40);
+
+      if (!alreadyAdded) {
+        setWatchlistSymbols(nextWatchlist);
       }
 
-      return [item, ...prev].slice(0, 40);
-    });
+      setSelectedSymbol(nextItem.symbol);
+      setWatchQuery('');
+      setSearchResults([]);
+      setActiveSearchIndex(0);
 
-    setSelectedSymbol(item.symbol);
-    setWatchQuery('');
-    setSearchResults([]);
-    setActiveSearchIndex(0);
-  };
+      if (alreadyAdded) {
+        return;
+      }
+
+      try {
+        const persistedItems = await persistWatchlist(nextWatchlist);
+        setWatchlistSymbols(persistedItems);
+      } catch {
+        setError((prev) => prev ?? '관심종목 저장에 실패했습니다.');
+      }
+    },
+    [persistWatchlist, watchlistSymbols],
+  );
+
+  const handleRemoveWatchSymbol = useCallback(
+    async (symbolToRemove: string) => {
+      const index = watchlistSymbols.findIndex((item) => item.symbol === symbolToRemove);
+      if (index < 0) return;
+
+      const nextWatchlist = watchlistSymbols.filter((item) => item.symbol !== symbolToRemove);
+      const selectedIsRemoved = selectedSymbol === symbolToRemove;
+      const nextSelected = selectedIsRemoved
+        ? nextWatchlist[index]?.symbol ?? nextWatchlist[index - 1]?.symbol ?? nextWatchlist[0]?.symbol ?? 'BTCUSDT'
+        : selectedSymbol;
+
+      setWatchlistSymbols(nextWatchlist);
+      if (selectedIsRemoved) {
+        setSelectedSymbol(nextSelected);
+      }
+
+      try {
+        const persistedItems = await persistWatchlist(nextWatchlist);
+        setWatchlistSymbols(persistedItems);
+
+        if (selectedIsRemoved && !persistedItems.some((item) => item.symbol === nextSelected)) {
+          setSelectedSymbol(persistedItems[0]?.symbol ?? nextSelected);
+        }
+      } catch {
+        setError((prev) => prev ?? '관심종목 저장에 실패했습니다.');
+      }
+    },
+    [persistWatchlist, selectedSymbol, watchlistSymbols],
+  );
 
   const handleSearchInputKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (!filteredSearchResults.length) {
@@ -1497,10 +1607,10 @@ function App() {
                       return (
                         <li
                           key={item.symbol}
-                          className={item.symbol === selectedSymbol ? 'selected' : ''}
+                          className={`watch-row${item.symbol === selectedSymbol ? ' selected' : ''}`}
                           onClick={() => setSelectedSymbol(item.symbol)}
                         >
-                          <div>
+                          <div className="watch-item-meta">
                             <strong>{getDisplayCode(item)}</strong>
                             <small>
                               {item.name} · {item.market}
@@ -1517,6 +1627,17 @@ function App() {
                                 : '--'}
                             </small>
                           </div>
+                          <button
+                            type="button"
+                            className="watch-remove"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleRemoveWatchSymbol(item.symbol);
+                            }}
+                            aria-label={`${getDisplayCode(item)} 삭제`}
+                          >
+                            ×
+                          </button>
                         </li>
                       );
                     })}

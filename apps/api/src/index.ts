@@ -115,6 +115,7 @@ const quoteCache = new Map<string, { expiresAt: number; value: Quote }>();
 const candleCache = new Map<string, { expiresAt: number; value: Candle[] }>();
 const alertRuleStore = new Map<string, AlertRule>();
 const drawingStore = new Map<string, DrawingItem[]>();
+const watchlistStore = new Map<string, SymbolItem[]>();
 
 const cryptoIntervalMap: Record<string, string> = {
   '1': '1m',
@@ -191,6 +192,23 @@ const searchQuerySchema = z.object({
   query: z.string().min(1),
   market: z.enum(['ALL', 'CRYPTO', 'KOSPI', 'KOSDAQ']).default('ALL'),
   limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+
+const symbolItemSchema = z.object({
+  symbol: z.string().trim().min(1),
+  code: z.string().trim().min(1).optional(),
+  name: z.string().trim().min(1),
+  market: z.enum(['CRYPTO', 'KOSPI', 'KOSDAQ']),
+  exchange: z.string().trim().min(1).optional(),
+});
+
+const watchlistQuerySchema = z.object({
+  name: z.string().trim().min(1).default('default'),
+});
+
+const watchlistPutBodySchema = z.object({
+  name: z.string().trim().min(1).optional(),
+  items: z.array(symbolItemSchema),
 });
 
 const alertRuleQuerySchema = z.object({
@@ -303,12 +321,52 @@ function createAlertRuleId() {
   return `alert_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function cloneSymbolItem(item: SymbolItem): SymbolItem {
+  return { ...item };
+}
+
 function normalizeSymbol(symbol: string) {
   return symbol.trim().toUpperCase();
 }
 
 function normalizeInterval(interval: string) {
   return interval.trim().toUpperCase();
+}
+
+function normalizeSymbolItem(item: SymbolItem): SymbolItem {
+  const code = item.code?.trim();
+  const exchange = item.exchange?.trim();
+
+  return {
+    symbol: normalizeSymbol(item.symbol),
+    ...(code ? { code } : {}),
+    name: item.name.trim(),
+    market: item.market,
+    ...(exchange ? { exchange } : {}),
+  };
+}
+
+function normalizeWatchlistName(name?: string) {
+  return name?.trim() || 'default';
+}
+
+function getOrCreateWatchlist(name: string) {
+  if (!watchlistStore.has(name)) {
+    const initial = name === 'default' ? getDefaultSymbols().map(cloneSymbolItem) : [];
+    watchlistStore.set(name, initial);
+  }
+
+  return watchlistStore.get(name) ?? [];
+}
+
+function getWatchlistItems(name: string) {
+  return getOrCreateWatchlist(name).map(cloneSymbolItem);
+}
+
+function setWatchlistItems(name: string, items: SymbolItem[]) {
+  const normalized = items.map((item) => normalizeSymbolItem(item));
+  watchlistStore.set(name, normalized.map(cloneSymbolItem));
+  return normalized;
 }
 
 function createDrawingStoreKey(symbol: string, interval: string) {
@@ -733,6 +791,37 @@ app.get('/api/symbols', async () => {
   }
 
   return { symbols: getDefaultSymbols() };
+});
+
+app.get('/api/watchlist', async (request, reply) => {
+  const parsed = watchlistQuerySchema.safeParse(request.query);
+
+  if (!parsed.success) {
+    return reply.code(400).send({ error: 'Invalid query', detail: parsed.error.format() });
+  }
+
+  const name = normalizeWatchlistName(parsed.data.name);
+
+  return {
+    name,
+    items: getWatchlistItems(name),
+  };
+});
+
+app.put('/api/watchlist', async (request, reply) => {
+  const parsed = watchlistPutBodySchema.safeParse(request.body ?? {});
+
+  if (!parsed.success) {
+    return reply.code(400).send({ error: 'Invalid body', detail: parsed.error.format() });
+  }
+
+  const name = normalizeWatchlistName(parsed.data.name);
+  const items = setWatchlistItems(name, parsed.data.items);
+
+  return {
+    name,
+    items,
+  };
 });
 
 app.get('/api/search', async (request, reply) => {

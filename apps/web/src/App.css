@@ -568,6 +568,15 @@ select {
   background: #1b2130;
 }
 
+.watch-row {
+  align-items: center;
+  gap: 8px;
+}
+
+.watch-item-meta {
+  min-width: 0;
+}
+
 .right-panel strong {
   display: block;
   font-size: 13px;
@@ -584,6 +593,7 @@ select {
   flex-direction: column;
   align-items: flex-end;
   gap: 2px;
+  margin-left: auto;
 }
 
 .watch-value span,
@@ -594,6 +604,30 @@ select {
 .watch-value small {
   font-size: 10px;
   color: #8f97a7;
+}
+
+.watch-remove {
+  width: 20px;
+  height: 20px;
+  border: 1px solid #4a2b2b;
+  background: #2f1f1f;
+  color: #ffb3b3;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+  flex: 0 0 auto;
+}
+
+.watch-remove:hover {
+  border-color: #6f3341;
+  background: #3a1f27;
+}
+
+.watch-remove:focus-visible {
+  outline: 1px solid #a45a69;
+  outline-offset: 1px;
 }
 
 .panel-content {
