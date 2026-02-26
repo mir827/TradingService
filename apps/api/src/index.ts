@@ -45,6 +45,11 @@ type AlertRule = {
   lastTriggeredAt: number | null;
 };
 
+type DrawingLine = {
+  id: string;
+  price: number;
+};
+
 type MarketStatusState = 'OPEN' | 'CLOSED';
 type MarketStatusReason = 'WEEKEND' | 'OUT_OF_SESSION' | 'SESSION_ACTIVE';
 
@@ -95,6 +100,7 @@ let krxLoadedAtMs = 0;
 const quoteCache = new Map<string, { expiresAt: number; value: Quote }>();
 const candleCache = new Map<string, { expiresAt: number; value: Candle[] }>();
 const alertRuleStore = new Map<string, AlertRule>();
+const drawingStore = new Map<string, DrawingLine[]>();
 
 const cryptoIntervalMap: Record<string, string> = {
   '1': '1m',
@@ -177,6 +183,22 @@ const alertRuleQuerySchema = z.object({
   symbol: z.string().optional(),
 });
 
+const drawingsQuerySchema = z.object({
+  symbol: z.string().min(1),
+  interval: z.string().min(1),
+});
+
+const drawingLineSchema = z.object({
+  id: z.string().min(1).optional(),
+  price: z.number().finite(),
+});
+
+const drawingsPutBodySchema = z.object({
+  symbol: z.string().min(1),
+  interval: z.string().min(1),
+  lines: z.array(drawingLineSchema),
+});
+
 const alertRuleCreateSchema = z.object({
   symbol: z.string().min(1),
   metric: z.enum(['price', 'changePercent']),
@@ -250,6 +272,25 @@ function createAlertRuleId() {
 
 function normalizeSymbol(symbol: string) {
   return symbol.trim().toUpperCase();
+}
+
+function normalizeInterval(interval: string) {
+  return interval.trim().toUpperCase();
+}
+
+function createDrawingStoreKey(symbol: string, interval: string) {
+  return `${symbol}:${interval}`;
+}
+
+function createDrawingLineId() {
+  return `line_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeDrawingLines(lines: Array<{ id?: string; price: number }>): DrawingLine[] {
+  return lines.map((line) => ({
+    id: line.id?.trim() || createDrawingLineId(),
+    price: line.price,
+  }));
 }
 
 function getKrxStatus(checkedAt: number): Omit<MarketStatusPayload, 'market' | 'checkedAt'> {
@@ -727,6 +768,38 @@ app.get('/api/market-status', async (request, reply) => {
   }
 
   return getMarketStatus(parsed.data.market, Date.now());
+});
+
+app.get('/api/drawings', async (request, reply) => {
+  const parsed = drawingsQuerySchema.safeParse(request.query);
+
+  if (!parsed.success) {
+    return reply.code(400).send({ error: 'Invalid query', detail: parsed.error.format() });
+  }
+
+  const symbol = normalizeSymbol(parsed.data.symbol);
+  const interval = normalizeInterval(parsed.data.interval);
+  const key = createDrawingStoreKey(symbol, interval);
+  const lines = drawingStore.get(key) ?? [];
+
+  return { symbol, interval, lines };
+});
+
+app.put('/api/drawings', async (request, reply) => {
+  const parsed = drawingsPutBodySchema.safeParse(request.body ?? {});
+
+  if (!parsed.success) {
+    return reply.code(400).send({ error: 'Invalid body', detail: parsed.error.format() });
+  }
+
+  const symbol = normalizeSymbol(parsed.data.symbol);
+  const interval = normalizeInterval(parsed.data.interval);
+  const key = createDrawingStoreKey(symbol, interval);
+  const lines = normalizeDrawingLines(parsed.data.lines);
+
+  drawingStore.set(key, lines);
+
+  return { symbol, interval, lines };
 });
 
 app.get('/api/alerts/rules', async (request, reply) => {

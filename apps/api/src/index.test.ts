@@ -304,6 +304,68 @@ describe('api alerts rules', () => {
   });
 });
 
+describe('api drawings persistence', () => {
+  it('saves and loads drawings with symbol/interval normalization', async () => {
+    const saveResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/drawings',
+      payload: {
+        symbol: ' btcusdt ',
+        interval: ' 1d ',
+        lines: [{ id: 'line-fixed', price: 100000.5 }, { price: 99500.25 }],
+      },
+    });
+
+    expect(saveResponse.statusCode).toBe(200);
+
+    const saved = saveResponse.json() as {
+      symbol: string;
+      interval: string;
+      lines: Array<{ id: string; price: number }>;
+    };
+
+    expect(saved.symbol).toBe('BTCUSDT');
+    expect(saved.interval).toBe('1D');
+    expect(saved.lines).toHaveLength(2);
+    expect(saved.lines[0]).toEqual({ id: 'line-fixed', price: 100000.5 });
+    expect(saved.lines[1].id).toMatch(/^line_/);
+    expect(saved.lines[1].price).toBe(99500.25);
+
+    const loadResponse = await app.inject({
+      method: 'GET',
+      url: '/api/drawings?symbol=btcusdt&interval=1d',
+    });
+
+    expect(loadResponse.statusCode).toBe(200);
+    expect(loadResponse.json()).toEqual({
+      symbol: 'BTCUSDT',
+      interval: '1D',
+      lines: saved.lines,
+    });
+  });
+
+  it('rejects invalid drawings query/body payloads', async () => {
+    const invalidQuery = await app.inject({
+      method: 'GET',
+      url: '/api/drawings?symbol=BTCUSDT',
+    });
+
+    expect(invalidQuery.statusCode).toBe(400);
+
+    const invalidBody = await app.inject({
+      method: 'PUT',
+      url: '/api/drawings',
+      payload: {
+        symbol: 'BTCUSDT',
+        interval: '60',
+        lines: [{ price: 'bad-price' }],
+      },
+    });
+
+    expect(invalidBody.statusCode).toBe(400);
+  });
+});
+
 afterAll(async () => {
   await clearAlertRules();
   await app.close();

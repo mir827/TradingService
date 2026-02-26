@@ -108,6 +108,8 @@ type HorizontalLine = {
   line: IPriceLine;
 };
 
+type HorizontalLineState = Pick<HorizontalLine, 'id' | 'price'>;
+
 const intervals = ['1', '5', '15', '60', '240', '1D', '1W'];
 const leftTools = [
   { key: 'cursor', icon: '↖', label: '커서' },
@@ -203,6 +205,14 @@ function formatMarketStatusReason(reason: MarketStatusReason) {
   return '세션 진행중';
 }
 
+function createHorizontalLineId() {
+  return `line_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeLinePrice(price: number) {
+  return Number(price.toFixed(Math.abs(price) < 10 ? 4 : 2));
+}
+
 function App() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -211,6 +221,8 @@ function App() {
   const candleMapRef = useRef<Map<number, Candle>>(new Map());
   const activeToolRef = useRef('cursor');
   const horizontalLinesRef = useRef<HorizontalLine[]>([]);
+  const selectedSymbolRef = useRef('BTCUSDT');
+  const selectedIntervalRef = useRef('60');
 
   const [watchlistSymbols, setWatchlistSymbols] = useState<SymbolItem[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState('BTCUSDT');
@@ -234,7 +246,8 @@ function App() {
   const [bottomTab, setBottomTab] = useState<BottomTab>('pine');
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
-  const [horizontalLines, setHorizontalLines] = useState<Array<Pick<HorizontalLine, 'id' | 'price'>>>([]);
+  const [horizontalLines, setHorizontalLines] = useState<HorizontalLineState[]>([]);
+  const [chartReady, setChartReady] = useState(false);
   const [alertRules, setAlertRules] = useState<AlertRule[]>([]);
   const [alertsLoading, setAlertsLoading] = useState(false);
   const [alertsSubmitting, setAlertsSubmitting] = useState(false);
@@ -250,6 +263,100 @@ function App() {
   useEffect(() => {
     activeToolRef.current = activeTool;
   }, [activeTool]);
+
+  useEffect(() => {
+    selectedSymbolRef.current = selectedSymbol;
+  }, [selectedSymbol]);
+
+  useEffect(() => {
+    selectedIntervalRef.current = selectedInterval;
+  }, [selectedInterval]);
+
+  const toHorizontalLineState = useCallback((line: { id?: string; price: number }) => {
+    const normalizedPrice = Number(line.price);
+    if (!Number.isFinite(normalizedPrice)) return null;
+
+    return {
+      id: line.id?.trim() || createHorizontalLineId(),
+      price: normalizeLinePrice(normalizedPrice),
+    };
+  }, []);
+
+  const snapshotHorizontalLines = useCallback((): HorizontalLineState[] => {
+    return horizontalLinesRef.current.map((item) => ({
+      id: item.id,
+      price: item.price,
+    }));
+  }, []);
+
+  const renderHorizontalLines = useCallback((lines: HorizontalLineState[]) => {
+    const series = candleSeriesRef.current;
+    if (!series) return;
+
+    for (const item of horizontalLinesRef.current) {
+      series.removePriceLine(item.line);
+    }
+
+    horizontalLinesRef.current = lines.map((item) => ({
+      id: item.id,
+      price: item.price,
+      line: series.createPriceLine({
+        price: item.price,
+        color: '#f5a623',
+        lineWidth: 1,
+        axisLabelVisible: true,
+        title: `H ${formatPrice(item.price)}`,
+      }),
+    }));
+
+    setHorizontalLines(lines);
+  }, []);
+
+  const persistHorizontalLines = useCallback(async (symbol: string, interval: string, lines: HorizontalLineState[]) => {
+    try {
+      const response = await fetch(`${apiBase}/api/drawings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol,
+          interval,
+          lines,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('persist drawings failed');
+      }
+    } catch {
+      setError((prev) => prev ?? '수평선 저장에 실패했습니다.');
+    }
+  }, []);
+
+  const loadHorizontalLines = useCallback(
+    async (symbol: string, interval: string): Promise<HorizontalLineState[]> => {
+      try {
+        const response = await fetch(
+          `${apiBase}/api/drawings?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}`,
+        );
+
+        if (!response.ok) {
+          throw new Error('load drawings failed');
+        }
+
+        const data = (await response.json()) as {
+          lines?: Array<{ id?: string; price: number }>;
+        };
+
+        return (data.lines ?? [])
+          .map((line) => toHorizontalLineState(line))
+          .filter((line): line is HorizontalLineState => Boolean(line));
+      } catch {
+        setError((prev) => prev ?? '수평선을 불러오지 못했습니다.');
+        return [];
+      }
+    },
+    [toHorizontalLineState],
+  );
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -366,11 +473,11 @@ function App() {
       const price = candleSeries.coordinateToPrice(param.point.y);
       if (typeof price !== 'number' || !Number.isFinite(price)) return;
 
-      const normalizedPrice = Number(price.toFixed(price < 10 ? 4 : 2));
+      const normalizedPrice = normalizeLinePrice(price);
       const duplicated = horizontalLinesRef.current.some((item) => Math.abs(item.price - normalizedPrice) < 0.0001);
       if (duplicated) return;
 
-      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const id = createHorizontalLineId();
       const line = candleSeries.createPriceLine({
         price: normalizedPrice,
         color: '#f5a623',
@@ -385,7 +492,9 @@ function App() {
         line,
       });
 
-      setHorizontalLines((prev) => [...prev, { id, price: normalizedPrice }]);
+      const nextLines = snapshotHorizontalLines();
+      setHorizontalLines(nextLines);
+      void persistHorizontalLines(selectedSymbolRef.current, selectedIntervalRef.current, nextLines);
     };
 
     chart.subscribeCrosshairMove(onCrosshairMove);
@@ -394,6 +503,7 @@ function App() {
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     volumeSeriesRef.current = volumeSeries;
+    setChartReady(true);
 
     const observer = new ResizeObserver(() => chart.timeScale().fitContent());
     observer.observe(containerRef.current);
@@ -407,8 +517,28 @@ function App() {
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;
       horizontalLinesRef.current = [];
+      setHorizontalLines([]);
+      setChartReady(false);
     };
-  }, []);
+  }, [persistHorizontalLines, snapshotHorizontalLines]);
+
+  useEffect(() => {
+    if (!chartReady) return;
+
+    let canceled = false;
+
+    const loadPersistedLines = async () => {
+      const loadedLines = await loadHorizontalLines(selectedSymbol, selectedInterval);
+      if (canceled) return;
+      renderHorizontalLines(loadedLines);
+    };
+
+    void loadPersistedLines();
+
+    return () => {
+      canceled = true;
+    };
+  }, [chartReady, loadHorizontalLines, renderHorizontalLines, selectedInterval, selectedSymbol]);
 
   useEffect(() => {
     let canceled = false;
@@ -892,8 +1022,10 @@ function App() {
 
     const [target] = horizontalLinesRef.current.splice(targetIndex, 1);
     series.removePriceLine(target.line);
-    setHorizontalLines((prev) => prev.filter((item) => item.id !== id));
-  }, []);
+    const nextLines = snapshotHorizontalLines();
+    setHorizontalLines(nextLines);
+    void persistHorizontalLines(selectedSymbolRef.current, selectedIntervalRef.current, nextLines);
+  }, [persistHorizontalLines, snapshotHorizontalLines]);
 
   const clearHorizontalLines = useCallback(() => {
     const series = candleSeriesRef.current;
@@ -905,13 +1037,8 @@ function App() {
 
     horizontalLinesRef.current = [];
     setHorizontalLines([]);
-  }, []);
-
-  useEffect(() => {
-    if (horizontalLinesRef.current.length > 0) {
-      clearHorizontalLines();
-    }
-  }, [clearHorizontalLines, selectedInterval, selectedSymbol]);
+    void persistHorizontalLines(selectedSymbolRef.current, selectedIntervalRef.current, []);
+  }, [persistHorizontalLines]);
 
   const selectedCode = selectedSymbolMeta ? getDisplayCode(selectedSymbolMeta) : shortTicker(selectedSymbol);
   const selectedName = selectedSymbolMeta?.name ?? shortTicker(selectedSymbol);
