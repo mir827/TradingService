@@ -821,158 +821,160 @@ function App() {
               </button>
             </div>
 
-            {watchTab === 'watchlist' ? (
-              <>
-                <div className="watch-search-wrap">
-                  <input
-                    value={watchQuery}
-                    onChange={(e) => setWatchQuery(e.target.value)}
-                    onKeyDown={handleSearchInputKeyDown}
-                    placeholder="종목 코드/종목명 검색 (예: 005930, 삼성전자, BTC)"
-                    autoComplete="off"
-                  />
-                </div>
-                <div className="watch-filters">
-                  {(['ALL', 'KOSPI', 'KOSDAQ', 'CRYPTO'] as const).map((market) => (
-                    <button
-                      key={market}
-                      className={watchMarketFilter === market ? 'active' : ''}
-                      onClick={() => setWatchMarketFilter(market)}
-                    >
-                      {market}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="watchlist-head">
-                  <button onClick={() => toggleWatchSort('symbol')}>
-                    심볼
-                    {watchSortKey === 'symbol' ? (watchSortDir === 'asc' ? ' ▲' : ' ▼') : ''}
-                  </button>
-                  <button onClick={() => toggleWatchSort('price')}>
-                    현재가
-                    {watchSortKey === 'price' ? (watchSortDir === 'asc' ? ' ▲' : ' ▼') : ''}
-                  </button>
-                  <button onClick={() => toggleWatchSort('changePercent')}>
-                    변동%
-                    {watchSortKey === 'changePercent' ? (watchSortDir === 'asc' ? ' ▲' : ' ▼') : ''}
-                  </button>
-                </div>
-
-                <ul className="watchlist-list">
-                  {filteredWatchlist.map((item) => {
-                    const hasLastPrice = typeof item.lastPrice === 'number';
-                    const hasChangePercent = typeof item.changePercent === 'number';
-
-                    return (
-                      <li
-                        key={item.symbol}
-                        className={item.symbol === selectedSymbol ? 'selected' : ''}
-                        onClick={() => setSelectedSymbol(item.symbol)}
+            <div className={`right-panel-body${watchTab === 'watchlist' ? ' watchlist-body' : ''}`}>
+              {watchTab === 'watchlist' ? (
+                <>
+                  <div className="watch-search-wrap">
+                    <input
+                      value={watchQuery}
+                      onChange={(e) => setWatchQuery(e.target.value)}
+                      onKeyDown={handleSearchInputKeyDown}
+                      placeholder="종목 코드/종목명 검색 (예: 005930, 삼성전자, BTC)"
+                      autoComplete="off"
+                    />
+                  </div>
+                  <div className="watch-filters">
+                    {(['ALL', 'KOSPI', 'KOSDAQ', 'CRYPTO'] as const).map((market) => (
+                      <button
+                        key={market}
+                        className={watchMarketFilter === market ? 'active' : ''}
+                        onClick={() => setWatchMarketFilter(market)}
                       >
-                        <div>
-                          <strong>{getDisplayCode(item)}</strong>
-                          <small>
-                            {item.name} · {item.market}
-                          </small>
-                        </div>
-                        <div className="watch-value">
-                          <span>{hasLastPrice ? formatPrice(item.lastPrice) : '--'}</span>
-                          <span className={hasChangePercent && item.changePercent >= 0 ? 'up' : 'down'}>
-                            {hasChangePercent ? `${formatSigned(item.changePercent, 2)}%` : '--'}
-                          </span>
-                          <small className={hasChangePercent && item.changePercent >= 0 ? 'up' : 'down'}>
-                            {typeof item.changeValue === 'number'
-                              ? formatSigned(item.changeValue)
-                              : '--'}
-                          </small>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
+                        {market}
+                      </button>
+                    ))}
+                  </div>
 
-                {watchQuery.trim().length >= 2 ? (
-                  <div className="search-section">
-                    <div className="search-section-title">검색결과 (코드/종목명)</div>
-                    <div className="search-shortcut">↑↓ 선택 · Enter 추가 · Esc 초기화</div>
-                    {searching ? <div className="search-state">검색 중...</div> : null}
-                    {!searching && filteredSearchResults.length === 0 ? (
-                      <div className="search-state">추가 가능한 결과가 없습니다.</div>
-                    ) : null}
-                    {!searching && filteredSearchResults.length ? (
-                      <ul className="search-result-list">
-                        {filteredSearchResults.map((item, index) => (
-                          <li
-                            key={item.symbol}
-                            className={index === activeSearchIndex ? 'active' : ''}
-                            onMouseEnter={() => setActiveSearchIndex(index)}
-                            onClick={() => handlePickSymbol(item)}
-                          >
-                            <div>
-                              <strong>{renderMatchedText(getDisplayCode(item), watchQuery)}</strong>
-                              <small>{renderMatchedText(item.name, watchQuery)}</small>
-                            </div>
-                            <span className="market-pill">{item.market}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : null}
+                  <div className="watchlist-head">
+                    <button onClick={() => toggleWatchSort('symbol')}>
+                      심볼
+                      {watchSortKey === 'symbol' ? (watchSortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+                    </button>
+                    <button onClick={() => toggleWatchSort('price')}>
+                      현재가
+                      {watchSortKey === 'price' ? (watchSortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+                    </button>
+                    <button onClick={() => toggleWatchSort('changePercent')}>
+                      변동%
+                      {watchSortKey === 'changePercent' ? (watchSortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+                    </button>
                   </div>
-                ) : null}
-              </>
-            ) : null}
 
-            {watchTab === 'detail' ? (
-              <div className="panel-content">
-                <h4>
-                  {selectedCode} · {selectedName} 상세
-                </h4>
-                <dl>
-                  <div>
-                    <dt>현재가</dt>
-                    <dd>{selectedQuote ? formatPrice(selectedQuote.lastPrice) : '--'}</dd>
-                  </div>
-                  <div>
-                    <dt>변동률</dt>
-                    <dd className={selectedQuote && selectedQuote.changePercent >= 0 ? 'up' : 'down'}>
-                      {selectedQuote
-                        ? `${selectedQuote.changePercent >= 0 ? '+' : ''}${selectedQuote.changePercent.toFixed(2)}%`
-                        : '--'}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>고가</dt>
-                    <dd>{selectedQuote ? formatPrice(selectedQuote.highPrice) : '--'}</dd>
-                  </div>
-                  <div>
-                    <dt>저가</dt>
-                    <dd>{selectedQuote ? formatPrice(selectedQuote.lowPrice) : '--'}</dd>
-                  </div>
-                  <div>
-                    <dt>거래량</dt>
-                    <dd>{selectedQuote ? formatVolume(selectedQuote.volume) : '--'}</dd>
-                  </div>
-                </dl>
-              </div>
-            ) : null}
+                  <ul className="watchlist-list">
+                    {filteredWatchlist.map((item) => {
+                      const hasLastPrice = typeof item.lastPrice === 'number';
+                      const hasChangePercent = typeof item.changePercent === 'number';
 
-            {watchTab === 'alerts' ? (
-              <div className="panel-content">
-                <h4>가격 알림</h4>
-                <p>알림 엔진 UI를 TradingView 스타일로 맞추는 단계입니다.</p>
-                <ul className="alert-list">
-                  <li>
-                    <span>{selectedCode}</span>
-                    <span>가격이 기준선 돌파 시 알림</span>
-                  </li>
-                  <li>
-                    <span>{selectedCode}</span>
-                    <span>변동률 임계치 도달 시 알림</span>
-                  </li>
-                </ul>
-              </div>
-            ) : null}
+                      return (
+                        <li
+                          key={item.symbol}
+                          className={item.symbol === selectedSymbol ? 'selected' : ''}
+                          onClick={() => setSelectedSymbol(item.symbol)}
+                        >
+                          <div>
+                            <strong>{getDisplayCode(item)}</strong>
+                            <small>
+                              {item.name} · {item.market}
+                            </small>
+                          </div>
+                          <div className="watch-value">
+                            <span>{hasLastPrice ? formatPrice(item.lastPrice) : '--'}</span>
+                            <span className={hasChangePercent && item.changePercent >= 0 ? 'up' : 'down'}>
+                              {hasChangePercent ? `${formatSigned(item.changePercent, 2)}%` : '--'}
+                            </span>
+                            <small className={hasChangePercent && item.changePercent >= 0 ? 'up' : 'down'}>
+                              {typeof item.changeValue === 'number'
+                                ? formatSigned(item.changeValue)
+                                : '--'}
+                            </small>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+
+                  {watchQuery.trim().length >= 2 ? (
+                    <div className="search-section">
+                      <div className="search-section-title">검색결과 (코드/종목명)</div>
+                      <div className="search-shortcut">↑↓ 선택 · Enter 추가 · Esc 초기화</div>
+                      {searching ? <div className="search-state">검색 중...</div> : null}
+                      {!searching && filteredSearchResults.length === 0 ? (
+                        <div className="search-state">추가 가능한 결과가 없습니다.</div>
+                      ) : null}
+                      {!searching && filteredSearchResults.length ? (
+                        <ul className="search-result-list">
+                          {filteredSearchResults.map((item, index) => (
+                            <li
+                              key={item.symbol}
+                              className={index === activeSearchIndex ? 'active' : ''}
+                              onMouseEnter={() => setActiveSearchIndex(index)}
+                              onClick={() => handlePickSymbol(item)}
+                            >
+                              <div>
+                                <strong>{renderMatchedText(getDisplayCode(item), watchQuery)}</strong>
+                                <small>{renderMatchedText(item.name, watchQuery)}</small>
+                              </div>
+                              <span className="market-pill">{item.market}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
+
+              {watchTab === 'detail' ? (
+                <div className="panel-content">
+                  <h4>
+                    {selectedCode} · {selectedName} 상세
+                  </h4>
+                  <dl>
+                    <div>
+                      <dt>현재가</dt>
+                      <dd>{selectedQuote ? formatPrice(selectedQuote.lastPrice) : '--'}</dd>
+                    </div>
+                    <div>
+                      <dt>변동률</dt>
+                      <dd className={selectedQuote && selectedQuote.changePercent >= 0 ? 'up' : 'down'}>
+                        {selectedQuote
+                          ? `${selectedQuote.changePercent >= 0 ? '+' : ''}${selectedQuote.changePercent.toFixed(2)}%`
+                          : '--'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>고가</dt>
+                      <dd>{selectedQuote ? formatPrice(selectedQuote.highPrice) : '--'}</dd>
+                    </div>
+                    <div>
+                      <dt>저가</dt>
+                      <dd>{selectedQuote ? formatPrice(selectedQuote.lowPrice) : '--'}</dd>
+                    </div>
+                    <div>
+                      <dt>거래량</dt>
+                      <dd>{selectedQuote ? formatVolume(selectedQuote.volume) : '--'}</dd>
+                    </div>
+                  </dl>
+                </div>
+              ) : null}
+
+              {watchTab === 'alerts' ? (
+                <div className="panel-content">
+                  <h4>가격 알림</h4>
+                  <p>알림 엔진 UI를 TradingView 스타일로 맞추는 단계입니다.</p>
+                  <ul className="alert-list">
+                    <li>
+                      <span>{selectedCode}</span>
+                      <span>가격이 기준선 돌파 시 알림</span>
+                    </li>
+                    <li>
+                      <span>{selectedCode}</span>
+                      <span>변동률 임계치 도달 시 알림</span>
+                    </li>
+                  </ul>
+                </div>
+              ) : null}
+            </div>
           </aside>
         ) : null}
       </main>

@@ -304,6 +304,17 @@ select {
   z-index: 2;
 }
 
+.right-panel-body {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.watchlist-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .right-panel-header {
   display: flex;
   align-items: center;
@@ -387,7 +398,9 @@ select {
 }
 
 .watchlist-list {
-  max-height: 34%;
+  flex: 1;
+  min-height: 0;
+  max-height: none;
   overflow: auto;
 }
 
@@ -396,6 +409,8 @@ select {
   padding: 8px;
   display: grid;
   gap: 6px;
+  max-height: 44%;
+  overflow: auto;
 }
 
 .search-section-title {
