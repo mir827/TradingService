@@ -102,6 +102,13 @@ type WatchPrefs = {
   watchMarketFilter: WatchMarketFilter;
 };
 
+type AlertAutoCheckIntervalSec = 30 | 60 | 120;
+
+type AlertAutoCheckPrefs = {
+  enabled: boolean;
+  intervalSec: AlertAutoCheckIntervalSec;
+};
+
 type HorizontalLine = {
   id: string;
   price: number;
@@ -137,7 +144,10 @@ const bottomTabs: Array<{ id: BottomTab; label: string }> = [
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? '';
 const WATCH_PREFS_STORAGE_KEY = 'tradingservice.watchprefs.v1';
+const ALERT_AUTO_CHECK_STORAGE_KEY = 'tradingservice.alerts.autocheck.v1';
 const DEFAULT_WATCHLIST_NAME = 'default';
+const ALERT_EVENT_DEDUP_WINDOW_MS = 10_000;
+const ALERT_EVENT_MAX_ITEMS = 20;
 
 function getStoredWatchPrefs(): Partial<WatchPrefs> {
   if (typeof window === 'undefined') return {};
@@ -162,6 +172,27 @@ function getStoredWatchPrefs(): Partial<WatchPrefs> {
         parsed.watchMarketFilter === 'KOSPI' ||
         parsed.watchMarketFilter === 'KOSDAQ'
           ? parsed.watchMarketFilter
+          : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function getStoredAlertAutoCheckPrefs(): Partial<AlertAutoCheckPrefs> {
+  if (typeof window === 'undefined') return {};
+
+  try {
+    const raw = window.localStorage.getItem(ALERT_AUTO_CHECK_STORAGE_KEY);
+    if (!raw) return {};
+
+    const parsed = JSON.parse(raw) as Partial<AlertAutoCheckPrefs>;
+
+    return {
+      enabled: typeof parsed.enabled === 'boolean' ? parsed.enabled : undefined,
+      intervalSec:
+        parsed.intervalSec === 30 || parsed.intervalSec === 60 || parsed.intervalSec === 120
+          ? parsed.intervalSec
           : undefined,
     };
   } catch {
@@ -247,6 +278,8 @@ function App() {
   const verticalLineNodesRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const selectedSymbolRef = useRef('BTCUSDT');
   const selectedIntervalRef = useRef('60');
+  const watchlistAlertCheckInFlightRef = useRef(false);
+  const recentAlertEventByRuleRef = useRef<Map<string, number>>(new Map());
 
   const [watchlistSymbols, setWatchlistSymbols] = useState<SymbolItem[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState('BTCUSDT');
@@ -277,6 +310,13 @@ function App() {
   const [alertsLoading, setAlertsLoading] = useState(false);
   const [alertsSubmitting, setAlertsSubmitting] = useState(false);
   const [alertsChecking, setAlertsChecking] = useState(false);
+  const [alertsWatchlistChecking, setAlertsWatchlistChecking] = useState(false);
+  const [alertsAutoCheckEnabled, setAlertsAutoCheckEnabled] = useState<boolean>(
+    () => getStoredAlertAutoCheckPrefs().enabled ?? false,
+  );
+  const [alertsAutoCheckIntervalSec, setAlertsAutoCheckIntervalSec] = useState<AlertAutoCheckIntervalSec>(
+    () => getStoredAlertAutoCheckPrefs().intervalSec ?? 60,
+  );
   const [alertMetric, setAlertMetric] = useState<AlertMetric>('price');
   const [alertOperator, setAlertOperator] = useState<AlertOperator>('>=');
   const [alertThresholdInput, setAlertThresholdInput] = useState('');
@@ -525,6 +565,17 @@ function App() {
 
     window.localStorage.setItem(WATCH_PREFS_STORAGE_KEY, JSON.stringify(payload));
   }, [watchMarketFilter, watchSortDir, watchSortKey]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const payload: AlertAutoCheckPrefs = {
+      enabled: alertsAutoCheckEnabled,
+      intervalSec: alertsAutoCheckIntervalSec,
+    };
+
+    window.localStorage.setItem(ALERT_AUTO_CHECK_STORAGE_KEY, JSON.stringify(payload));
+  }, [alertsAutoCheckEnabled, alertsAutoCheckIntervalSec]);
 
   useEffect(() => {
     let canceled = false;
@@ -937,8 +988,6 @@ function App() {
   );
 
   useEffect(() => {
-    setAlertTriggeredEvents([]);
-    setAlertLastCheckedAt(null);
     setAlertMessage(null);
     void loadAlertRules(selectedSymbol);
   }, [loadAlertRules, selectedSymbol]);
@@ -971,6 +1020,14 @@ function App() {
   const selectedQuote = quotes[selectedSymbol];
   const latestCandle = candles.at(-1) ?? null;
   const displayCandle = hoveredCandle ?? latestCandle;
+  const watchlistAlertSymbols = useMemo(
+    () =>
+      [...new Set(watchlistSymbols.map((item) => item.symbol.trim().toUpperCase()).filter((symbol) => symbol.length > 0))].slice(
+        0,
+        40,
+      ),
+    [watchlistSymbols],
+  );
 
   const selectedSymbolMeta = useMemo(
     () => watchlistSymbols.find((item) => item.symbol === selectedSymbol) ?? searchResults.find((item) => item.symbol === selectedSymbol),
@@ -1087,6 +1144,134 @@ function App() {
   const marketStatusHint = marketStatus
     ? `${formatMarketStatusReason(marketStatus.reason)} · ${marketStatus.session.text} · ${marketStatus.timezone}`
     : marketStatusError ?? '시장 상태 확인 중...';
+  const alertBadgeCount = alertTriggeredEvents.length;
+
+  const markRecentAlertEvents = useCallback((events: AlertCheckEvent[]) => {
+    if (!events.length) return;
+
+    const now = Date.now();
+    const byRule = recentAlertEventByRuleRef.current;
+
+    for (const eventItem of events) {
+      byRule.set(eventItem.ruleId, Number.isFinite(eventItem.triggeredAt) ? eventItem.triggeredAt : now);
+    }
+  }, []);
+
+  const appendWatchlistAlertEvents = useCallback((events: AlertCheckEvent[]) => {
+    if (!events.length) return;
+
+    setAlertTriggeredEvents((previous) => {
+      const now = Date.now();
+      const byRule = recentAlertEventByRuleRef.current;
+
+      for (const [ruleId, seenAt] of byRule.entries()) {
+        if (now - seenAt > ALERT_EVENT_DEDUP_WINDOW_MS) {
+          byRule.delete(ruleId);
+        }
+      }
+
+      const accepted: AlertCheckEvent[] = [];
+
+      for (const eventItem of events) {
+        const eventAt = Number.isFinite(eventItem.triggeredAt) ? eventItem.triggeredAt : now;
+        const lastSeenAt = byRule.get(eventItem.ruleId);
+
+        if (typeof lastSeenAt === 'number' && Math.abs(eventAt - lastSeenAt) < ALERT_EVENT_DEDUP_WINDOW_MS) {
+          continue;
+        }
+
+        byRule.set(eventItem.ruleId, eventAt);
+        accepted.push(eventItem);
+      }
+
+      if (!accepted.length) {
+        return previous.slice(0, ALERT_EVENT_MAX_ITEMS);
+      }
+
+      return [...accepted, ...previous]
+        .sort((a, b) => b.triggeredAt - a.triggeredAt)
+        .slice(0, ALERT_EVENT_MAX_ITEMS);
+    });
+  }, []);
+
+  const runWatchlistAlertCheck = useCallback(
+    async (source: 'manual' | 'auto') => {
+      if (!watchlistAlertSymbols.length) {
+        if (source === 'manual') {
+          setAlertMessage('관심종목에 등록된 심볼이 없습니다.');
+        }
+        return;
+      }
+
+      if (watchlistAlertCheckInFlightRef.current) return;
+
+      watchlistAlertCheckInFlightRef.current = true;
+      if (source === 'manual') {
+        setAlertsWatchlistChecking(true);
+      }
+
+      try {
+        const response = await fetch(`${apiBase}/api/alerts/check-watchlist`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbols: watchlistAlertSymbols,
+          }),
+        });
+        if (!response.ok) throw new Error('check watchlist alerts failed');
+
+        const data = (await response.json()) as {
+          checkedAt: number;
+          checkedSymbols: string[];
+          events: AlertCheckEvent[];
+        };
+        const events = data.events ?? [];
+
+        appendWatchlistAlertEvents(events);
+        setAlertLastCheckedAt(data.checkedAt ?? Date.now());
+        if (source === 'manual') {
+          setAlertMessage(`관심종목 체크 완료: ${data.checkedSymbols.length}개 심볼, ${events.length}개 트리거`);
+        } else if (events.length > 0) {
+          setAlertMessage(`자동 체크 트리거 ${events.length}건`);
+        }
+        await loadAlertRules(selectedSymbol);
+      } catch {
+        setAlertMessage(
+          source === 'manual'
+            ? '관심종목 알림 체크에 실패했습니다.'
+            : '관심종목 자동 체크에 실패했습니다.',
+        );
+      } finally {
+        if (source === 'manual') {
+          setAlertsWatchlistChecking(false);
+        }
+        watchlistAlertCheckInFlightRef.current = false;
+      }
+    },
+    [appendWatchlistAlertEvents, loadAlertRules, selectedSymbol, watchlistAlertSymbols],
+  );
+
+  useEffect(() => {
+    if (!alertsAutoCheckEnabled) return;
+    if (!watchlistAlertSymbols.length) return;
+
+    let canceled = false;
+
+    const run = async () => {
+      if (canceled) return;
+      await runWatchlistAlertCheck('auto');
+    };
+
+    void run();
+    const timer = window.setInterval(() => {
+      void run();
+    }, alertsAutoCheckIntervalSec * 1000);
+
+    return () => {
+      canceled = true;
+      window.clearInterval(timer);
+    };
+  }, [alertsAutoCheckEnabled, alertsAutoCheckIntervalSec, runWatchlistAlertCheck, watchlistAlertSymbols.length]);
 
   const toggleWatchSort = (key: WatchSortKey) => {
     if (watchSortKey === key) {
@@ -1247,6 +1432,7 @@ function App() {
       setAlertMessage('알림 규칙을 삭제했습니다.');
       setAlertRules((prev) => prev.filter((rule) => rule.id !== ruleId));
       setAlertTriggeredEvents((prev) => prev.filter((eventItem) => eventItem.ruleId !== ruleId));
+      recentAlertEventByRuleRef.current.delete(ruleId);
     } catch {
       setAlertMessage('알림 규칙 삭제에 실패했습니다.');
     }
@@ -1287,7 +1473,9 @@ function App() {
         triggered: AlertCheckEvent[];
       };
 
-      setAlertTriggeredEvents(data.triggered ?? []);
+      const triggered = data.triggered ?? [];
+      setAlertTriggeredEvents(triggered);
+      markRecentAlertEvents(triggered);
       setAlertLastCheckedAt(data.evaluatedAt ?? Date.now());
       setAlertMessage(
         `체크 완료: ${data.checkedRuleCount}개 규칙, ${data.triggeredCount}개 트리거, 쿨다운 억제 ${data.suppressedByCooldown}개`,
@@ -1298,6 +1486,10 @@ function App() {
     } finally {
       setAlertsChecking(false);
     }
+  };
+
+  const handleCheckWatchlistAlerts = () => {
+    void runWatchlistAlertCheck('manual');
   };
 
   const removeHorizontalLine = useCallback((id: string) => {
@@ -1557,6 +1749,7 @@ function App() {
               </button>
               <button className={watchTab === 'alerts' ? 'active' : ''} onClick={() => setWatchTab('alerts')}>
                 알림
+                {alertBadgeCount > 0 ? <span className="watch-tab-badge">{Math.min(alertBadgeCount, ALERT_EVENT_MAX_ITEMS)}</span> : null}
               </button>
             </div>
 
@@ -1769,8 +1962,44 @@ function App() {
                       <button type="button" onClick={handleCheckAlerts} disabled={alertsChecking}>
                         {alertsChecking ? '체크 중...' : 'Check now'}
                       </button>
+                      <button
+                        type="button"
+                        onClick={handleCheckWatchlistAlerts}
+                        disabled={alertsWatchlistChecking || watchlistAlertSymbols.length === 0}
+                      >
+                        {alertsWatchlistChecking ? '체크 중...' : 'Check watchlist now'}
+                      </button>
                     </div>
                   </form>
+
+                  <div className="alert-watchlist-controls">
+                    <label className="alert-auto-toggle">
+                      <input
+                        type="checkbox"
+                        checked={alertsAutoCheckEnabled}
+                        onChange={(event) => setAlertsAutoCheckEnabled(event.target.checked)}
+                      />
+                      <span>Auto-check</span>
+                    </label>
+                    <label className="alert-interval-select">
+                      <span>Interval</span>
+                      <select
+                        value={alertsAutoCheckIntervalSec}
+                        onChange={(event) => {
+                          const next = Number(event.target.value);
+                          if (next === 30 || next === 60 || next === 120) {
+                            setAlertsAutoCheckIntervalSec(next);
+                          }
+                        }}
+                        disabled={!alertsAutoCheckEnabled}
+                      >
+                        <option value={30}>30s</option>
+                        <option value={60}>60s</option>
+                        <option value={120}>120s</option>
+                      </select>
+                    </label>
+                    <span className="alert-watchlist-meta">관심종목 대상: {watchlistAlertSymbols.length}개</span>
+                  </div>
 
                   {alertMessage ? <p className="alert-message">{alertMessage}</p> : null}
                   {alertLastCheckedAt ? (

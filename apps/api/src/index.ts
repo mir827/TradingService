@@ -45,6 +45,17 @@ type AlertRule = {
   lastTriggeredAt: number | null;
 };
 
+type AlertCheckEvent = {
+  ruleId: string;
+  symbol: string;
+  metric: AlertMetric;
+  operator: AlertOperator;
+  threshold: number;
+  currentValue: number;
+  triggeredAt: number;
+  cooldownSec: number;
+};
+
 type DrawingLine = {
   id: string;
   price: number;
@@ -273,6 +284,10 @@ const alertCheckBodySchema = z.object({
     .optional(),
 });
 
+const alertCheckWatchlistBodySchema = z.object({
+  symbols: z.array(z.string().trim().min(1)).min(1).max(40),
+});
+
 function stripTags(html: string) {
   return html
     .replace(/<[^>]*>/g, ' ')
@@ -480,6 +495,53 @@ function compareWithOperator(value: number, operator: AlertOperator, threshold: 
 
 function selectMetricValue(metric: AlertMetric, values: { lastPrice: number; changePercent: number }) {
   return metric === 'price' ? values.lastPrice : values.changePercent;
+}
+
+function evaluateAlertRules(
+  rules: AlertRule[],
+  quoteBySymbol: Map<string, { lastPrice: number; changePercent: number }>,
+  evaluatedAt: number,
+) {
+  const triggered: AlertCheckEvent[] = [];
+  let suppressedByCooldown = 0;
+
+  for (const rule of rules) {
+    const values = quoteBySymbol.get(rule.symbol);
+    if (!values) continue;
+
+    const currentValue = selectMetricValue(rule.metric, values);
+    const met = compareWithOperator(currentValue, rule.operator, rule.threshold);
+
+    if (!met) continue;
+
+    const cooldownMs = rule.cooldownSec * 1000;
+    const inCooldown =
+      cooldownMs > 0 &&
+      typeof rule.lastTriggeredAt === 'number' &&
+      evaluatedAt - rule.lastTriggeredAt < cooldownMs;
+
+    if (inCooldown) {
+      suppressedByCooldown += 1;
+      continue;
+    }
+
+    rule.lastTriggeredAt = evaluatedAt;
+    triggered.push({
+      ruleId: rule.id,
+      symbol: rule.symbol,
+      metric: rule.metric,
+      operator: rule.operator,
+      threshold: rule.threshold,
+      currentValue,
+      triggeredAt: evaluatedAt,
+      cooldownSec: rule.cooldownSec,
+    });
+  }
+
+  return {
+    triggered,
+    suppressedByCooldown,
+  };
 }
 
 async function refreshKrxSymbols(force = false) {
@@ -1075,50 +1137,7 @@ app.post('/api/alerts/check', async (request, reply) => {
   }
 
   const now = Date.now();
-  const triggered: Array<{
-    ruleId: string;
-    symbol: string;
-    metric: AlertMetric;
-    operator: AlertOperator;
-    threshold: number;
-    currentValue: number;
-    triggeredAt: number;
-    cooldownSec: number;
-  }> = [];
-  let suppressedByCooldown = 0;
-
-  for (const rule of rules) {
-    const values = quoteBySymbol.get(rule.symbol);
-    if (!values) continue;
-
-    const currentValue = selectMetricValue(rule.metric, values);
-    const met = compareWithOperator(currentValue, rule.operator, rule.threshold);
-
-    if (!met) continue;
-
-    const cooldownMs = rule.cooldownSec * 1000;
-    const inCooldown =
-      cooldownMs > 0 &&
-      typeof rule.lastTriggeredAt === 'number' &&
-      now - rule.lastTriggeredAt < cooldownMs;
-
-    if (inCooldown) {
-      suppressedByCooldown += 1;
-      continue;
-    }
-
-    rule.lastTriggeredAt = now;
-    triggered.push({
-      ruleId: rule.id,
-      symbol: rule.symbol,
-      metric: rule.metric,
-      operator: rule.operator,
-      threshold: rule.threshold,
-      currentValue,
-      triggeredAt: now,
-      cooldownSec: rule.cooldownSec,
-    });
-  }
+  const { triggered, suppressedByCooldown } = evaluateAlertRules(rules, quoteBySymbol, now);
 
   return {
     evaluatedAt: now,
@@ -1126,6 +1145,43 @@ app.post('/api/alerts/check', async (request, reply) => {
     triggeredCount: triggered.length,
     suppressedByCooldown,
     triggered,
+  };
+});
+
+app.post('/api/alerts/check-watchlist', async (request, reply) => {
+  const parsed = alertCheckWatchlistBodySchema.safeParse(request.body ?? {});
+
+  if (!parsed.success) {
+    return reply.code(400).send({ error: 'Invalid body', detail: parsed.error.format() });
+  }
+
+  const checkedSymbols = [...new Set(parsed.data.symbols.map((symbol) => normalizeSymbol(symbol)))];
+  const quoteBySymbol = new Map<string, { lastPrice: number; changePercent: number }>();
+
+  try {
+    await Promise.all(
+      checkedSymbols.map(async (symbol) => {
+        const quote = await fetchLiveQuote(symbol);
+        quoteBySymbol.set(symbol, {
+          lastPrice: quote.lastPrice,
+          changePercent: quote.changePercent,
+        });
+      }),
+    );
+  } catch (error) {
+    app.log.error({ error, checkedSymbols }, 'Failed to fetch quotes for watchlist alert checks');
+    return reply.code(502).send({ error: 'Failed to evaluate watchlist alert rules due to quote fetch failure' });
+  }
+
+  const checkedSet = new Set(checkedSymbols);
+  const rules = [...alertRuleStore.values()].filter((rule) => checkedSet.has(rule.symbol));
+  const checkedAt = Date.now();
+  const { triggered } = evaluateAlertRules(rules, quoteBySymbol, checkedAt);
+
+  return {
+    checkedAt,
+    checkedSymbols,
+    events: triggered,
   };
 });
 
