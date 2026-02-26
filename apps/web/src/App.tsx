@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import {
   CandlestickSeries,
   ColorType,
@@ -8,6 +8,7 @@ import {
   type HistogramData,
   type IChartApi,
   type ISeriesApi,
+  type IPriceLine,
   type MouseEventParams,
   type Time,
   type UTCTimestamp,
@@ -58,6 +59,12 @@ type WatchPrefs = {
   watchSortKey: WatchSortKey;
   watchSortDir: WatchSortDir;
   watchMarketFilter: WatchMarketFilter;
+};
+
+type HorizontalLine = {
+  id: string;
+  price: number;
+  line: IPriceLine;
 };
 
 const intervals = ['1', '5', '15', '60', '240', '1D', '1W'];
@@ -146,6 +153,8 @@ function App() {
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const candleMapRef = useRef<Map<number, Candle>>(new Map());
+  const activeToolRef = useRef('cursor');
+  const horizontalLinesRef = useRef<HorizontalLine[]>([]);
 
   const [watchlistSymbols, setWatchlistSymbols] = useState<SymbolItem[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState('BTCUSDT');
@@ -167,6 +176,11 @@ function App() {
   const [bottomTab, setBottomTab] = useState<BottomTab>('pine');
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
+  const [horizontalLines, setHorizontalLines] = useState<Array<Pick<HorizontalLine, 'id' | 'price'>>>([]);
+
+  useEffect(() => {
+    activeToolRef.current = activeTool;
+  }, [activeTool]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -276,7 +290,37 @@ function App() {
       });
     };
 
+    const onChartClick = (param: MouseEventParams<Time>) => {
+      if (activeToolRef.current !== 'horizontal') return;
+      if (!param.point) return;
+
+      const price = candleSeries.coordinateToPrice(param.point.y);
+      if (typeof price !== 'number' || !Number.isFinite(price)) return;
+
+      const normalizedPrice = Number(price.toFixed(price < 10 ? 4 : 2));
+      const duplicated = horizontalLinesRef.current.some((item) => Math.abs(item.price - normalizedPrice) < 0.0001);
+      if (duplicated) return;
+
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const line = candleSeries.createPriceLine({
+        price: normalizedPrice,
+        color: '#f5a623',
+        lineWidth: 1,
+        axisLabelVisible: true,
+        title: `H ${formatPrice(normalizedPrice)}`,
+      });
+
+      horizontalLinesRef.current.push({
+        id,
+        price: normalizedPrice,
+        line,
+      });
+
+      setHorizontalLines((prev) => [...prev, { id, price: normalizedPrice }]);
+    };
+
     chart.subscribeCrosshairMove(onCrosshairMove);
+    chart.subscribeClick(onChartClick);
 
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
@@ -288,10 +332,12 @@ function App() {
     return () => {
       observer.disconnect();
       chart.unsubscribeCrosshairMove(onCrosshairMove);
+      chart.unsubscribeClick(onChartClick);
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;
+      horizontalLinesRef.current = [];
     };
   }, []);
 
@@ -598,6 +644,36 @@ function App() {
     }
   };
 
+  const removeHorizontalLine = useCallback((id: string) => {
+    const series = candleSeriesRef.current;
+    if (!series) return;
+
+    const targetIndex = horizontalLinesRef.current.findIndex((item) => item.id === id);
+    if (targetIndex < 0) return;
+
+    const [target] = horizontalLinesRef.current.splice(targetIndex, 1);
+    series.removePriceLine(target.line);
+    setHorizontalLines((prev) => prev.filter((item) => item.id !== id));
+  }, []);
+
+  const clearHorizontalLines = useCallback(() => {
+    const series = candleSeriesRef.current;
+    if (series) {
+      for (const item of horizontalLinesRef.current) {
+        series.removePriceLine(item.line);
+      }
+    }
+
+    horizontalLinesRef.current = [];
+    setHorizontalLines([]);
+  }, []);
+
+  useEffect(() => {
+    if (horizontalLinesRef.current.length > 0) {
+      clearHorizontalLines();
+    }
+  }, [clearHorizontalLines, selectedInterval, selectedSymbol]);
+
   const selectedMarket = selectedSymbolMeta?.market ?? 'CRYPTO';
   const selectedCode = selectedSymbolMeta ? getDisplayCode(selectedSymbolMeta) : shortTicker(selectedSymbol);
   const selectedName = selectedSymbolMeta?.name ?? shortTicker(selectedSymbol);
@@ -698,6 +774,28 @@ function App() {
 
           <div className="status-row">
             <span>{loading ? '데이터를 불러오는 중...' : '실시간 UI 프로토타입'}</span>
+
+            {activeTool === 'horizontal' ? (
+              <div className="status-actions">
+                <span className="status-chip">수평선 툴 활성화 · 차트 클릭으로 추가 ({horizontalLines.length})</span>
+                {horizontalLines.length > 0 ? (
+                  <button className="status-button" onClick={clearHorizontalLines}>
+                    수평선 전체 삭제
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+
+            {activeTool === 'horizontal' && horizontalLines.length > 0 ? (
+              <div className="line-tags" aria-label="수평선 목록">
+                {horizontalLines.slice(-4).map((line) => (
+                  <button key={line.id} className="line-tag" onClick={() => removeHorizontalLine(line.id)}>
+                    {formatPrice(line.price)} ×
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
             <span className="status-time">
               {displayCandle ? new Date(displayCandle.time * 1000).toLocaleString('ko-KR') : '시간 정보 없음'}
             </span>

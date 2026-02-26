@@ -228,6 +228,45 @@ select {
   gap: 10px;
 }
 
+.status-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.status-chip {
+  color: #ffcc66;
+  font-size: 11px;
+}
+
+.status-button {
+  border: 1px solid #4a3b26;
+  background: #2a2318;
+  color: #f7ca73;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.line-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.line-tag {
+  border: 1px solid #4a3b26;
+  background: #2a2318;
+  color: #f7ca73;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  cursor: pointer;
+}
+
 .status-time {
   margin-left: auto;
   color: #828b9d;
