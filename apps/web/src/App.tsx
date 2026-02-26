@@ -90,6 +90,13 @@ type AlertCheckEvent = {
   cooldownSec: number;
 };
 
+type AlertHistorySource = 'manual' | 'watchlist';
+
+type AlertHistoryEvent = AlertCheckEvent & {
+  source?: AlertHistorySource;
+  sourceSymbol?: string;
+};
+
 type WatchTab = 'watchlist' | 'detail' | 'alerts';
 type BottomTab = 'pine' | 'strategy' | 'trading';
 type WatchSortKey = 'symbol' | 'price' | 'changePercent';
@@ -338,6 +345,9 @@ function App() {
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
   const [alertTriggeredEvents, setAlertTriggeredEvents] = useState<AlertCheckEvent[]>([]);
   const [alertLastCheckedAt, setAlertLastCheckedAt] = useState<number | null>(null);
+  const [alertHistoryEvents, setAlertHistoryEvents] = useState<AlertHistoryEvent[]>([]);
+  const [alertsHistoryLoading, setAlertsHistoryLoading] = useState(false);
+  const [alertsHistoryClearing, setAlertsHistoryClearing] = useState(false);
 
   useEffect(() => {
     activeToolRef.current = activeTool;
@@ -1018,10 +1028,32 @@ function App() {
     [],
   );
 
+  const loadAlertHistory = useCallback(async () => {
+    setAlertsHistoryLoading(true);
+
+    try {
+      const response = await fetch(`${apiBase}/api/alerts/history?limit=50`);
+      if (!response.ok) throw new Error('alert history fetch failed');
+
+      const data = (await response.json()) as { events?: AlertHistoryEvent[] };
+      setAlertHistoryEvents(data.events ?? []);
+    } catch {
+      setAlertHistoryEvents([]);
+      setAlertMessage((prev) => prev ?? '알림 히스토리를 불러오지 못했습니다.');
+    } finally {
+      setAlertsHistoryLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     setAlertMessage(null);
     void loadAlertRules(selectedSymbol);
   }, [loadAlertRules, selectedSymbol]);
+
+  useEffect(() => {
+    if (watchTab !== 'alerts') return;
+    void loadAlertHistory();
+  }, [loadAlertHistory, watchTab]);
 
   useEffect(() => {
     candleMapRef.current = new Map(candles.map((candle) => [candle.time, candle]));
@@ -1290,6 +1322,7 @@ function App() {
           setAlertMessage(`자동 체크 트리거 ${events.length}건`);
         }
         await loadAlertRules(selectedSymbol);
+        await loadAlertHistory();
       } catch {
         setAlertMessage(
           source === 'manual'
@@ -1303,7 +1336,7 @@ function App() {
         watchlistAlertCheckInFlightRef.current = false;
       }
     },
-    [appendWatchlistAlertEvents, loadAlertRules, selectedSymbol, watchlistAlertSymbols],
+    [appendWatchlistAlertEvents, loadAlertHistory, loadAlertRules, selectedSymbol, watchlistAlertSymbols],
   );
 
   useEffect(() => {
@@ -1536,6 +1569,7 @@ function App() {
         `체크 완료: ${data.checkedRuleCount}개 규칙, ${data.triggeredCount}개 트리거, 쿨다운 억제 ${data.suppressedByCooldown}개`,
       );
       await loadAlertRules(selectedSymbol);
+      await loadAlertHistory();
     } catch {
       setAlertMessage('알림 체크에 실패했습니다.');
     } finally {
@@ -1545,6 +1579,25 @@ function App() {
 
   const handleCheckWatchlistAlerts = () => {
     void runWatchlistAlertCheck('manual');
+  };
+
+  const handleClearAlertHistory = async () => {
+    setAlertsHistoryClearing(true);
+
+    try {
+      const response = await fetch(`${apiBase}/api/alerts/history`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) throw new Error('clear alert history failed');
+
+      setAlertHistoryEvents([]);
+      setAlertMessage('알림 히스토리를 비웠습니다.');
+    } catch {
+      setAlertMessage('알림 히스토리 비우기에 실패했습니다.');
+    } finally {
+      setAlertsHistoryClearing(false);
+    }
   };
 
   const removeHorizontalLine = useCallback((id: string) => {
@@ -2142,6 +2195,47 @@ function App() {
                       </ul>
                     </div>
                   ) : null}
+
+                  <div className="alert-history">
+                    <div className="alert-history-head">
+                      <div className="alert-triggered-title">최근 알림 히스토리</div>
+                      <button
+                        type="button"
+                        onClick={handleClearAlertHistory}
+                        disabled={alertsHistoryClearing || alertsHistoryLoading || alertHistoryEvents.length === 0}
+                      >
+                        {alertsHistoryClearing ? '비우는 중...' : '히스토리 비우기'}
+                      </button>
+                    </div>
+                    {alertsHistoryLoading ? (
+                      <p className="alert-empty">히스토리를 불러오는 중...</p>
+                    ) : alertHistoryEvents.length === 0 ? (
+                      <p className="alert-empty">최근 알림 히스토리가 없습니다.</p>
+                    ) : (
+                      <ul className="alert-list">
+                        {alertHistoryEvents.map((eventItem, index) => (
+                          <li key={`${eventItem.ruleId}-${eventItem.triggeredAt}-${index}`}>
+                            <div className="alert-rule-row">
+                              <strong>
+                                {formatAlertMetric(eventItem.metric)} {eventItem.operator}{' '}
+                                {formatAlertValue(eventItem.metric, eventItem.threshold)}
+                              </strong>
+                              <div className="alert-history-meta">
+                                {eventItem.source ? (
+                                  <span className={`alert-source-tag ${eventItem.source}`}>{eventItem.source}</span>
+                                ) : null}
+                                <span>{eventItem.symbol}</span>
+                              </div>
+                            </div>
+                            <div className="alert-rule-sub">
+                              <span>현재값: {formatAlertValue(eventItem.metric, eventItem.currentValue)}</span>
+                              <span>시간: {new Date(eventItem.triggeredAt).toLocaleString('ko-KR')}</span>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
                 </div>
               ) : null}
             </div>

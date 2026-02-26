@@ -58,6 +58,13 @@ type AlertCheckEvent = {
   cooldownSec: number;
 };
 
+type AlertHistoryEventSource = 'manual' | 'watchlist';
+
+type AlertHistoryEvent = AlertCheckEvent & {
+  source: AlertHistoryEventSource;
+  sourceSymbol?: string;
+};
+
 type DrawingLine = {
   id: string;
   price: number;
@@ -127,10 +134,12 @@ let krxLoadedAtMs = 0;
 const quoteCache = new Map<string, { expiresAt: number; value: Quote }>();
 const candleCache = new Map<string, { expiresAt: number; value: Candle[] }>();
 const alertRuleStore = new Map<string, AlertRule>();
+const alertHistoryStore: AlertHistoryEvent[] = [];
 const drawingStore = new Map<string, DrawingItem[]>();
 const watchlistStore = new Map<string, SymbolItem[]>();
 const DEFAULT_RUNTIME_STATE_FILE = './outputs/runtime-state.json';
 const RUNTIME_STATE_VERSION = 1;
+const ALERT_HISTORY_MAX_EVENTS = 500;
 
 const cryptoIntervalMap: Record<string, string> = {
   '1': '1m',
@@ -290,6 +299,11 @@ const alertCheckBodySchema = z.object({
 
 const alertCheckWatchlistBodySchema = z.object({
   symbols: z.array(z.string().trim().min(1)).min(1).max(40),
+});
+
+const alertHistoryQuerySchema = z.object({
+  symbol: z.string().optional(),
+  limit: z.coerce.number().int().min(1).default(50).transform((value) => Math.min(value, 200)),
 });
 
 const persistedAlertRuleSchema = z.object({
@@ -571,6 +585,7 @@ async function loadRuntimeStateFromDisk() {
   }
 
   alertRuleStore.clear();
+  alertHistoryStore.length = 0;
   watchlistStore.clear();
   drawingStore.clear();
 
@@ -726,6 +741,49 @@ function compareWithOperator(value: number, operator: AlertOperator, threshold: 
 
 function selectMetricValue(metric: AlertMetric, values: { lastPrice: number; changePercent: number }) {
   return metric === 'price' ? values.lastPrice : values.changePercent;
+}
+
+function appendAlertHistoryEvents(
+  events: AlertCheckEvent[],
+  source: AlertHistoryEventSource,
+  sourceSymbol?: string | null,
+) {
+  if (!events.length) return;
+
+  const normalizedSourceSymbol = sourceSymbol ? normalizeSymbol(sourceSymbol) : null;
+
+  for (const eventItem of events) {
+    alertHistoryStore.push({
+      ...eventItem,
+      source,
+      ...(normalizedSourceSymbol ? { sourceSymbol: normalizedSourceSymbol } : {}),
+    });
+  }
+
+  const overflow = alertHistoryStore.length - ALERT_HISTORY_MAX_EVENTS;
+  if (overflow > 0) {
+    alertHistoryStore.splice(0, overflow);
+  }
+}
+
+function getAlertHistory(symbol: string | null, limit: number) {
+  const normalizedSymbol = symbol ? normalizeSymbol(symbol) : null;
+  const filtered = normalizedSymbol
+    ? alertHistoryStore.filter((eventItem) => eventItem.symbol === normalizedSymbol)
+    : alertHistoryStore;
+  const total = filtered.length;
+  const start = Math.max(total - limit, 0);
+
+  return {
+    total,
+    events: filtered.slice(start).reverse().map((eventItem) => ({ ...eventItem })),
+  };
+}
+
+function clearAlertHistory() {
+  const cleared = alertHistoryStore.length;
+  alertHistoryStore.length = 0;
+  return cleared;
 }
 
 function evaluateAlertRules(
@@ -1380,6 +1438,7 @@ app.post('/api/alerts/check', async (request, reply) => {
   const now = Date.now();
   const { triggered, suppressedByCooldown } = evaluateAlertRules(rules, quoteBySymbol, now);
   if (triggered.length > 0) {
+    appendAlertHistoryEvents(triggered, 'manual', requestedSymbol);
     await persistRuntimeState();
   }
 
@@ -1422,6 +1481,7 @@ app.post('/api/alerts/check-watchlist', async (request, reply) => {
   const checkedAt = Date.now();
   const { triggered } = evaluateAlertRules(rules, quoteBySymbol, checkedAt);
   if (triggered.length > 0) {
+    appendAlertHistoryEvents(triggered, 'watchlist');
     await persistRuntimeState();
   }
 
@@ -1430,6 +1490,29 @@ app.post('/api/alerts/check-watchlist', async (request, reply) => {
     checkedSymbols,
     events: triggered,
   };
+});
+
+app.get('/api/alerts/history', async (request, reply) => {
+  const parsed = alertHistoryQuerySchema.safeParse(request.query);
+
+  if (!parsed.success) {
+    return reply.code(400).send({ error: 'Invalid query', detail: parsed.error.format() });
+  }
+
+  const symbol = parsed.data.symbol ? normalizeSymbol(parsed.data.symbol) : null;
+  const { total, events } = getAlertHistory(symbol, parsed.data.limit);
+
+  return {
+    symbol,
+    limit: parsed.data.limit,
+    total,
+    events,
+  };
+});
+
+app.delete('/api/alerts/history', async () => {
+  const cleared = clearAlertHistory();
+  return { ok: true, cleared };
 });
 
 function isMainModule() {

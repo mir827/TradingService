@@ -904,6 +904,62 @@ select {
   color: #8ea6d8;
 }
 
+.alert-history {
+  display: grid;
+  gap: 6px;
+}
+
+.alert-history-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.alert-history-head button {
+  border: 1px solid #2d4766;
+  background: #182638;
+  color: #b7d8ff;
+  border-radius: 6px;
+  padding: 4px 9px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.alert-history-head button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.alert-history-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #c0c6d4;
+}
+
+.alert-source-tag {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 10px;
+  line-height: 1.4;
+  text-transform: lowercase;
+}
+
+.alert-source-tag.manual {
+  border-color: #315577;
+  background: #162639;
+  color: #9ecfff;
+}
+
+.alert-source-tag.watchlist {
+  border-color: #4f6031;
+  background: #1e2b17;
+  color: #c9ef98;
+}
+
 .tv-bottom-panel {
   border-top: 1px solid #2b2f3a;
   background: #131722;

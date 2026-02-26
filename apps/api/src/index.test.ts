@@ -776,6 +776,245 @@ describe('api alerts watchlist checks', () => {
   });
 });
 
+describe('api alerts history', () => {
+  it('appends manual/watchlist triggered events and supports symbol filtering', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const rawUrl =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const url = new URL(rawUrl);
+      const symbol = url.searchParams.get('symbol');
+
+      if (url.hostname !== 'api.binance.com' || url.pathname !== '/api/v3/ticker/24hr' || symbol !== 'ETHUSDT') {
+        return jsonResponse({ error: 'unexpected request' }, 404);
+      }
+
+      return jsonResponse({
+        lastPrice: '2900',
+        priceChangePercent: '-2.4',
+        highPrice: '3000',
+        lowPrice: '2800',
+        volume: '200',
+      });
+    });
+
+    const createBtcRule = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'BTCUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 50000,
+      },
+    });
+    const createEthRule = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'ETHUSDT',
+        metric: 'changePercent',
+        operator: '<=',
+        threshold: -2,
+      },
+    });
+
+    expect(createBtcRule.statusCode).toBe(201);
+    expect(createEthRule.statusCode).toBe(201);
+
+    const manualCheck = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check',
+      payload: {
+        symbol: 'BTCUSDT',
+        values: {
+          symbol: 'BTCUSDT',
+          lastPrice: 51000,
+          changePercent: 0.5,
+        },
+      },
+    });
+
+    expect(manualCheck.statusCode).toBe(200);
+    expect((manualCheck.json() as { triggeredCount: number }).triggeredCount).toBe(1);
+
+    const watchlistCheck = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check-watchlist',
+      payload: {
+        symbols: ['ETHUSDT'],
+      },
+    });
+
+    expect(watchlistCheck.statusCode).toBe(200);
+    expect((watchlistCheck.json() as { events: unknown[] }).events).toHaveLength(1);
+
+    const historyResponse = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history',
+    });
+
+    expect(historyResponse.statusCode).toBe(200);
+    const historyBody = historyResponse.json() as {
+      symbol: string | null;
+      limit: number;
+      total: number;
+      events: Array<{
+        symbol: string;
+        metric: string;
+        threshold: number;
+        currentValue: number;
+        source: 'manual' | 'watchlist';
+        sourceSymbol?: string;
+      }>;
+    };
+
+    expect(historyBody.symbol).toBeNull();
+    expect(historyBody.limit).toBe(50);
+    expect(historyBody.total).toBe(2);
+    expect(historyBody.events).toHaveLength(2);
+    expect(historyBody.events[0]).toMatchObject({
+      symbol: 'ETHUSDT',
+      metric: 'changePercent',
+      threshold: -2,
+      currentValue: -2.4,
+      source: 'watchlist',
+    });
+    expect(historyBody.events[1]).toMatchObject({
+      symbol: 'BTCUSDT',
+      metric: 'price',
+      threshold: 50000,
+      currentValue: 51000,
+      source: 'manual',
+      sourceSymbol: 'BTCUSDT',
+    });
+
+    const filteredResponse = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?symbol=btcusdt&limit=10',
+    });
+
+    expect(filteredResponse.statusCode).toBe(200);
+    expect(filteredResponse.json()).toMatchObject({
+      symbol: 'BTCUSDT',
+      limit: 10,
+      total: 1,
+      events: [
+        {
+          symbol: 'BTCUSDT',
+          metric: 'price',
+          source: 'manual',
+        },
+      ],
+    });
+
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it('applies default/max limit and clears history', async () => {
+    const createRule = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'BTCUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 100,
+      },
+    });
+
+    expect(createRule.statusCode).toBe(201);
+
+    for (let i = 0; i < 55; i += 1) {
+      const check = await app.inject({
+        method: 'POST',
+        url: '/api/alerts/check',
+        payload: {
+          symbol: 'BTCUSDT',
+          values: {
+            symbol: 'BTCUSDT',
+            lastPrice: 100 + i,
+            changePercent: i / 10,
+          },
+        },
+      });
+
+      expect(check.statusCode).toBe(200);
+    }
+
+    const defaultLimitResponse = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history',
+    });
+
+    expect(defaultLimitResponse.statusCode).toBe(200);
+    const defaultBody = defaultLimitResponse.json() as {
+      limit: number;
+      total: number;
+      events: Array<{ currentValue: number }>;
+    };
+    expect(defaultBody.limit).toBe(50);
+    expect(defaultBody.total).toBe(55);
+    expect(defaultBody.events).toHaveLength(50);
+    expect(defaultBody.events[0].currentValue).toBe(154);
+    expect(defaultBody.events[49].currentValue).toBe(105);
+
+    const maxLimitResponse = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?limit=999',
+    });
+
+    expect(maxLimitResponse.statusCode).toBe(200);
+    const maxBody = maxLimitResponse.json() as {
+      limit: number;
+      total: number;
+      events: Array<{ currentValue: number }>;
+    };
+    expect(maxBody.limit).toBe(200);
+    expect(maxBody.total).toBe(55);
+    expect(maxBody.events).toHaveLength(55);
+    expect(maxBody.events[0].currentValue).toBe(154);
+    expect(maxBody.events[54].currentValue).toBe(100);
+
+    const filteredResponse = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?symbol=BTCUSDT&limit=3',
+    });
+
+    expect(filteredResponse.statusCode).toBe(200);
+    expect(filteredResponse.json()).toMatchObject({
+      symbol: 'BTCUSDT',
+      limit: 3,
+      total: 55,
+      events: [{ currentValue: 154 }, { currentValue: 153 }, { currentValue: 152 }],
+    });
+
+    const clearResponse = await app.inject({
+      method: 'DELETE',
+      url: '/api/alerts/history',
+    });
+
+    expect(clearResponse.statusCode).toBe(200);
+    expect(clearResponse.json()).toEqual({ ok: true, cleared: 55 });
+
+    const afterClearResponse = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?limit=200',
+    });
+
+    expect(afterClearResponse.statusCode).toBe(200);
+    expect(afterClearResponse.json()).toEqual({
+      symbol: null,
+      limit: 200,
+      total: 0,
+      events: [],
+    });
+  });
+});
+
 describe('api drawings persistence', () => {
   it('saves and loads drawings with symbol/interval normalization from legacy lines payload', async () => {
     const saveResponse = await app.inject({
