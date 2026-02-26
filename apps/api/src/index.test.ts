@@ -305,7 +305,7 @@ describe('api alerts rules', () => {
 });
 
 describe('api drawings persistence', () => {
-  it('saves and loads drawings with symbol/interval normalization', async () => {
+  it('saves and loads drawings with symbol/interval normalization from legacy lines payload', async () => {
     const saveResponse = await app.inject({
       method: 'PUT',
       url: '/api/drawings',
@@ -322,6 +322,7 @@ describe('api drawings persistence', () => {
       symbol: string;
       interval: string;
       lines: Array<{ id: string; price: number }>;
+      drawings: Array<{ id: string; type: 'horizontal' | 'vertical'; price?: number; time?: number }>;
     };
 
     expect(saved.symbol).toBe('BTCUSDT');
@@ -330,6 +331,10 @@ describe('api drawings persistence', () => {
     expect(saved.lines[0]).toEqual({ id: 'line-fixed', price: 100000.5 });
     expect(saved.lines[1].id).toMatch(/^line_/);
     expect(saved.lines[1].price).toBe(99500.25);
+    expect(saved.drawings).toEqual([
+      { id: 'line-fixed', type: 'horizontal', price: 100000.5 },
+      { id: saved.lines[1].id, type: 'horizontal', price: 99500.25 },
+    ]);
 
     const loadResponse = await app.inject({
       method: 'GET',
@@ -340,6 +345,57 @@ describe('api drawings persistence', () => {
     expect(loadResponse.json()).toEqual({
       symbol: 'BTCUSDT',
       interval: '1D',
+      drawings: saved.drawings,
+      lines: saved.lines,
+    });
+  });
+
+  it('saves and loads mixed horizontal/vertical drawings', async () => {
+    const saveResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/drawings',
+      payload: {
+        symbol: 'ETHUSDT',
+        interval: '60',
+        drawings: [
+          { id: 'h-fixed', type: 'horizontal', price: 3210.5 },
+          { id: 'v-fixed', type: 'vertical', time: 1735689600 },
+          { type: 'vertical', time: 1735693200 },
+        ],
+      },
+    });
+
+    expect(saveResponse.statusCode).toBe(200);
+
+    const saved = saveResponse.json() as {
+      symbol: string;
+      interval: string;
+      lines: Array<{ id: string; price: number }>;
+      drawings: Array<{ id: string; type: 'horizontal' | 'vertical'; price?: number; time?: number }>;
+    };
+
+    expect(saved.symbol).toBe('ETHUSDT');
+    expect(saved.interval).toBe('60');
+    expect(saved.drawings).toHaveLength(3);
+    expect(saved.drawings[0]).toEqual({ id: 'h-fixed', type: 'horizontal', price: 3210.5 });
+    expect(saved.drawings[1]).toEqual({ id: 'v-fixed', type: 'vertical', time: 1735689600 });
+    expect(saved.drawings[2]).toEqual({
+      id: expect.stringMatching(/^vline_/),
+      type: 'vertical',
+      time: 1735693200,
+    });
+    expect(saved.lines).toEqual([{ id: 'h-fixed', price: 3210.5 }]);
+
+    const loadResponse = await app.inject({
+      method: 'GET',
+      url: '/api/drawings?symbol=ethusdt&interval=60',
+    });
+
+    expect(loadResponse.statusCode).toBe(200);
+    expect(loadResponse.json()).toEqual({
+      symbol: 'ETHUSDT',
+      interval: '60',
+      drawings: saved.drawings,
       lines: saved.lines,
     });
   });
@@ -363,6 +419,18 @@ describe('api drawings persistence', () => {
     });
 
     expect(invalidBody.statusCode).toBe(400);
+
+    const invalidVerticalDrawing = await app.inject({
+      method: 'PUT',
+      url: '/api/drawings',
+      payload: {
+        symbol: 'BTCUSDT',
+        interval: '60',
+        drawings: [{ type: 'vertical', price: 10000 }],
+      },
+    });
+
+    expect(invalidVerticalDrawing.statusCode).toBe(400);
   });
 });
 

@@ -109,12 +109,19 @@ type HorizontalLine = {
 };
 
 type HorizontalLineState = Pick<HorizontalLine, 'id' | 'price'>;
+type VerticalLineState = {
+  id: string;
+  time: UTCTimestamp;
+};
+type DrawingPayloadItem =
+  | { id: string; type: 'horizontal'; price: number }
+  | { id: string; type: 'vertical'; time: number };
 
 const intervals = ['1', '5', '15', '60', '240', '1D', '1W'];
 const leftTools = [
   { key: 'cursor', icon: '↖', label: '커서' },
   { key: 'crosshair', icon: '＋', label: '크로스헤어' },
-  { key: 'trend', icon: '／', label: '추세선' },
+  { key: 'vertical', icon: '｜', label: '수직선' },
   { key: 'horizontal', icon: '―', label: '수평선' },
   { key: 'fib', icon: '📐', label: '피보나치' },
   { key: 'brush', icon: '✏️', label: '브러시' },
@@ -209,18 +216,34 @@ function createHorizontalLineId() {
   return `line_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function createVerticalLineId() {
+  return `vline_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function normalizeLinePrice(price: number) {
   return Number(price.toFixed(Math.abs(price) < 10 ? 4 : 2));
 }
 
+function formatDrawingTime(time: UTCTimestamp) {
+  return new Date(Number(time) * 1000).toLocaleString('ko-KR', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 function App() {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const verticalOverlayRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const candleMapRef = useRef<Map<number, Candle>>(new Map());
   const activeToolRef = useRef('cursor');
   const horizontalLinesRef = useRef<HorizontalLine[]>([]);
+  const verticalLinesRef = useRef<VerticalLineState[]>([]);
+  const verticalLineNodesRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const selectedSymbolRef = useRef('BTCUSDT');
   const selectedIntervalRef = useRef('60');
 
@@ -247,6 +270,7 @@ function App() {
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
   const [horizontalLines, setHorizontalLines] = useState<HorizontalLineState[]>([]);
+  const [verticalLines, setVerticalLines] = useState<VerticalLineState[]>([]);
   const [chartReady, setChartReady] = useState(false);
   const [alertRules, setAlertRules] = useState<AlertRule[]>([]);
   const [alertsLoading, setAlertsLoading] = useState(false);
@@ -282,11 +306,68 @@ function App() {
     };
   }, []);
 
+  const toVerticalLineState = useCallback((line: { id?: string; time: number }) => {
+    const normalizedTime = Number(line.time);
+    if (!Number.isFinite(normalizedTime)) return null;
+
+    const timestamp = Math.floor(normalizedTime);
+    if (timestamp <= 0) return null;
+
+    return {
+      id: line.id?.trim() || createVerticalLineId(),
+      time: timestamp as UTCTimestamp,
+    };
+  }, []);
+
   const snapshotHorizontalLines = useCallback((): HorizontalLineState[] => {
     return horizontalLinesRef.current.map((item) => ({
       id: item.id,
       price: item.price,
     }));
+  }, []);
+
+  const snapshotVerticalLines = useCallback((): VerticalLineState[] => {
+    return verticalLinesRef.current.map((item) => ({
+      id: item.id,
+      time: item.time,
+    }));
+  }, []);
+
+  const toDrawingPayload = useCallback((lines: HorizontalLineState[], markers: VerticalLineState[]): DrawingPayloadItem[] => {
+    return [
+      ...lines.map((line) => ({
+        id: line.id,
+        type: 'horizontal' as const,
+        price: line.price,
+      })),
+      ...markers.map((marker) => ({
+        id: marker.id,
+        type: 'vertical' as const,
+        time: Number(marker.time),
+      })),
+    ];
+  }, []);
+
+  const syncVerticalLinePositions = useCallback(() => {
+    const chart = chartRef.current;
+    const overlay = verticalOverlayRef.current;
+    if (!chart || !overlay) return;
+
+    const overlayWidth = overlay.clientWidth;
+
+    for (const item of verticalLinesRef.current) {
+      const node = verticalLineNodesRef.current.get(item.id);
+      if (!node) continue;
+
+      const x = chart.timeScale().timeToCoordinate(item.time as Time);
+      if (x === null || !Number.isFinite(x) || x < 0 || x > overlayWidth) {
+        node.style.display = 'none';
+        continue;
+      }
+
+      node.style.display = 'block';
+      node.style.left = `${x}px`;
+    }
   }, []);
 
   const renderHorizontalLines = useCallback((lines: HorizontalLineState[]) => {
@@ -312,7 +393,33 @@ function App() {
     setHorizontalLines(lines);
   }, []);
 
-  const persistHorizontalLines = useCallback(async (symbol: string, interval: string, lines: HorizontalLineState[]) => {
+  const renderVerticalLines = useCallback((lines: VerticalLineState[]) => {
+    verticalLinesRef.current = lines;
+    setVerticalLines(lines);
+
+    const overlay = verticalOverlayRef.current;
+    if (!overlay) return;
+
+    const keepIds = new Set(lines.map((item) => item.id));
+
+    for (const [id, node] of verticalLineNodesRef.current.entries()) {
+      if (keepIds.has(id)) continue;
+      node.remove();
+      verticalLineNodesRef.current.delete(id);
+    }
+
+    for (const item of lines) {
+      if (verticalLineNodesRef.current.has(item.id)) continue;
+      const node = document.createElement('div');
+      node.className = 'vertical-line-marker';
+      overlay.appendChild(node);
+      verticalLineNodesRef.current.set(item.id, node);
+    }
+
+    syncVerticalLinePositions();
+  }, [syncVerticalLinePositions]);
+
+  const persistDrawings = useCallback(async (symbol: string, interval: string, lines: HorizontalLineState[], markers: VerticalLineState[]) => {
     try {
       const response = await fetch(`${apiBase}/api/drawings`, {
         method: 'PUT',
@@ -321,6 +428,7 @@ function App() {
           symbol,
           interval,
           lines,
+          drawings: toDrawingPayload(lines, markers),
         }),
       });
 
@@ -328,12 +436,12 @@ function App() {
         throw new Error('persist drawings failed');
       }
     } catch {
-      setError((prev) => prev ?? '수평선 저장에 실패했습니다.');
+      setError((prev) => prev ?? '도형 저장에 실패했습니다.');
     }
-  }, []);
+  }, [toDrawingPayload]);
 
-  const loadHorizontalLines = useCallback(
-    async (symbol: string, interval: string): Promise<HorizontalLineState[]> => {
+  const loadDrawings = useCallback(
+    async (symbol: string, interval: string): Promise<{ horizontalLines: HorizontalLineState[]; verticalLines: VerticalLineState[] }> => {
       try {
         const response = await fetch(
           `${apiBase}/api/drawings?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}`,
@@ -344,18 +452,47 @@ function App() {
         }
 
         const data = (await response.json()) as {
+          drawings?: Array<{ id?: string; type?: string; price?: number; time?: number }>;
           lines?: Array<{ id?: string; price: number }>;
         };
 
-        return (data.lines ?? [])
-          .map((line) => toHorizontalLineState(line))
-          .filter((line): line is HorizontalLineState => Boolean(line));
+        const nextHorizontalLines: HorizontalLineState[] = [];
+        const nextVerticalLines: VerticalLineState[] = [];
+
+        if (data.drawings?.length) {
+          for (const drawing of data.drawings) {
+            if (drawing.type === 'horizontal' && typeof drawing.price === 'number') {
+              const horizontalLine = toHorizontalLineState({ id: drawing.id, price: drawing.price });
+              if (horizontalLine) {
+                nextHorizontalLines.push(horizontalLine);
+              }
+            }
+
+            if (drawing.type === 'vertical' && typeof drawing.time === 'number') {
+              const verticalLine = toVerticalLineState({ id: drawing.id, time: drawing.time });
+              if (verticalLine) {
+                nextVerticalLines.push(verticalLine);
+              }
+            }
+          }
+        } else {
+          nextHorizontalLines.push(
+            ...(data.lines ?? [])
+              .map((line) => toHorizontalLineState(line))
+              .filter((line): line is HorizontalLineState => Boolean(line)),
+          );
+        }
+
+        return {
+          horizontalLines: nextHorizontalLines,
+          verticalLines: nextVerticalLines,
+        };
       } catch {
-        setError((prev) => prev ?? '수평선을 불러오지 못했습니다.');
-        return [];
+        setError((prev) => prev ?? '도형을 불러오지 못했습니다.');
+        return { horizontalLines: [], verticalLines: [] };
       }
     },
-    [toHorizontalLineState],
+    [toHorizontalLineState, toVerticalLineState],
   );
 
   useEffect(() => {
@@ -467,78 +604,117 @@ function App() {
     };
 
     const onChartClick = (param: MouseEventParams<Time>) => {
-      if (activeToolRef.current !== 'horizontal') return;
-      if (!param.point) return;
+      if (activeToolRef.current === 'horizontal') {
+        if (!param.point) return;
 
-      const price = candleSeries.coordinateToPrice(param.point.y);
-      if (typeof price !== 'number' || !Number.isFinite(price)) return;
+        const price = candleSeries.coordinateToPrice(param.point.y);
+        if (typeof price !== 'number' || !Number.isFinite(price)) return;
 
-      const normalizedPrice = normalizeLinePrice(price);
-      const duplicated = horizontalLinesRef.current.some((item) => Math.abs(item.price - normalizedPrice) < 0.0001);
+        const normalizedPrice = normalizeLinePrice(price);
+        const duplicated = horizontalLinesRef.current.some((item) => Math.abs(item.price - normalizedPrice) < 0.0001);
+        if (duplicated) return;
+
+        const id = createHorizontalLineId();
+        const line = candleSeries.createPriceLine({
+          price: normalizedPrice,
+          color: '#f5a623',
+          lineWidth: 1,
+          axisLabelVisible: true,
+          title: `H ${formatPrice(normalizedPrice)}`,
+        });
+
+        horizontalLinesRef.current.push({
+          id,
+          price: normalizedPrice,
+          line,
+        });
+
+        const nextHorizontalLines = snapshotHorizontalLines();
+        setHorizontalLines(nextHorizontalLines);
+        void persistDrawings(
+          selectedSymbolRef.current,
+          selectedIntervalRef.current,
+          nextHorizontalLines,
+          snapshotVerticalLines(),
+        );
+        return;
+      }
+
+      if (activeToolRef.current !== 'vertical') return;
+      if (typeof param.time !== 'number') return;
+
+      const timestamp = Math.floor(param.time) as UTCTimestamp;
+      const duplicated = verticalLinesRef.current.some((item) => Number(item.time) === Number(timestamp));
       if (duplicated) return;
 
-      const id = createHorizontalLineId();
-      const line = candleSeries.createPriceLine({
-        price: normalizedPrice,
-        color: '#f5a623',
-        lineWidth: 1,
-        axisLabelVisible: true,
-        title: `H ${formatPrice(normalizedPrice)}`,
-      });
+      const nextVerticalLines = [...snapshotVerticalLines(), { id: createVerticalLineId(), time: timestamp }];
+      renderVerticalLines(nextVerticalLines);
+      void persistDrawings(
+        selectedSymbolRef.current,
+        selectedIntervalRef.current,
+        snapshotHorizontalLines(),
+        nextVerticalLines,
+      );
+    };
 
-      horizontalLinesRef.current.push({
-        id,
-        price: normalizedPrice,
-        line,
-      });
-
-      const nextLines = snapshotHorizontalLines();
-      setHorizontalLines(nextLines);
-      void persistHorizontalLines(selectedSymbolRef.current, selectedIntervalRef.current, nextLines);
+    const onVisibleLogicalRangeChange = () => {
+      syncVerticalLinePositions();
     };
 
     chart.subscribeCrosshairMove(onCrosshairMove);
     chart.subscribeClick(onChartClick);
+    chart.timeScale().subscribeVisibleLogicalRangeChange(onVisibleLogicalRangeChange);
 
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     volumeSeriesRef.current = volumeSeries;
     setChartReady(true);
 
-    const observer = new ResizeObserver(() => chart.timeScale().fitContent());
+    const observer = new ResizeObserver(() => {
+      chart.timeScale().fitContent();
+      syncVerticalLinePositions();
+    });
     observer.observe(containerRef.current);
 
     return () => {
       observer.disconnect();
       chart.unsubscribeCrosshairMove(onCrosshairMove);
       chart.unsubscribeClick(onChartClick);
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(onVisibleLogicalRangeChange);
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;
       horizontalLinesRef.current = [];
+      verticalLinesRef.current = [];
+      for (const node of verticalLineNodesRef.current.values()) {
+        node.remove();
+      }
+      verticalLineNodesRef.current.clear();
       setHorizontalLines([]);
+      setVerticalLines([]);
       setChartReady(false);
     };
-  }, [persistHorizontalLines, snapshotHorizontalLines]);
+  }, [persistDrawings, renderVerticalLines, snapshotHorizontalLines, snapshotVerticalLines, syncVerticalLinePositions]);
 
   useEffect(() => {
     if (!chartReady) return;
 
     let canceled = false;
 
-    const loadPersistedLines = async () => {
-      const loadedLines = await loadHorizontalLines(selectedSymbol, selectedInterval);
+    const loadPersistedDrawings = async () => {
+      const loaded = await loadDrawings(selectedSymbol, selectedInterval);
       if (canceled) return;
-      renderHorizontalLines(loadedLines);
+      renderHorizontalLines(loaded.horizontalLines);
+      renderVerticalLines(loaded.verticalLines);
     };
 
-    void loadPersistedLines();
+    void loadPersistedDrawings();
 
     return () => {
       canceled = true;
     };
-  }, [chartReady, loadHorizontalLines, renderHorizontalLines, selectedInterval, selectedSymbol]);
+  }, [chartReady, loadDrawings, renderHorizontalLines, renderVerticalLines, selectedInterval, selectedSymbol]);
 
   useEffect(() => {
     let canceled = false;
@@ -724,7 +900,8 @@ function App() {
     candleSeriesRef.current.setData(candleData);
     volumeSeriesRef.current.setData(volumeData);
     chartRef.current.timeScale().fitContent();
-  }, [candles]);
+    syncVerticalLinePositions();
+  }, [candles, syncVerticalLinePositions]);
 
   const selectedQuote = quotes[selectedSymbol];
   const latestCandle = candles.at(-1) ?? null;
@@ -1022,10 +1199,15 @@ function App() {
 
     const [target] = horizontalLinesRef.current.splice(targetIndex, 1);
     series.removePriceLine(target.line);
-    const nextLines = snapshotHorizontalLines();
-    setHorizontalLines(nextLines);
-    void persistHorizontalLines(selectedSymbolRef.current, selectedIntervalRef.current, nextLines);
-  }, [persistHorizontalLines, snapshotHorizontalLines]);
+    const nextHorizontalLines = snapshotHorizontalLines();
+    setHorizontalLines(nextHorizontalLines);
+    void persistDrawings(
+      selectedSymbolRef.current,
+      selectedIntervalRef.current,
+      nextHorizontalLines,
+      snapshotVerticalLines(),
+    );
+  }, [persistDrawings, snapshotHorizontalLines, snapshotVerticalLines]);
 
   const clearHorizontalLines = useCallback(() => {
     const series = candleSeriesRef.current;
@@ -1037,12 +1219,47 @@ function App() {
 
     horizontalLinesRef.current = [];
     setHorizontalLines([]);
-    void persistHorizontalLines(selectedSymbolRef.current, selectedIntervalRef.current, []);
-  }, [persistHorizontalLines]);
+    void persistDrawings(selectedSymbolRef.current, selectedIntervalRef.current, [], snapshotVerticalLines());
+  }, [persistDrawings, snapshotVerticalLines]);
+
+  const removeVerticalLine = useCallback((id: string) => {
+    const nextVerticalLines = verticalLinesRef.current.filter((item) => item.id !== id);
+    if (nextVerticalLines.length === verticalLinesRef.current.length) return;
+
+    renderVerticalLines(nextVerticalLines);
+    void persistDrawings(
+      selectedSymbolRef.current,
+      selectedIntervalRef.current,
+      snapshotHorizontalLines(),
+      nextVerticalLines,
+    );
+  }, [persistDrawings, renderVerticalLines, snapshotHorizontalLines]);
+
+  const clearVerticalLines = useCallback(() => {
+    if (!verticalLinesRef.current.length) return;
+
+    renderVerticalLines([]);
+    void persistDrawings(selectedSymbolRef.current, selectedIntervalRef.current, snapshotHorizontalLines(), []);
+  }, [persistDrawings, renderVerticalLines, snapshotHorizontalLines]);
+
+  const clearAllDrawings = useCallback(() => {
+    const series = candleSeriesRef.current;
+    if (series) {
+      for (const item of horizontalLinesRef.current) {
+        series.removePriceLine(item.line);
+      }
+    }
+
+    horizontalLinesRef.current = [];
+    setHorizontalLines([]);
+    renderVerticalLines([]);
+    void persistDrawings(selectedSymbolRef.current, selectedIntervalRef.current, [], []);
+  }, [persistDrawings, renderVerticalLines]);
 
   const selectedCode = selectedSymbolMeta ? getDisplayCode(selectedSymbolMeta) : shortTicker(selectedSymbol);
   const selectedName = selectedSymbolMeta?.name ?? shortTicker(selectedSymbol);
   const exchangeText = marketExchangeText(selectedMarket);
+  const totalDrawings = horizontalLines.length + verticalLines.length;
 
   return (
     <div className="tv-app">
@@ -1139,7 +1356,10 @@ function App() {
             </div>
           </div>
 
-          <div className="chart-area" ref={containerRef} />
+          <div className="chart-area">
+            <div className="chart-canvas" ref={containerRef} />
+            <div className="vertical-lines-overlay" ref={verticalOverlayRef} />
+          </div>
 
           <div className="status-row">
             <span>{loading ? '데이터를 불러오는 중...' : '실시간 UI 프로토타입'}</span>
@@ -1152,6 +1372,36 @@ function App() {
                     수평선 전체 삭제
                   </button>
                 ) : null}
+                {totalDrawings > 0 ? (
+                  <button className="status-button" onClick={clearAllDrawings}>
+                    도형 전체 삭제
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+
+            {activeTool === 'vertical' ? (
+              <div className="status-actions">
+                <span className="status-chip">수직선 툴 활성화 · 차트 클릭으로 추가 ({verticalLines.length})</span>
+                {verticalLines.length > 0 ? (
+                  <button className="status-button" onClick={clearVerticalLines}>
+                    수직선 전체 삭제
+                  </button>
+                ) : null}
+                {totalDrawings > 0 ? (
+                  <button className="status-button" onClick={clearAllDrawings}>
+                    도형 전체 삭제
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+
+            {activeTool !== 'horizontal' && activeTool !== 'vertical' && totalDrawings > 0 ? (
+              <div className="status-actions">
+                <span className="status-chip">저장된 도형 {totalDrawings}</span>
+                <button className="status-button" onClick={clearAllDrawings}>
+                  도형 전체 삭제
+                </button>
               </div>
             ) : null}
 
@@ -1160,6 +1410,16 @@ function App() {
                 {horizontalLines.slice(-4).map((line) => (
                   <button key={line.id} className="line-tag" onClick={() => removeHorizontalLine(line.id)}>
                     {formatPrice(line.price)} ×
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
+            {activeTool === 'vertical' && verticalLines.length > 0 ? (
+              <div className="line-tags" aria-label="수직선 목록">
+                {verticalLines.slice(-6).map((line) => (
+                  <button key={line.id} className="line-tag" onClick={() => removeVerticalLine(line.id)}>
+                    {formatDrawingTime(line.time)} ×
                   </button>
                 ))}
               </div>

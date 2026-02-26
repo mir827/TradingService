@@ -50,6 +50,20 @@ type DrawingLine = {
   price: number;
 };
 
+type HorizontalDrawing = {
+  id: string;
+  type: 'horizontal';
+  price: number;
+};
+
+type VerticalDrawing = {
+  id: string;
+  type: 'vertical';
+  time: number;
+};
+
+type DrawingItem = HorizontalDrawing | VerticalDrawing;
+
 type MarketStatusState = 'OPEN' | 'CLOSED';
 type MarketStatusReason = 'WEEKEND' | 'OUT_OF_SESSION' | 'SESSION_ACTIVE';
 
@@ -100,7 +114,7 @@ let krxLoadedAtMs = 0;
 const quoteCache = new Map<string, { expiresAt: number; value: Quote }>();
 const candleCache = new Map<string, { expiresAt: number; value: Candle[] }>();
 const alertRuleStore = new Map<string, AlertRule>();
-const drawingStore = new Map<string, DrawingLine[]>();
+const drawingStore = new Map<string, DrawingItem[]>();
 
 const cryptoIntervalMap: Record<string, string> = {
   '1': '1m',
@@ -193,11 +207,30 @@ const drawingLineSchema = z.object({
   price: z.number().finite(),
 });
 
-const drawingsPutBodySchema = z.object({
-  symbol: z.string().min(1),
-  interval: z.string().min(1),
-  lines: z.array(drawingLineSchema),
-});
+const drawingItemSchema = z.discriminatedUnion('type', [
+  z.object({
+    id: z.string().min(1).optional(),
+    type: z.literal('horizontal'),
+    price: z.number().finite(),
+  }),
+  z.object({
+    id: z.string().min(1).optional(),
+    type: z.literal('vertical'),
+    time: z.number().int().nonnegative(),
+  }),
+]);
+
+const drawingsPutBodySchema = z
+  .object({
+    symbol: z.string().min(1),
+    interval: z.string().min(1),
+    lines: z.array(drawingLineSchema).optional(),
+    drawings: z.array(drawingItemSchema).optional(),
+  })
+  .refine((data) => data.drawings !== undefined || data.lines !== undefined, {
+    message: 'Either drawings or lines is required',
+    path: ['drawings'],
+  });
 
 const alertRuleCreateSchema = z.object({
   symbol: z.string().min(1),
@@ -286,11 +319,48 @@ function createDrawingLineId() {
   return `line_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function normalizeDrawingLines(lines: Array<{ id?: string; price: number }>): DrawingLine[] {
+function createDrawingVerticalId() {
+  return `vline_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeDrawingLines(lines: Array<{ id?: string; price: number }>): DrawingItem[] {
   return lines.map((line) => ({
     id: line.id?.trim() || createDrawingLineId(),
+    type: 'horizontal',
     price: line.price,
   }));
+}
+
+function normalizeDrawingItems(
+  drawings: Array<
+    | { id?: string; type: 'horizontal'; price: number }
+    | { id?: string; type: 'vertical'; time: number }
+  >,
+): DrawingItem[] {
+  return drawings.map((drawing) => {
+    if (drawing.type === 'horizontal') {
+      return {
+        id: drawing.id?.trim() || createDrawingLineId(),
+        type: 'horizontal',
+        price: drawing.price,
+      };
+    }
+
+    return {
+      id: drawing.id?.trim() || createDrawingVerticalId(),
+      type: 'vertical',
+      time: drawing.time,
+    };
+  });
+}
+
+function toLegacyDrawingLines(drawings: DrawingItem[]): DrawingLine[] {
+  return drawings
+    .filter((drawing): drawing is HorizontalDrawing => drawing.type === 'horizontal')
+    .map((drawing) => ({
+      id: drawing.id,
+      price: drawing.price,
+    }));
 }
 
 function getKrxStatus(checkedAt: number): Omit<MarketStatusPayload, 'market' | 'checkedAt'> {
@@ -780,9 +850,9 @@ app.get('/api/drawings', async (request, reply) => {
   const symbol = normalizeSymbol(parsed.data.symbol);
   const interval = normalizeInterval(parsed.data.interval);
   const key = createDrawingStoreKey(symbol, interval);
-  const lines = drawingStore.get(key) ?? [];
+  const drawings = drawingStore.get(key) ?? [];
 
-  return { symbol, interval, lines };
+  return { symbol, interval, drawings, lines: toLegacyDrawingLines(drawings) };
 });
 
 app.put('/api/drawings', async (request, reply) => {
@@ -795,11 +865,13 @@ app.put('/api/drawings', async (request, reply) => {
   const symbol = normalizeSymbol(parsed.data.symbol);
   const interval = normalizeInterval(parsed.data.interval);
   const key = createDrawingStoreKey(symbol, interval);
-  const lines = normalizeDrawingLines(parsed.data.lines);
+  const drawings = parsed.data.drawings
+    ? normalizeDrawingItems(parsed.data.drawings)
+    : normalizeDrawingLines(parsed.data.lines ?? []);
 
-  drawingStore.set(key, lines);
+  drawingStore.set(key, drawings);
 
-  return { symbol, interval, lines };
+  return { symbol, interval, drawings, lines: toLegacyDrawingLines(drawings) };
 });
 
 app.get('/api/alerts/rules', async (request, reply) => {

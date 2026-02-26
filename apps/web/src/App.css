@@ -279,6 +279,29 @@ select {
   min-height: 0;
   min-width: 0;
   overflow: hidden;
+  position: relative;
+}
+
+.chart-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.vertical-lines-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.vertical-line-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #4da4ff;
+  box-shadow: 0 0 0 1px rgb(77 164 255 / 35%);
+  transform: translateX(-0.5px);
 }
 
 .status-row {
