@@ -14,6 +14,7 @@ function jsonResponse(payload: unknown, status = 200) {
 let app!: FastifyInstance;
 let stateDir = '';
 let stateFile = '';
+let previousSkipKrxPreloadEnv: string | undefined;
 
 async function createAppInstance() {
   vi.resetModules();
@@ -29,6 +30,8 @@ async function restartAppInstance() {
 beforeEach(async () => {
   stateDir = await mkdtemp(join(tmpdir(), 'tradingservice-api-state-'));
   stateFile = join(stateDir, 'runtime-state.json');
+  previousSkipKrxPreloadEnv = process.env.TRADINGSERVICE_SKIP_KRX_PRELOAD;
+  process.env.TRADINGSERVICE_SKIP_KRX_PRELOAD = '1';
   process.env.TRADINGSERVICE_STATE_FILE = stateFile;
   app = await createAppInstance();
 });
@@ -38,6 +41,12 @@ afterEach(async () => {
   if (app) {
     await app.close();
   }
+  if (previousSkipKrxPreloadEnv === undefined) {
+    delete process.env.TRADINGSERVICE_SKIP_KRX_PRELOAD;
+  } else {
+    process.env.TRADINGSERVICE_SKIP_KRX_PRELOAD = previousSkipKrxPreloadEnv;
+  }
+  previousSkipKrxPreloadEnv = undefined;
   delete process.env.TRADINGSERVICE_STATE_FILE;
   if (stateDir) {
     await rm(stateDir, { recursive: true, force: true });

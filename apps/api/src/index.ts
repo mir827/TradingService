@@ -108,6 +108,7 @@ await app.register(cors, {
 
 const KRX_LIST_URL = 'https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13';
 const KRX_REFRESH_MS = 1000 * 60 * 60 * 12;
+const KRX_STARTUP_PRELOAD_TIMEOUT_MS = 2000;
 
 const cryptoSymbols: SymbolItem[] = [
   { symbol: 'BTCUSDT', name: 'Bitcoin / USDT', market: 'CRYPTO', exchange: 'BINANCE' },
@@ -913,7 +914,7 @@ function evaluateAlertRules(
   };
 }
 
-async function refreshKrxSymbols(force = false) {
+async function refreshKrxSymbols(force = false, signal?: AbortSignal) {
   if (!force && krxSymbols.length > 0 && Date.now() - krxLoadedAtMs < KRX_REFRESH_MS) {
     return;
   }
@@ -923,6 +924,7 @@ async function refreshKrxSymbols(force = false) {
       'User-Agent': 'Mozilla/5.0',
       Referer: 'https://kind.krx.co.kr/corpgeneral/corpList.do?method=loadInitPage',
     },
+    signal,
   });
 
   if (!response.ok) {
@@ -974,6 +976,34 @@ async function refreshKrxSymbols(force = false) {
 
   krxSymbols = [...dedup.values()];
   krxLoadedAtMs = Date.now();
+}
+
+function shouldSkipKrxStartupPreload() {
+  const skipByEnv = process.env.TRADINGSERVICE_SKIP_KRX_PRELOAD === '1';
+  const skipByTest = process.env.NODE_ENV === 'test' || typeof process.env.VITEST !== 'undefined';
+  return skipByEnv || skipByTest;
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+async function preloadKrxSymbolsWithTimeout(timeoutMs: number) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    await refreshKrxSymbols(false, controller.signal);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error(`KRX preload timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 function getDefaultSymbols() {
@@ -1207,11 +1237,15 @@ try {
   app.log.warn({ error }, 'Unable to restore runtime state. Starting with empty state.');
 }
 
-try {
-  await refreshKrxSymbols();
-  app.log.info(`Loaded ${krxSymbols.length} KRX symbols`);
-} catch (error) {
-  app.log.warn({ error }, 'Unable to preload KRX symbols. Fallback list will be used.');
+if (shouldSkipKrxStartupPreload()) {
+  app.log.info('Skipping KRX preload at startup');
+} else {
+  try {
+    await preloadKrxSymbolsWithTimeout(KRX_STARTUP_PRELOAD_TIMEOUT_MS);
+    app.log.info(`Loaded ${krxSymbols.length} KRX symbols`);
+  } catch (error) {
+    app.log.warn({ error }, 'Unable to preload KRX symbols. Fallback list will be used.');
+  }
 }
 
 app.get('/health', async () => ({
