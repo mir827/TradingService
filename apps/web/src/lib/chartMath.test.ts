@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { calculateEMA, calculateSMA, normalizeCompareOverlay, toTimeValuePoints } from './chartMath';
+import {
+  calculateBollingerBands,
+  calculateEMA,
+  calculateMACD,
+  calculateRSI,
+  calculateSMA,
+  normalizeCompareOverlay,
+  toTimeValuePoints,
+} from './chartMath';
 
 describe('chart math helpers', () => {
   it('calculates SMA values with null warmup slots', () => {
@@ -16,6 +24,47 @@ describe('chart math helpers', () => {
 
   it('returns all null when EMA period exceeds value length', () => {
     expect(calculateEMA([1, 2], 5)).toEqual([null, null]);
+  });
+
+  it('calculates RSI with expected warmup behavior', () => {
+    expect(calculateRSI([1, 2, 3, 4, 5, 6], 3)).toEqual([null, null, null, 100, 100, 100]);
+  });
+
+  it('returns RSI midpoint for flat price movement', () => {
+    expect(calculateRSI([5, 5, 5, 5], 2)).toEqual([null, null, 50, 50]);
+  });
+
+  it('returns zeroed MACD components for flat price movement', () => {
+    const values = Array(40).fill(10);
+    const result = calculateMACD(values, 12, 26, 9);
+    expect(result.macdLine.filter((value): value is number => typeof value === 'number').every((value) => value === 0)).toBe(
+      true,
+    );
+    expect(result.signalLine.filter((value): value is number => typeof value === 'number').every((value) => value === 0)).toBe(
+      true,
+    );
+    expect(result.histogram.filter((value): value is number => typeof value === 'number').every((value) => value === 0)).toBe(
+      true,
+    );
+  });
+
+  it('calculates Bollinger Bands for flat values', () => {
+    const values = Array(10).fill(7);
+    const result = calculateBollingerBands(values, 5, 2);
+
+    expect(result.basis.slice(0, 4)).toEqual([null, null, null, null]);
+    expect(result.upper.slice(0, 4)).toEqual([null, null, null, null]);
+    expect(result.lower.slice(0, 4)).toEqual([null, null, null, null]);
+    expect(result.basis.slice(4)).toEqual([7, 7, 7, 7, 7, 7]);
+    expect(result.upper.slice(4)).toEqual([7, 7, 7, 7, 7, 7]);
+    expect(result.lower.slice(4)).toEqual([7, 7, 7, 7, 7, 7]);
+  });
+
+  it('returns null Bollinger values when std-dev multiplier is invalid', () => {
+    const result = calculateBollingerBands([1, 2, 3, 4, 5], 3, 0);
+    expect(result.basis).toEqual([null, null, null, null, null]);
+    expect(result.upper).toEqual([null, null, null, null, null]);
+    expect(result.lower).toEqual([null, null, null, null, null]);
   });
 
   it('maps indicator values to time/value points', () => {

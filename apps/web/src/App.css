@@ -328,12 +328,20 @@ select {
 }
 
 .indicator-toggle-list {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
+  display: grid;
+  gap: 8px;
 }
 
-.indicator-toggle-list label {
+.indicator-item {
+  border: 1px solid #243049;
+  border-radius: 8px;
+  background: #121a2a;
+  padding: 8px 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.indicator-item-toggle {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -341,8 +349,34 @@ select {
   color: #c2c9d6;
 }
 
-.indicator-toggle-list input {
+.indicator-item-toggle input {
   margin: 0;
+}
+
+.indicator-setting-fields {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-left: 20px;
+}
+
+.indicator-setting-fields label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #9eb1ca;
+  font-size: 11px;
+}
+
+.indicator-setting-fields input {
+  width: 72px;
+  border: 1px solid #2b2f3a;
+  background: #1e222d;
+  color: #d1d4dc;
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
 }
 
 .compare-controls {

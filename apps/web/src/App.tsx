@@ -26,7 +26,26 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts';
 import './App.css';
-import { calculateEMA, calculateSMA, normalizeCompareOverlay, toTimeValuePoints } from './lib/chartMath';
+import {
+  calculateBollingerBands,
+  calculateEMA,
+  calculateMACD,
+  calculateRSI,
+  calculateSMA,
+  normalizeCompareOverlay,
+  toTimeValuePoints,
+} from './lib/chartMath';
+import {
+  BOLLINGER_PERIOD_RANGE,
+  BOLLINGER_STD_DEV_RANGE,
+  DEFAULT_INDICATOR_SETTINGS,
+  MACD_FAST_RANGE,
+  MACD_SIGNAL_RANGE,
+  MACD_SLOW_RANGE,
+  RSI_PERIOD_RANGE,
+  normalizeIndicatorSettings,
+  type IndicatorSettings,
+} from './lib/indicatorSettings';
 import {
   REPLAY_TICK_MS_BY_SPEED,
   getReplayProgress,
@@ -125,15 +144,27 @@ type TopActionKey = 'indicator' | 'compare' | 'alerts' | 'replay';
 type WatchSortKey = 'symbol' | 'price' | 'changePercent';
 type WatchSortDir = 'asc' | 'desc';
 type WatchMarketFilter = 'ALL' | MarketType;
-type IndicatorKind = 'SMA' | 'EMA';
-type IndicatorKey = 'sma20' | 'sma60' | 'ema20';
+type IndicatorKey = 'sma20' | 'sma60' | 'ema20' | 'rsi' | 'macd' | 'bbands';
+type IndicatorSeriesKey =
+  | 'sma20'
+  | 'sma60'
+  | 'ema20'
+  | 'rsi'
+  | 'macd'
+  | 'macdSignal'
+  | 'bbBasis'
+  | 'bbUpper'
+  | 'bbLower';
 type IndicatorConfig = {
   key: IndicatorKey;
   label: string;
-  kind: IndicatorKind;
-  period: number;
   color: string;
-  legend: string;
+};
+
+type IndicatorPrefs = {
+  version: number;
+  enabledIndicators: Record<IndicatorKey, boolean>;
+  settings: IndicatorSettings;
 };
 
 type WatchPrefs = {
@@ -278,9 +309,12 @@ const topActions: Array<{ key: TopActionKey; label: string }> = [
   { key: 'replay', label: '리플레이' },
 ];
 const indicatorConfigs: IndicatorConfig[] = [
-  { key: 'sma20', label: 'SMA 20', kind: 'SMA', period: 20, color: '#f0b429', legend: 'SMA 20' },
-  { key: 'sma60', label: 'SMA 60', kind: 'SMA', period: 60, color: '#4da4ff', legend: 'SMA 60' },
-  { key: 'ema20', label: 'EMA 20', kind: 'EMA', period: 20, color: '#ff7f50', legend: 'EMA 20' },
+  { key: 'sma20', label: 'SMA 20', color: '#f0b429' },
+  { key: 'sma60', label: 'SMA 60', color: '#4da4ff' },
+  { key: 'ema20', label: 'EMA 20', color: '#ff7f50' },
+  { key: 'rsi', label: 'RSI', color: '#c792ea' },
+  { key: 'macd', label: 'MACD', color: '#4cc9f0' },
+  { key: 'bbands', label: 'Bollinger Bands', color: '#9ad1ff' },
 ];
 const compareOverlayColor = '#85d47b';
 const bottomTabs: Array<{ id: BottomTab; label: string }> = [
@@ -292,6 +326,7 @@ const bottomTabs: Array<{ id: BottomTab; label: string }> = [
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? '';
 const WATCH_PREFS_STORAGE_KEY = 'tradingservice.watchprefs.v1';
 const ALERT_AUTO_CHECK_STORAGE_KEY = 'tradingservice.alerts.autocheck.v1';
+const INDICATOR_PREFS_STORAGE_KEY = 'tradingservice.indicators.v2';
 const DEFAULT_WATCHLIST_NAME = 'default';
 const ALERT_EVENT_DEDUP_WINDOW_MS = 10_000;
 const ALERT_EVENT_MAX_ITEMS = 20;
@@ -300,6 +335,30 @@ const HOVER_TOOLTIP_HEIGHT = 174;
 const HOVER_TOOLTIP_MARGIN = 14;
 const DRAWING_HIT_TOLERANCE_PX = 8;
 const NOTE_HIT_RADIUS_PX = 14;
+const INDICATOR_PREFS_VERSION = 2;
+
+const DEFAULT_ENABLED_INDICATORS: Record<IndicatorKey, boolean> = {
+  sma20: false,
+  sma60: false,
+  ema20: false,
+  rsi: false,
+  macd: false,
+  bbands: false,
+};
+
+function createIndicatorSeriesRefs(): Record<IndicatorSeriesKey, ISeriesApi<'Line'> | null> {
+  return {
+    sma20: null,
+    sma60: null,
+    ema20: null,
+    rsi: null,
+    macd: null,
+    macdSignal: null,
+    bbBasis: null,
+    bbUpper: null,
+    bbLower: null,
+  };
+}
 
 function toTimestampValue(value: number) {
   return Math.max(1, Math.floor(value)) as UTCTimestamp;
@@ -389,6 +448,46 @@ function getStoredAlertAutoCheckPrefs(): Partial<AlertAutoCheckPrefs> {
     };
   } catch {
     return {};
+  }
+}
+
+function normalizeStoredEnabledIndicators(value: unknown): Record<IndicatorKey, boolean> {
+  const parsed = (value ?? {}) as Partial<Record<IndicatorKey, unknown>>;
+
+  return {
+    sma20: parsed.sma20 === true,
+    sma60: parsed.sma60 === true,
+    ema20: parsed.ema20 === true,
+    rsi: parsed.rsi === true,
+    macd: parsed.macd === true,
+    bbands: parsed.bbands === true,
+  };
+}
+
+function getStoredIndicatorPrefs(): IndicatorPrefs {
+  const defaults: IndicatorPrefs = {
+    version: INDICATOR_PREFS_VERSION,
+    enabledIndicators: { ...DEFAULT_ENABLED_INDICATORS },
+    settings: normalizeIndicatorSettings(DEFAULT_INDICATOR_SETTINGS),
+  };
+
+  if (typeof window === 'undefined') return defaults;
+
+  try {
+    const raw = window.localStorage.getItem(INDICATOR_PREFS_STORAGE_KEY);
+    if (!raw) return defaults;
+
+    const parsed = JSON.parse(raw) as Partial<IndicatorPrefs>;
+    return {
+      version: INDICATOR_PREFS_VERSION,
+      enabledIndicators: {
+        ...DEFAULT_ENABLED_INDICATORS,
+        ...normalizeStoredEnabledIndicators(parsed.enabledIndicators),
+      },
+      settings: normalizeIndicatorSettings(parsed.settings),
+    };
+  } catch {
+    return defaults;
   }
 }
 
@@ -487,6 +586,25 @@ function formatCandleDateTime(time: number) {
   });
 }
 
+function formatIndicatorLegend(config: IndicatorConfig, settings: IndicatorSettings) {
+  if (config.key === 'rsi') {
+    return `RSI ${settings.rsi.period}`;
+  }
+
+  if (config.key === 'macd') {
+    return `MACD ${settings.macd.fast}/${settings.macd.slow}/${settings.macd.signal}`;
+  }
+
+  if (config.key === 'bbands') {
+    const stdDevText = Number.isInteger(settings.bollinger.stdDev)
+      ? `${settings.bollinger.stdDev}`
+      : settings.bollinger.stdDev.toFixed(1);
+    return `BB ${settings.bollinger.period}, ${stdDevText}`;
+  }
+
+  return config.label;
+}
+
 function App() {
   const chartAreaRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -494,11 +612,7 @@ function App() {
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
-  const indicatorSeriesRefs = useRef<Record<IndicatorKey, ISeriesApi<'Line'> | null>>({
-    sma20: null,
-    sma60: null,
-    ema20: null,
-  });
+  const indicatorSeriesRefs = useRef<Record<IndicatorSeriesKey, ISeriesApi<'Line'> | null>>(createIndicatorSeriesRefs());
   const compareSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const candleMapRef = useRef<Map<number, Candle>>(new Map());
   const activeToolRef = useRef<ToolKey>('cursor');
@@ -538,11 +652,10 @@ function App() {
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [indicatorPanelOpen, setIndicatorPanelOpen] = useState(false);
   const [comparisonPanelOpen, setComparisonPanelOpen] = useState(false);
-  const [enabledIndicators, setEnabledIndicators] = useState<Record<IndicatorKey, boolean>>({
-    sma20: false,
-    sma60: false,
-    ema20: false,
-  });
+  const [enabledIndicators, setEnabledIndicators] = useState<Record<IndicatorKey, boolean>>(
+    () => getStoredIndicatorPrefs().enabledIndicators,
+  );
+  const [indicatorSettings, setIndicatorSettings] = useState<IndicatorSettings>(() => getStoredIndicatorPrefs().settings);
   const [compareSymbol, setCompareSymbol] = useState('');
   const [compareCandles, setCompareCandles] = useState<Candle[]>([]);
   const [compareLoading, setCompareLoading] = useState(false);
@@ -1242,6 +1355,18 @@ function App() {
   }, [alertsAutoCheckEnabled, alertsAutoCheckIntervalSec]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const payload: IndicatorPrefs = {
+      version: INDICATOR_PREFS_VERSION,
+      enabledIndicators,
+      settings: normalizeIndicatorSettings(indicatorSettings),
+    };
+
+    window.localStorage.setItem(INDICATOR_PREFS_STORAGE_KEY, JSON.stringify(payload));
+  }, [enabledIndicators, indicatorSettings]);
+
+  useEffect(() => {
     let canceled = false;
 
     const applyWatchlist = (nextSymbols: SymbolItem[]) => {
@@ -1376,6 +1501,53 @@ function App() {
       lastValueVisible: false,
       crosshairMarkerVisible: false,
     });
+    const rsiSeries = chart.addSeries(LineSeries, {
+      priceScaleId: 'rsi',
+      color: indicatorConfigs[3].color,
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    const macdSeries = chart.addSeries(LineSeries, {
+      priceScaleId: 'macd',
+      color: indicatorConfigs[4].color,
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    const macdSignalSeries = chart.addSeries(LineSeries, {
+      priceScaleId: 'macd',
+      color: '#f5c06f',
+      lineWidth: 1,
+      lineStyle: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    const bbBasisSeries = chart.addSeries(LineSeries, {
+      color: indicatorConfigs[5].color,
+      lineWidth: 1,
+      lineStyle: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    const bbUpperSeries = chart.addSeries(LineSeries, {
+      color: '#85c6ff',
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    const bbLowerSeries = chart.addSeries(LineSeries, {
+      color: '#85c6ff',
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
     const compareSeries = chart.addSeries(LineSeries, {
       color: compareOverlayColor,
       lineWidth: 2,
@@ -1387,8 +1559,24 @@ function App() {
 
     volumeSeries.priceScale().applyOptions({
       scaleMargins: {
-        top: 0.82,
+        top: 0.9,
         bottom: 0,
+      },
+    });
+    chart.priceScale('rsi').applyOptions({
+      visible: false,
+      borderVisible: false,
+      scaleMargins: {
+        top: 0.66,
+        bottom: 0.24,
+      },
+    });
+    chart.priceScale('macd').applyOptions({
+      visible: false,
+      borderVisible: false,
+      scaleMargins: {
+        top: 0.78,
+        bottom: 0.12,
       },
     });
 
@@ -1636,6 +1824,12 @@ function App() {
       sma20: sma20Series,
       sma60: sma60Series,
       ema20: ema20Series,
+      rsi: rsiSeries,
+      macd: macdSeries,
+      macdSignal: macdSignalSeries,
+      bbBasis: bbBasisSeries,
+      bbUpper: bbUpperSeries,
+      bbLower: bbLowerSeries,
     };
     compareSeriesRef.current = compareSeries;
     setChartReady(true);
@@ -1658,7 +1852,7 @@ function App() {
       chartRef.current = null;
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;
-      indicatorSeriesRefs.current = { sma20: null, sma60: null, ema20: null };
+      indicatorSeriesRefs.current = createIndicatorSeriesRefs();
       compareSeriesRef.current = null;
       horizontalLinesRef.current = [];
       verticalLinesRef.current = [];
@@ -2018,21 +2212,18 @@ function App() {
   }, [activeCandles, refreshDrawingOverlay, syncVerticalLinePositions]);
 
   useEffect(() => {
+    const seriesMap = indicatorSeriesRefs.current;
     const closeValues = activeCandles.map((candle) => candle.close);
 
-    for (const config of indicatorConfigs) {
-      const series = indicatorSeriesRefs.current[config.key];
-      if (!series) continue;
+    const clearSeries = (key: IndicatorSeriesKey) => {
+      const series = seriesMap[key];
+      if (!series) return;
+      series.setData([]);
+    };
 
-      if (!enabledIndicators[config.key] || closeValues.length === 0) {
-        series.setData([]);
-        continue;
-      }
-
-      const values =
-        config.kind === 'SMA'
-          ? calculateSMA(closeValues, config.period)
-          : calculateEMA(closeValues, config.period);
+    const setSeriesValues = (key: IndicatorSeriesKey, values: Array<number | null>) => {
+      const series = seriesMap[key];
+      if (!series) return;
 
       const points: LineData[] = toTimeValuePoints(activeCandles, values).map((point) => ({
         time: point.time as UTCTimestamp,
@@ -2040,8 +2231,68 @@ function App() {
       }));
 
       series.setData(points);
+    };
+
+    if (closeValues.length === 0) {
+      for (const key of Object.keys(seriesMap) as IndicatorSeriesKey[]) {
+        clearSeries(key);
+      }
+      return;
     }
-  }, [activeCandles, enabledIndicators]);
+
+    if (enabledIndicators.sma20) {
+      setSeriesValues('sma20', calculateSMA(closeValues, 20));
+    } else {
+      clearSeries('sma20');
+    }
+
+    if (enabledIndicators.sma60) {
+      setSeriesValues('sma60', calculateSMA(closeValues, 60));
+    } else {
+      clearSeries('sma60');
+    }
+
+    if (enabledIndicators.ema20) {
+      setSeriesValues('ema20', calculateEMA(closeValues, 20));
+    } else {
+      clearSeries('ema20');
+    }
+
+    if (enabledIndicators.rsi) {
+      setSeriesValues('rsi', calculateRSI(closeValues, indicatorSettings.rsi.period));
+    } else {
+      clearSeries('rsi');
+    }
+
+    if (enabledIndicators.macd) {
+      const macd = calculateMACD(
+        closeValues,
+        indicatorSettings.macd.fast,
+        indicatorSettings.macd.slow,
+        indicatorSettings.macd.signal,
+      );
+      setSeriesValues('macd', macd.macdLine);
+      setSeriesValues('macdSignal', macd.signalLine);
+    } else {
+      clearSeries('macd');
+      clearSeries('macdSignal');
+    }
+
+    if (enabledIndicators.bbands) {
+      const bollinger = calculateBollingerBands(
+        closeValues,
+        indicatorSettings.bollinger.period,
+        indicatorSettings.bollinger.stdDev,
+      );
+      setSeriesValues('bbBasis', bollinger.basis);
+      setSeriesValues('bbUpper', bollinger.upper);
+      setSeriesValues('bbLower', bollinger.lower);
+    } else {
+      clearSeries('bbBasis');
+      clearSeries('bbUpper');
+      clearSeries('bbLower');
+    }
+  }, [activeCandles, enabledIndicators, indicatorSettings]);
 
   const normalizedComparePoints = useMemo(() => {
     if (!compareSymbol || compareLoading || compareError) return [];
@@ -3371,6 +3622,66 @@ function App() {
     }));
   }, []);
 
+  const updateRsiPeriod = useCallback((value: string) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return;
+
+    setIndicatorSettings((previous) =>
+      normalizeIndicatorSettings({
+        ...previous,
+        rsi: {
+          ...previous.rsi,
+          period: numeric,
+        },
+      }),
+    );
+  }, []);
+
+  const updateMacdSetting = useCallback((field: keyof IndicatorSettings['macd'], value: string) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return;
+
+    setIndicatorSettings((previous) =>
+      normalizeIndicatorSettings({
+        ...previous,
+        macd: {
+          ...previous.macd,
+          [field]: numeric,
+        },
+      }),
+    );
+  }, []);
+
+  const updateBollingerPeriod = useCallback((value: string) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return;
+
+    setIndicatorSettings((previous) =>
+      normalizeIndicatorSettings({
+        ...previous,
+        bollinger: {
+          ...previous.bollinger,
+          period: numeric,
+        },
+      }),
+    );
+  }, []);
+
+  const updateBollingerStdDev = useCallback((value: string) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return;
+
+    setIndicatorSettings((previous) =>
+      normalizeIndicatorSettings({
+        ...previous,
+        bollinger: {
+          ...previous.bollinger,
+          stdDev: numeric,
+        },
+      }),
+    );
+  }, []);
+
   const startReplay = useCallback(() => {
     if (candles.length === 0) return false;
 
@@ -3607,6 +3918,10 @@ function App() {
     };
   }, [notes, overlayTick, rays, rectangles, trendlines]);
   const activeIndicatorConfigs = indicatorConfigs.filter((config) => enabledIndicators[config.key]);
+  const activeIndicatorLegends = activeIndicatorConfigs.map((config) => ({
+    ...config,
+    legend: formatIndicatorLegend(config, indicatorSettings),
+  }));
   const compareSymbolMeta =
     watchlistSymbols.find((item) => item.symbol === compareSymbol) ??
     searchResults.find((item) => item.symbol === compareSymbol) ??
@@ -3731,9 +4046,9 @@ function App() {
                 <span>Vol {displayCandle ? formatVolume(displayCandle.volume) : '--'}</span>
               </div>
 
-              {activeIndicatorConfigs.length > 0 || compareSymbol ? (
+              {activeIndicatorLegends.length > 0 || compareSymbol ? (
                 <div className="chart-legend-row">
-                  {activeIndicatorConfigs.map((config) => (
+                  {activeIndicatorLegends.map((config) => (
                     <span key={config.key} className="chart-legend-item">
                       <span className="legend-dot" style={{ backgroundColor: config.color }} />
                       {config.legend}
@@ -3757,15 +4072,98 @@ function App() {
                   <strong>지표</strong>
                   <div className="indicator-toggle-list">
                     {indicatorConfigs.map((config) => (
-                      <label key={config.key}>
-                        <input
-                          type="checkbox"
-                          checked={enabledIndicators[config.key]}
-                          onChange={() => toggleIndicator(config.key)}
-                        />
-                        <span className="legend-dot" style={{ backgroundColor: config.color }} />
-                        <span>{config.label}</span>
-                      </label>
+                      <div key={config.key} className="indicator-item">
+                        <label className="indicator-item-toggle">
+                          <input
+                            type="checkbox"
+                            checked={enabledIndicators[config.key]}
+                            onChange={() => toggleIndicator(config.key)}
+                          />
+                          <span className="legend-dot" style={{ backgroundColor: config.color }} />
+                          <span>{config.label}</span>
+                        </label>
+
+                        {config.key === 'rsi' ? (
+                          <div className="indicator-setting-fields">
+                            <label>
+                              <span>기간</span>
+                              <input
+                                type="number"
+                                min={RSI_PERIOD_RANGE.min}
+                                max={RSI_PERIOD_RANGE.max}
+                                step={1}
+                                value={indicatorSettings.rsi.period}
+                                onChange={(event) => updateRsiPeriod(event.target.value)}
+                              />
+                            </label>
+                          </div>
+                        ) : null}
+
+                        {config.key === 'macd' ? (
+                          <div className="indicator-setting-fields">
+                            <label>
+                              <span>Fast</span>
+                              <input
+                                type="number"
+                                min={MACD_FAST_RANGE.min}
+                                max={MACD_FAST_RANGE.max}
+                                step={1}
+                                value={indicatorSettings.macd.fast}
+                                onChange={(event) => updateMacdSetting('fast', event.target.value)}
+                              />
+                            </label>
+                            <label>
+                              <span>Slow</span>
+                              <input
+                                type="number"
+                                min={MACD_SLOW_RANGE.min}
+                                max={MACD_SLOW_RANGE.max}
+                                step={1}
+                                value={indicatorSettings.macd.slow}
+                                onChange={(event) => updateMacdSetting('slow', event.target.value)}
+                              />
+                            </label>
+                            <label>
+                              <span>Signal</span>
+                              <input
+                                type="number"
+                                min={MACD_SIGNAL_RANGE.min}
+                                max={MACD_SIGNAL_RANGE.max}
+                                step={1}
+                                value={indicatorSettings.macd.signal}
+                                onChange={(event) => updateMacdSetting('signal', event.target.value)}
+                              />
+                            </label>
+                          </div>
+                        ) : null}
+
+                        {config.key === 'bbands' ? (
+                          <div className="indicator-setting-fields">
+                            <label>
+                              <span>기간</span>
+                              <input
+                                type="number"
+                                min={BOLLINGER_PERIOD_RANGE.min}
+                                max={BOLLINGER_PERIOD_RANGE.max}
+                                step={1}
+                                value={indicatorSettings.bollinger.period}
+                                onChange={(event) => updateBollingerPeriod(event.target.value)}
+                              />
+                            </label>
+                            <label>
+                              <span>표준편차</span>
+                              <input
+                                type="number"
+                                min={BOLLINGER_STD_DEV_RANGE.min}
+                                max={BOLLINGER_STD_DEV_RANGE.max}
+                                step={0.1}
+                                value={indicatorSettings.bollinger.stdDev}
+                                onChange={(event) => updateBollingerStdDev(event.target.value)}
+                              />
+                            </label>
+                          </div>
+                        ) : null}
+                      </div>
                     ))}
                   </div>
                 </div>
