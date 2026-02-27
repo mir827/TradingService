@@ -259,6 +259,14 @@ const drawingItemSchema: z.ZodType<DrawingInputItem> = z.discriminatedUnion('typ
   }),
   z.object({
     id: z.string().trim().min(1).optional(),
+    type: z.literal('ray'),
+    startTime: z.number().int().nonnegative(),
+    startPrice: z.number().finite(),
+    endTime: z.number().int().nonnegative(),
+    endPrice: z.number().finite(),
+  }),
+  z.object({
+    id: z.string().trim().min(1).optional(),
     type: z.literal('rectangle'),
     startTime: z.number().int().nonnegative(),
     startPrice: z.number().finite(),

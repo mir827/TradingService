@@ -24,6 +24,13 @@ describe('drawing normalization helpers', () => {
         endPrice: 11,
       },
       {
+        type: 'ray',
+        startTime: 1250,
+        startPrice: 9.9,
+        endTime: 1400,
+        endPrice: 12.1,
+      },
+      {
         id: '  note-fixed ',
         type: 'note',
         time: 1400,
@@ -50,6 +57,14 @@ describe('drawing normalization helpers', () => {
       endPrice: 11,
     });
     expect(drawings[3]).toEqual({
+      id: expect.stringMatching(/^ray_/),
+      type: 'ray',
+      startTime: 1250,
+      startPrice: 9.9,
+      endTime: 1400,
+      endPrice: 12.1,
+    });
+    expect(drawings[4]).toEqual({
       id: 'note-fixed',
       type: 'note',
       time: 1400,

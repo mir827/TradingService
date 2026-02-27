@@ -77,7 +77,8 @@ Deliverables:
 
 Progress note (2026-02-27):
 - M2-1 completed: trendline/rectangle/note drawing types, two-click + note prompt workflows, persistence/runtime restore, selection/deletion chips, and drawing tool keyboard shortcuts (`H/V/T/R/N`, `Esc`, `Delete/Backspace`).
-- Remaining for M2: ray tool parity, move/drag edit interactions on-canvas, and broader interaction hardening for complex draw/edit sequences.
+- M2-2 completed: ray drawing type parity (API + Web), ray tool workflow + keyboard shortcut (`Y`), runtime persistence compatibility, and on-canvas selection/drag move editing for horizontal/vertical/trendline/ray/rectangle/note with persist-on-drag-end.
+- M2 status: complete. No scope moved; next milestone remains M3 advanced analysis parity items (functional replay runtime, indicator catalog depth, multi-chart layout, extended alerts).
 
 DoD:
 - Every drawing type is persistable/restorable by symbol+interval.

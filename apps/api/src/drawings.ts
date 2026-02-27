@@ -24,6 +24,15 @@ export type TrendlineDrawing = {
   endPrice: number;
 };
 
+export type RayDrawing = {
+  id: string;
+  type: 'ray';
+  startTime: number;
+  startPrice: number;
+  endTime: number;
+  endPrice: number;
+};
+
 export type RectangleDrawing = {
   id: string;
   type: 'rectangle';
@@ -45,6 +54,7 @@ export type DrawingItem =
   | HorizontalDrawing
   | VerticalDrawing
   | TrendlineDrawing
+  | RayDrawing
   | RectangleDrawing
   | NoteDrawing;
 
@@ -54,6 +64,14 @@ export type DrawingInputItem =
   | {
       id?: string;
       type: 'trendline';
+      startTime: number;
+      startPrice: number;
+      endTime: number;
+      endPrice: number;
+    }
+  | {
+      id?: string;
+      type: 'ray';
       startTime: number;
       startPrice: number;
       endTime: number;
@@ -83,6 +101,10 @@ export function createDrawingVerticalId() {
 
 export function createDrawingTrendlineId() {
   return createDrawingId('trend');
+}
+
+export function createDrawingRayId() {
+  return createDrawingId('ray');
 }
 
 export function createDrawingRectangleId() {
@@ -123,6 +145,17 @@ export function normalizeDrawingItems(drawings: DrawingInputItem[]): DrawingItem
       return {
         id: drawing.id?.trim() || createDrawingTrendlineId(),
         type: 'trendline',
+        startTime: drawing.startTime,
+        startPrice: drawing.startPrice,
+        endTime: drawing.endTime,
+        endPrice: drawing.endPrice,
+      };
+    }
+
+    if (drawing.type === 'ray') {
+      return {
+        id: drawing.id?.trim() || createDrawingRayId(),
+        type: 'ray',
         startTime: drawing.startTime,
         startPrice: drawing.startPrice,
         endTime: drawing.endTime,

@@ -390,6 +390,10 @@ select {
   position: relative;
 }
 
+.chart-area.is-dragging {
+  cursor: grabbing;
+}
+
 .chart-canvas {
   position: absolute;
   inset: 0;
@@ -417,6 +421,12 @@ select {
   background: #4da4ff;
   box-shadow: 0 0 0 1px rgb(77 164 255 / 35%);
   transform: translateX(-0.5px);
+}
+
+.vertical-line-marker.selected {
+  width: 2px;
+  background: #9cd0ff;
+  box-shadow: 0 0 0 1px rgb(156 208 255 / 55%);
 }
 
 .candle-hover-tooltip {
@@ -543,6 +553,11 @@ select {
   color: #c5eba0;
 }
 
+.line-tag.ray {
+  border-color: #2f6b6d;
+  color: #9de2e3;
+}
+
 .line-tag.rectangle {
   border-color: #7a4b32;
   color: #ffc3a0;
@@ -559,6 +574,11 @@ select {
 
 .drawing-shape.trendline {
   stroke: #9be9c4;
+  stroke-width: 2;
+}
+
+.drawing-shape.ray {
+  stroke: #7fd4db;
   stroke-width: 2;
 }
 

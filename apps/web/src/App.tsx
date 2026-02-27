@@ -1,4 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react';
 import {
   CandlestickSeries,
   ColorType,
@@ -149,6 +159,13 @@ type TrendlineState = {
   endTime: UTCTimestamp;
   endPrice: number;
 };
+type RayState = {
+  id: string;
+  startTime: UTCTimestamp;
+  startPrice: number;
+  endTime: UTCTimestamp;
+  endPrice: number;
+};
 type RectangleState = {
   id: string;
   startTime: UTCTimestamp;
@@ -162,13 +179,77 @@ type NoteState = {
   price: number;
   text: string;
 };
-type ToolKey = 'cursor' | 'crosshair' | 'vertical' | 'horizontal' | 'trendline' | 'rectangle' | 'note' | 'magnet';
+type ToolKey = 'cursor' | 'crosshair' | 'vertical' | 'horizontal' | 'trendline' | 'ray' | 'rectangle' | 'note' | 'magnet';
+type DrawingKind = 'horizontal' | 'vertical' | 'trendline' | 'ray' | 'rectangle' | 'note';
+type PendingShapeTool = 'trendline' | 'ray' | 'rectangle';
 type DrawingPayloadItem =
   | { id: string; type: 'horizontal'; price: number }
   | { id: string; type: 'vertical'; time: number }
   | { id: string; type: 'trendline'; startTime: number; startPrice: number; endTime: number; endPrice: number }
+  | { id: string; type: 'ray'; startTime: number; startPrice: number; endTime: number; endPrice: number }
   | { id: string; type: 'rectangle'; startTime: number; startPrice: number; endTime: number; endPrice: number }
   | { id: string; type: 'note'; time: number; price: number; text: string };
+
+type DrawingHit = {
+  id: string;
+  kind: DrawingKind;
+  distance: number;
+  score: number;
+};
+
+type DragState =
+  | {
+      pointerId: number;
+      kind: 'horizontal';
+      id: string;
+      startPrice: number;
+      originPrice: number;
+      moved: boolean;
+    }
+  | {
+      pointerId: number;
+      kind: 'vertical';
+      id: string;
+      startTime: UTCTimestamp;
+      originTime: UTCTimestamp;
+      moved: boolean;
+    }
+  | {
+      pointerId: number;
+      kind: 'trendline';
+      id: string;
+      startTime: UTCTimestamp;
+      startPrice: number;
+      origin: TrendlineState;
+      moved: boolean;
+    }
+  | {
+      pointerId: number;
+      kind: 'ray';
+      id: string;
+      startTime: UTCTimestamp;
+      startPrice: number;
+      origin: RayState;
+      moved: boolean;
+    }
+  | {
+      pointerId: number;
+      kind: 'rectangle';
+      id: string;
+      startTime: UTCTimestamp;
+      startPrice: number;
+      origin: RectangleState;
+      moved: boolean;
+    }
+  | {
+      pointerId: number;
+      kind: 'note';
+      id: string;
+      startTime: UTCTimestamp;
+      startPrice: number;
+      origin: NoteState;
+      moved: boolean;
+    };
 
 const intervals = ['1', '5', '15', '60', '240', '1D', '1W'];
 const leftTools: Array<{ key: ToolKey; icon: string; label: string }> = [
@@ -177,6 +258,7 @@ const leftTools: Array<{ key: ToolKey; icon: string; label: string }> = [
   { key: 'vertical', icon: '｜', label: '수직선' },
   { key: 'horizontal', icon: '―', label: '수평선' },
   { key: 'trendline', icon: 'T', label: '추세선' },
+  { key: 'ray', icon: 'Y', label: '레이' },
   { key: 'rectangle', icon: 'R', label: '사각형' },
   { key: 'note', icon: 'N', label: '노트' },
   { key: 'magnet', icon: '🧲', label: '자석' },
@@ -208,6 +290,48 @@ const ALERT_EVENT_MAX_ITEMS = 20;
 const HOVER_TOOLTIP_WIDTH = 232;
 const HOVER_TOOLTIP_HEIGHT = 174;
 const HOVER_TOOLTIP_MARGIN = 14;
+const DRAWING_HIT_TOLERANCE_PX = 8;
+const NOTE_HIT_RADIUS_PX = 14;
+
+function toTimestampValue(value: number) {
+  return Math.max(1, Math.floor(value)) as UTCTimestamp;
+}
+
+function pointDistance(x1: number, y1: number, x2: number, y2: number) {
+  return Math.hypot(x1 - x2, y1 - y2);
+}
+
+function distanceToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const lengthSquared = dx * dx + dy * dy;
+
+  if (lengthSquared <= 1e-9) {
+    return pointDistance(px, py, x1, y1);
+  }
+
+  const projected = ((px - x1) * dx + (py - y1) * dy) / lengthSquared;
+  const t = Math.min(1, Math.max(0, projected));
+  const nearestX = x1 + dx * t;
+  const nearestY = y1 + dy * t;
+  return pointDistance(px, py, nearestX, nearestY);
+}
+
+function distanceToRay(px: number, py: number, x1: number, y1: number, x2: number, y2: number) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const lengthSquared = dx * dx + dy * dy;
+
+  if (lengthSquared <= 1e-9) {
+    return pointDistance(px, py, x1, y1);
+  }
+
+  const projected = ((px - x1) * dx + (py - y1) * dy) / lengthSquared;
+  const t = Math.max(0, projected);
+  const nearestX = x1 + dx * t;
+  const nearestY = y1 + dy * t;
+  return pointDistance(px, py, nearestX, nearestY);
+}
 
 function getStoredWatchPrefs(): Partial<WatchPrefs> {
   if (typeof window === 'undefined') return {};
@@ -316,6 +440,10 @@ function createTrendlineId() {
   return `trend_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function createRayId() {
+  return `ray_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function createRectangleId() {
   return `rect_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -352,6 +480,7 @@ function formatCandleDateTime(time: number) {
 }
 
 function App() {
+  const chartAreaRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const verticalOverlayRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -368,9 +497,11 @@ function App() {
   const horizontalLinesRef = useRef<HorizontalLine[]>([]);
   const verticalLinesRef = useRef<VerticalLineState[]>([]);
   const trendlinesRef = useRef<TrendlineState[]>([]);
+  const raysRef = useRef<RayState[]>([]);
   const rectanglesRef = useRef<RectangleState[]>([]);
   const notesRef = useRef<NoteState[]>([]);
   const verticalLineNodesRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  const dragStateRef = useRef<DragState | null>(null);
   const selectedSymbolRef = useRef('BTCUSDT');
   const selectedIntervalRef = useRef('60');
   const watchlistAlertCheckInFlightRef = useRef(false);
@@ -414,11 +545,13 @@ function App() {
   const [horizontalLines, setHorizontalLines] = useState<HorizontalLineState[]>([]);
   const [verticalLines, setVerticalLines] = useState<VerticalLineState[]>([]);
   const [trendlines, setTrendlines] = useState<TrendlineState[]>([]);
+  const [rays, setRays] = useState<RayState[]>([]);
   const [rectangles, setRectangles] = useState<RectangleState[]>([]);
   const [notes, setNotes] = useState<NoteState[]>([]);
+  const [isDraggingDrawing, setIsDraggingDrawing] = useState(false);
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
   const [pendingShapeStart, setPendingShapeStart] = useState<{
-    tool: 'trendline' | 'rectangle';
+    tool: PendingShapeTool;
     time: UTCTimestamp;
     price: number;
   } | null>(null);
@@ -461,8 +594,15 @@ function App() {
   }, [selectedInterval]);
 
   useEffect(() => {
-    if (activeTool !== 'trendline' && activeTool !== 'rectangle') {
+    if (activeTool !== 'trendline' && activeTool !== 'ray' && activeTool !== 'rectangle') {
       setPendingShapeStart(null);
+    }
+  }, [activeTool]);
+
+  useEffect(() => {
+    if (activeTool !== 'cursor' && dragStateRef.current) {
+      dragStateRef.current = null;
+      setIsDraggingDrawing(false);
     }
   }, [activeTool]);
 
@@ -473,13 +613,14 @@ function App() {
       horizontalLines.some((item) => item.id === selectedDrawingId) ||
       verticalLines.some((item) => item.id === selectedDrawingId) ||
       trendlines.some((item) => item.id === selectedDrawingId) ||
+      rays.some((item) => item.id === selectedDrawingId) ||
       rectangles.some((item) => item.id === selectedDrawingId) ||
       notes.some((item) => item.id === selectedDrawingId);
 
     if (!exists) {
       setSelectedDrawingId(null);
     }
-  }, [horizontalLines, notes, rectangles, selectedDrawingId, trendlines, verticalLines]);
+  }, [horizontalLines, notes, rays, rectangles, selectedDrawingId, trendlines, verticalLines]);
 
   useEffect(() => {
     if (!topActionFeedback) return;
@@ -546,6 +687,28 @@ function App() {
     [],
   );
 
+  const toRayState = useCallback(
+    (drawing: { id?: string; startTime: number; startPrice: number; endTime: number; endPrice: number }) => {
+      const startTime = Math.floor(Number(drawing.startTime));
+      const endTime = Math.floor(Number(drawing.endTime));
+      const startPrice = Number(drawing.startPrice);
+      const endPrice = Number(drawing.endPrice);
+
+      if (startTime <= 0 || endTime <= 0) return null;
+      if (!Number.isFinite(startPrice) || !Number.isFinite(endPrice)) return null;
+      if (startTime === endTime && Math.abs(startPrice - endPrice) < 0.0001) return null;
+
+      return {
+        id: drawing.id?.trim() || createRayId(),
+        startTime: startTime as UTCTimestamp,
+        startPrice: normalizeLinePrice(startPrice),
+        endTime: endTime as UTCTimestamp,
+        endPrice: normalizeLinePrice(endPrice),
+      };
+    },
+    [],
+  );
+
   const toRectangleState = useCallback(
     (drawing: { id?: string; startTime: number; startPrice: number; endTime: number; endPrice: number }) => {
       const startTime = Math.floor(Number(drawing.startTime));
@@ -600,6 +763,10 @@ function App() {
     return trendlinesRef.current.map((item) => ({ ...item }));
   }, []);
 
+  const snapshotRays = useCallback((): RayState[] => {
+    return raysRef.current.map((item) => ({ ...item }));
+  }, []);
+
   const snapshotRectangles = useCallback((): RectangleState[] => {
     return rectanglesRef.current.map((item) => ({ ...item }));
   }, []);
@@ -613,6 +780,7 @@ function App() {
       lines: HorizontalLineState[],
       markers: VerticalLineState[],
       trendShapes: TrendlineState[],
+      rayShapes: RayState[],
       rectangleShapes: RectangleState[],
       noteShapes: NoteState[],
     ): DrawingPayloadItem[] => {
@@ -630,6 +798,14 @@ function App() {
         ...trendShapes.map((shape) => ({
           id: shape.id,
           type: 'trendline' as const,
+          startTime: Number(shape.startTime),
+          startPrice: shape.startPrice,
+          endTime: Number(shape.endTime),
+          endPrice: shape.endPrice,
+        })),
+        ...rayShapes.map((shape) => ({
+          id: shape.id,
+          type: 'ray' as const,
           startTime: Number(shape.startTime),
           startPrice: shape.startPrice,
           endTime: Number(shape.endTime),
@@ -734,6 +910,12 @@ function App() {
     refreshDrawingOverlay();
   }, [refreshDrawingOverlay]);
 
+  const renderRays = useCallback((items: RayState[]) => {
+    raysRef.current = items;
+    setRays(items);
+    refreshDrawingOverlay();
+  }, [refreshDrawingOverlay]);
+
   const renderRectangles = useCallback((items: RectangleState[]) => {
     rectanglesRef.current = items;
     setRectangles(items);
@@ -746,6 +928,26 @@ function App() {
     refreshDrawingOverlay();
   }, [refreshDrawingOverlay]);
 
+  useEffect(() => {
+    for (const item of horizontalLinesRef.current) {
+      const selected = selectedDrawingId === item.id;
+      item.line.applyOptions({
+        color: selected ? '#ffcf66' : '#f5a623',
+        lineWidth: selected ? 2 : 1,
+      });
+    }
+  }, [horizontalLines, selectedDrawingId]);
+
+  useEffect(() => {
+    syncVerticalLinePositions();
+  }, [syncVerticalLinePositions, verticalLines]);
+
+  useEffect(() => {
+    for (const [id, node] of verticalLineNodesRef.current.entries()) {
+      node.className = `vertical-line-marker${selectedDrawingId === id ? ' selected' : ''}`;
+    }
+  }, [selectedDrawingId, verticalLines]);
+
   const persistDrawings = useCallback(
     async (
       symbol: string,
@@ -753,6 +955,7 @@ function App() {
       lines: HorizontalLineState[],
       markers: VerticalLineState[],
       trendShapes: TrendlineState[],
+      rayShapes: RayState[],
       rectangleShapes: RectangleState[],
       noteShapes: NoteState[],
     ) => {
@@ -764,7 +967,7 @@ function App() {
             symbol,
             interval,
             lines,
-            drawings: toDrawingPayload(lines, markers, trendShapes, rectangleShapes, noteShapes),
+            drawings: toDrawingPayload(lines, markers, trendShapes, rayShapes, rectangleShapes, noteShapes),
           }),
         });
 
@@ -804,6 +1007,7 @@ function App() {
       horizontalLines: HorizontalLineState[];
       verticalLines: VerticalLineState[];
       trendlines: TrendlineState[];
+      rays: RayState[];
       rectangles: RectangleState[];
       notes: NoteState[];
     }> => {
@@ -834,6 +1038,7 @@ function App() {
         const nextHorizontalLines: HorizontalLineState[] = [];
         const nextVerticalLines: VerticalLineState[] = [];
         const nextTrendlines: TrendlineState[] = [];
+        const nextRays: RayState[] = [];
         const nextRectangles: RectangleState[] = [];
         const nextNotes: NoteState[] = [];
 
@@ -869,6 +1074,25 @@ function App() {
               });
               if (trendline) {
                 nextTrendlines.push(trendline);
+              }
+            }
+
+            if (
+              drawing.type === 'ray' &&
+              typeof drawing.startTime === 'number' &&
+              typeof drawing.startPrice === 'number' &&
+              typeof drawing.endTime === 'number' &&
+              typeof drawing.endPrice === 'number'
+            ) {
+              const ray = toRayState({
+                id: drawing.id,
+                startTime: drawing.startTime,
+                startPrice: drawing.startPrice,
+                endTime: drawing.endTime,
+                endPrice: drawing.endPrice,
+              });
+              if (ray) {
+                nextRays.push(ray);
               }
             }
 
@@ -920,15 +1144,16 @@ function App() {
           horizontalLines: nextHorizontalLines,
           verticalLines: nextVerticalLines,
           trendlines: nextTrendlines,
+          rays: nextRays,
           rectangles: nextRectangles,
           notes: nextNotes,
         };
       } catch {
         setError((prev) => prev ?? '도형을 불러오지 못했습니다.');
-        return { horizontalLines: [], verticalLines: [], trendlines: [], rectangles: [], notes: [] };
+        return { horizontalLines: [], verticalLines: [], trendlines: [], rays: [], rectangles: [], notes: [] };
       }
     },
-    [toHorizontalLineState, toNoteState, toRectangleState, toTrendlineState, toVerticalLineState],
+    [toHorizontalLineState, toNoteState, toRayState, toRectangleState, toTrendlineState, toVerticalLineState],
   );
 
   useEffect(() => {
@@ -1173,6 +1398,7 @@ function App() {
           nextHorizontalLines,
           snapshotVerticalLines(),
           snapshotTrendlines(),
+          snapshotRays(),
           snapshotRectangles(),
           snapshotNotes(),
         );
@@ -1194,13 +1420,14 @@ function App() {
           snapshotHorizontalLines(),
           nextVerticalLines,
           snapshotTrendlines(),
+          snapshotRays(),
           snapshotRectangles(),
           snapshotNotes(),
         );
         return;
       }
 
-      if (nextTool === 'trendline' || nextTool === 'rectangle') {
+      if (nextTool === 'trendline' || nextTool === 'ray' || nextTool === 'rectangle') {
         if (!param.point || typeof param.time !== 'number') return;
 
         const price = candleSeries.coordinateToPrice(param.point.y);
@@ -1234,6 +1461,29 @@ function App() {
               snapshotHorizontalLines(),
               snapshotVerticalLines(),
               nextTrendlines,
+              snapshotRays(),
+              snapshotRectangles(),
+              snapshotNotes(),
+            );
+          } else if (nextTool === 'ray') {
+            const nextRays = [
+              ...snapshotRays(),
+              {
+                id: createRayId(),
+                startTime: pending.time,
+                startPrice: pending.price,
+                endTime: timestamp,
+                endPrice: normalizedPrice,
+              },
+            ];
+            renderRays(nextRays);
+            void persistDrawings(
+              selectedSymbolRef.current,
+              selectedIntervalRef.current,
+              snapshotHorizontalLines(),
+              snapshotVerticalLines(),
+              snapshotTrendlines(),
+              nextRays,
               snapshotRectangles(),
               snapshotNotes(),
             );
@@ -1255,6 +1505,7 @@ function App() {
               snapshotHorizontalLines(),
               snapshotVerticalLines(),
               snapshotTrendlines(),
+              snapshotRays(),
               nextRectangles,
               snapshotNotes(),
             );
@@ -1301,6 +1552,7 @@ function App() {
         snapshotHorizontalLines(),
         snapshotVerticalLines(),
         snapshotTrendlines(),
+        snapshotRays(),
         snapshotRectangles(),
         nextNotes,
       );
@@ -1349,17 +1601,21 @@ function App() {
       horizontalLinesRef.current = [];
       verticalLinesRef.current = [];
       trendlinesRef.current = [];
+      raysRef.current = [];
       rectanglesRef.current = [];
       notesRef.current = [];
       for (const node of verticalLineNodes.values()) {
         node.remove();
       }
       verticalLineNodes.clear();
+      dragStateRef.current = null;
       setHorizontalLines([]);
       setVerticalLines([]);
       setTrendlines([]);
+      setRays([]);
       setRectangles([]);
       setNotes([]);
+      setIsDraggingDrawing(false);
       setPendingShapeStart(null);
       setSelectedDrawingId(null);
       setChartReady(false);
@@ -1370,11 +1626,13 @@ function App() {
     persistDrawings,
     refreshDrawingOverlay,
     renderNotes,
+    renderRays,
     renderRectangles,
     renderTrendlines,
     renderVerticalLines,
     snapshotHorizontalLines,
     snapshotNotes,
+    snapshotRays,
     snapshotRectangles,
     snapshotTrendlines,
     snapshotVerticalLines,
@@ -1392,6 +1650,7 @@ function App() {
       renderHorizontalLines(loaded.horizontalLines);
       renderVerticalLines(loaded.verticalLines);
       renderTrendlines(loaded.trendlines);
+      renderRays(loaded.rays);
       renderRectangles(loaded.rectangles);
       renderNotes(loaded.notes);
       setPendingShapeStart(null);
@@ -1408,6 +1667,7 @@ function App() {
     loadDrawings,
     renderHorizontalLines,
     renderNotes,
+    renderRays,
     renderRectangles,
     renderTrendlines,
     renderVerticalLines,
@@ -2263,6 +2523,426 @@ function App() {
     }
   };
 
+  const getLocalChartPoint = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const area = chartAreaRef.current;
+    if (!area) return null;
+
+    const bounds = area.getBoundingClientRect();
+    return {
+      x: event.clientX - bounds.left,
+      y: event.clientY - bounds.top,
+    };
+  }, []);
+
+  const toTimePriceFromCoordinates = useCallback((x: number, y: number) => {
+    const chart = chartRef.current;
+    const series = candleSeriesRef.current;
+    if (!chart || !series) return null;
+
+    const rawTime = chart.timeScale().coordinateToTime(x);
+    const rawPrice = series.coordinateToPrice(y);
+    if (typeof rawTime !== 'number' || !Number.isFinite(rawTime)) return null;
+    if (typeof rawPrice !== 'number' || !Number.isFinite(rawPrice)) return null;
+
+    return {
+      time: toTimestampValue(rawTime),
+      price: normalizeLinePrice(rawPrice),
+    };
+  }, []);
+
+  const findDrawingAtPoint = useCallback(
+    (x: number, y: number): DrawingHit | null => {
+      const chart = chartRef.current;
+      const series = candleSeriesRef.current;
+      if (!chart || !series) return null;
+
+      let best: DrawingHit | null = null;
+      const upsertHit = (id: string, kind: DrawingKind, distance: number) => {
+        if (distance > DRAWING_HIT_TOLERANCE_PX) return;
+        const score = distance + (id === selectedDrawingId ? -0.75 : 0);
+
+        if (!best || score < best.score) {
+          best = { id, kind, distance, score };
+        }
+      };
+
+      for (const line of horizontalLinesRef.current) {
+        const yCoord = series.priceToCoordinate(line.price);
+        if (yCoord === null || !Number.isFinite(yCoord)) continue;
+        upsertHit(line.id, 'horizontal', Math.abs(y - Number(yCoord)));
+      }
+
+      for (const line of verticalLinesRef.current) {
+        const xCoord = chart.timeScale().timeToCoordinate(line.time as Time);
+        if (xCoord === null || !Number.isFinite(xCoord)) continue;
+        upsertHit(line.id, 'vertical', Math.abs(x - Number(xCoord)));
+      }
+
+      const toCoordinate = (time: UTCTimestamp, price: number) => {
+        const xCoord = chart.timeScale().timeToCoordinate(time as Time);
+        const yCoord = series.priceToCoordinate(price);
+        if (xCoord === null || yCoord === null) return null;
+        if (!Number.isFinite(xCoord) || !Number.isFinite(yCoord)) return null;
+        return { x: Number(xCoord), y: Number(yCoord) };
+      };
+
+      for (const line of trendlinesRef.current) {
+        const start = toCoordinate(line.startTime, line.startPrice);
+        const end = toCoordinate(line.endTime, line.endPrice);
+        if (!start || !end) continue;
+
+        upsertHit(line.id, 'trendline', distanceToSegment(x, y, start.x, start.y, end.x, end.y));
+      }
+
+      for (const line of raysRef.current) {
+        const start = toCoordinate(line.startTime, line.startPrice);
+        const end = toCoordinate(line.endTime, line.endPrice);
+        if (!start || !end) continue;
+
+        upsertHit(line.id, 'ray', distanceToRay(x, y, start.x, start.y, end.x, end.y));
+      }
+
+      for (const shape of rectanglesRef.current) {
+        const start = toCoordinate(shape.startTime, shape.startPrice);
+        const end = toCoordinate(shape.endTime, shape.endPrice);
+        if (!start || !end) continue;
+
+        const left = Math.min(start.x, end.x);
+        const right = Math.max(start.x, end.x);
+        const top = Math.min(start.y, end.y);
+        const bottom = Math.max(start.y, end.y);
+        const withinX = x >= left - DRAWING_HIT_TOLERANCE_PX && x <= right + DRAWING_HIT_TOLERANCE_PX;
+        const withinY = y >= top - DRAWING_HIT_TOLERANCE_PX && y <= bottom + DRAWING_HIT_TOLERANCE_PX;
+        if (!withinX || !withinY) continue;
+
+        const edgeDistance = Math.min(
+          Math.abs(x - left),
+          Math.abs(x - right),
+          Math.abs(y - top),
+          Math.abs(y - bottom),
+        );
+        upsertHit(shape.id, 'rectangle', edgeDistance);
+      }
+
+      for (const note of notesRef.current) {
+        const point = toCoordinate(note.time, note.price);
+        if (!point) continue;
+        const distance = pointDistance(x, y, point.x, point.y);
+        if (distance <= NOTE_HIT_RADIUS_PX) {
+          upsertHit(note.id, 'note', distance);
+        }
+      }
+
+      return best;
+    },
+    [selectedDrawingId],
+  );
+
+  const startDragState = useCallback((hit: DrawingHit, pointerId: number, time: UTCTimestamp, price: number): DragState | null => {
+    if (hit.kind === 'horizontal') {
+      const origin = horizontalLinesRef.current.find((item) => item.id === hit.id);
+      if (!origin) return null;
+      return {
+        pointerId,
+        kind: 'horizontal',
+        id: hit.id,
+        startPrice: price,
+        originPrice: origin.price,
+        moved: false,
+      };
+    }
+
+    if (hit.kind === 'vertical') {
+      const origin = verticalLinesRef.current.find((item) => item.id === hit.id);
+      if (!origin) return null;
+      return {
+        pointerId,
+        kind: 'vertical',
+        id: hit.id,
+        startTime: time,
+        originTime: origin.time,
+        moved: false,
+      };
+    }
+
+    if (hit.kind === 'trendline') {
+      const origin = trendlinesRef.current.find((item) => item.id === hit.id);
+      if (!origin) return null;
+      return {
+        pointerId,
+        kind: 'trendline',
+        id: hit.id,
+        startTime: time,
+        startPrice: price,
+        origin: { ...origin },
+        moved: false,
+      };
+    }
+
+    if (hit.kind === 'ray') {
+      const origin = raysRef.current.find((item) => item.id === hit.id);
+      if (!origin) return null;
+      return {
+        pointerId,
+        kind: 'ray',
+        id: hit.id,
+        startTime: time,
+        startPrice: price,
+        origin: { ...origin },
+        moved: false,
+      };
+    }
+
+    if (hit.kind === 'rectangle') {
+      const origin = rectanglesRef.current.find((item) => item.id === hit.id);
+      if (!origin) return null;
+      return {
+        pointerId,
+        kind: 'rectangle',
+        id: hit.id,
+        startTime: time,
+        startPrice: price,
+        origin: { ...origin },
+        moved: false,
+      };
+    }
+
+    const origin = notesRef.current.find((item) => item.id === hit.id);
+    if (!origin) return null;
+    return {
+      pointerId,
+      kind: 'note',
+      id: hit.id,
+      startTime: time,
+      startPrice: price,
+      origin: { ...origin },
+      moved: false,
+    };
+  }, []);
+
+  const handleChartPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (activeToolRef.current !== 'cursor') return;
+      if (event.button !== 0) return;
+
+      const point = getLocalChartPoint(event);
+      if (!point) return;
+
+      const hit = findDrawingAtPoint(point.x, point.y);
+      if (!hit) {
+        setSelectedDrawingId(null);
+        return;
+      }
+
+      setSelectedDrawingId(hit.id);
+
+      const mapped = toTimePriceFromCoordinates(point.x, point.y);
+      if (!mapped) return;
+
+      const dragState = startDragState(hit, event.pointerId, mapped.time, mapped.price);
+      if (!dragState) return;
+
+      dragStateRef.current = dragState;
+      setIsDraggingDrawing(true);
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    },
+    [findDrawingAtPoint, getLocalChartPoint, startDragState, toTimePriceFromCoordinates],
+  );
+
+  const handleChartPointerMove = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const dragState = dragStateRef.current;
+      if (!dragState || dragState.pointerId !== event.pointerId) return;
+
+      const point = getLocalChartPoint(event);
+      if (!point) return;
+
+      const mapped = toTimePriceFromCoordinates(point.x, point.y);
+      if (!mapped) return;
+
+      let moved = false;
+
+      if (dragState.kind === 'horizontal') {
+        const nextPrice = normalizeLinePrice(dragState.originPrice + (mapped.price - dragState.startPrice));
+        const nextLines = horizontalLinesRef.current.map((line) =>
+          line.id === dragState.id ? { id: line.id, price: nextPrice } : { id: line.id, price: line.price },
+        );
+        moved = nextLines.some((line, index) => Math.abs(line.price - horizontalLinesRef.current[index].price) > 0.0001);
+        if (moved) {
+          renderHorizontalLines(nextLines);
+        }
+      }
+
+      if (dragState.kind === 'vertical') {
+        const deltaTime = Number(mapped.time) - Number(dragState.startTime);
+        const nextTime = toTimestampValue(Number(dragState.originTime) + deltaTime);
+        const nextLines = verticalLinesRef.current.map((line) =>
+          line.id === dragState.id ? { ...line, time: nextTime } : line,
+        );
+        moved = nextLines.some((line, index) => Number(line.time) !== Number(verticalLinesRef.current[index].time));
+        if (moved) {
+          renderVerticalLines(nextLines);
+        }
+      }
+
+      if (dragState.kind === 'trendline') {
+        const deltaTime = Number(mapped.time) - Number(dragState.startTime);
+        const deltaPrice = mapped.price - dragState.startPrice;
+        const nextTrendlines = trendlinesRef.current.map((line) =>
+          line.id === dragState.id
+            ? {
+                ...line,
+                startTime: toTimestampValue(Number(dragState.origin.startTime) + deltaTime),
+                endTime: toTimestampValue(Number(dragState.origin.endTime) + deltaTime),
+                startPrice: normalizeLinePrice(dragState.origin.startPrice + deltaPrice),
+                endPrice: normalizeLinePrice(dragState.origin.endPrice + deltaPrice),
+              }
+            : line,
+        );
+        moved = nextTrendlines.some((line, index) => {
+          const previous = trendlinesRef.current[index];
+          return (
+            Number(line.startTime) !== Number(previous.startTime) ||
+            Number(line.endTime) !== Number(previous.endTime) ||
+            Math.abs(line.startPrice - previous.startPrice) > 0.0001 ||
+            Math.abs(line.endPrice - previous.endPrice) > 0.0001
+          );
+        });
+        if (moved) {
+          renderTrendlines(nextTrendlines);
+        }
+      }
+
+      if (dragState.kind === 'ray') {
+        const deltaTime = Number(mapped.time) - Number(dragState.startTime);
+        const deltaPrice = mapped.price - dragState.startPrice;
+        const nextRays = raysRef.current.map((line) =>
+          line.id === dragState.id
+            ? {
+                ...line,
+                startTime: toTimestampValue(Number(dragState.origin.startTime) + deltaTime),
+                endTime: toTimestampValue(Number(dragState.origin.endTime) + deltaTime),
+                startPrice: normalizeLinePrice(dragState.origin.startPrice + deltaPrice),
+                endPrice: normalizeLinePrice(dragState.origin.endPrice + deltaPrice),
+              }
+            : line,
+        );
+        moved = nextRays.some((line, index) => {
+          const previous = raysRef.current[index];
+          return (
+            Number(line.startTime) !== Number(previous.startTime) ||
+            Number(line.endTime) !== Number(previous.endTime) ||
+            Math.abs(line.startPrice - previous.startPrice) > 0.0001 ||
+            Math.abs(line.endPrice - previous.endPrice) > 0.0001
+          );
+        });
+        if (moved) {
+          renderRays(nextRays);
+        }
+      }
+
+      if (dragState.kind === 'rectangle') {
+        const deltaTime = Number(mapped.time) - Number(dragState.startTime);
+        const deltaPrice = mapped.price - dragState.startPrice;
+        const nextRectangles = rectanglesRef.current.map((shape) =>
+          shape.id === dragState.id
+            ? {
+                ...shape,
+                startTime: toTimestampValue(Number(dragState.origin.startTime) + deltaTime),
+                endTime: toTimestampValue(Number(dragState.origin.endTime) + deltaTime),
+                startPrice: normalizeLinePrice(dragState.origin.startPrice + deltaPrice),
+                endPrice: normalizeLinePrice(dragState.origin.endPrice + deltaPrice),
+              }
+            : shape,
+        );
+        moved = nextRectangles.some((shape, index) => {
+          const previous = rectanglesRef.current[index];
+          return (
+            Number(shape.startTime) !== Number(previous.startTime) ||
+            Number(shape.endTime) !== Number(previous.endTime) ||
+            Math.abs(shape.startPrice - previous.startPrice) > 0.0001 ||
+            Math.abs(shape.endPrice - previous.endPrice) > 0.0001
+          );
+        });
+        if (moved) {
+          renderRectangles(nextRectangles);
+        }
+      }
+
+      if (dragState.kind === 'note') {
+        const deltaTime = Number(mapped.time) - Number(dragState.startTime);
+        const deltaPrice = mapped.price - dragState.startPrice;
+        const nextNotes = notesRef.current.map((note) =>
+          note.id === dragState.id
+            ? {
+                ...note,
+                time: toTimestampValue(Number(dragState.origin.time) + deltaTime),
+                price: normalizeLinePrice(dragState.origin.price + deltaPrice),
+              }
+            : note,
+        );
+        moved = nextNotes.some((note, index) => {
+          const previous = notesRef.current[index];
+          return Number(note.time) !== Number(previous.time) || Math.abs(note.price - previous.price) > 0.0001;
+        });
+        if (moved) {
+          renderNotes(nextNotes);
+        }
+      }
+
+      if (moved) {
+        dragState.moved = true;
+      }
+      event.preventDefault();
+    },
+    [
+      getLocalChartPoint,
+      renderHorizontalLines,
+      renderNotes,
+      renderRays,
+      renderRectangles,
+      renderTrendlines,
+      renderVerticalLines,
+      toTimePriceFromCoordinates,
+    ],
+  );
+
+  const handleChartPointerUpOrCancel = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const dragState = dragStateRef.current;
+      if (!dragState || dragState.pointerId !== event.pointerId) return;
+
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+
+      dragStateRef.current = null;
+      setIsDraggingDrawing(false);
+      if (!dragState.moved) return;
+
+      void persistDrawings(
+        selectedSymbolRef.current,
+        selectedIntervalRef.current,
+        snapshotHorizontalLines(),
+        snapshotVerticalLines(),
+        snapshotTrendlines(),
+        snapshotRays(),
+        snapshotRectangles(),
+        snapshotNotes(),
+      );
+    },
+    [
+      persistDrawings,
+      snapshotHorizontalLines,
+      snapshotNotes,
+      snapshotRays,
+      snapshotRectangles,
+      snapshotTrendlines,
+      snapshotVerticalLines,
+    ],
+  );
+
   const removeHorizontalLine = useCallback((id: string) => {
     const series = candleSeriesRef.current;
     if (!series) return;
@@ -2280,11 +2960,12 @@ function App() {
       nextHorizontalLines,
       snapshotVerticalLines(),
       snapshotTrendlines(),
+      snapshotRays(),
       snapshotRectangles(),
       snapshotNotes(),
     );
     setSelectedDrawingId((previous) => (previous === id ? null : previous));
-  }, [persistDrawings, snapshotHorizontalLines, snapshotNotes, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
+  }, [persistDrawings, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
 
   const clearHorizontalLines = useCallback(() => {
     const series = candleSeriesRef.current;
@@ -2302,13 +2983,14 @@ function App() {
       [],
       snapshotVerticalLines(),
       snapshotTrendlines(),
+      snapshotRays(),
       snapshotRectangles(),
       snapshotNotes(),
     );
     setSelectedDrawingId((previous) =>
       previous && horizontalLinesRef.current.some((item) => item.id === previous) ? previous : null,
     );
-  }, [persistDrawings, snapshotNotes, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
+  }, [persistDrawings, snapshotNotes, snapshotRays, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
 
   const removeVerticalLine = useCallback((id: string) => {
     const nextVerticalLines = verticalLinesRef.current.filter((item) => item.id !== id);
@@ -2321,11 +3003,12 @@ function App() {
       snapshotHorizontalLines(),
       nextVerticalLines,
       snapshotTrendlines(),
+      snapshotRays(),
       snapshotRectangles(),
       snapshotNotes(),
     );
     setSelectedDrawingId((previous) => (previous === id ? null : previous));
-  }, [persistDrawings, renderVerticalLines, snapshotHorizontalLines, snapshotNotes, snapshotRectangles, snapshotTrendlines]);
+  }, [persistDrawings, renderVerticalLines, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotRectangles, snapshotTrendlines]);
 
   const clearVerticalLines = useCallback(() => {
     if (!verticalLinesRef.current.length) return;
@@ -2337,13 +3020,14 @@ function App() {
       snapshotHorizontalLines(),
       [],
       snapshotTrendlines(),
+      snapshotRays(),
       snapshotRectangles(),
       snapshotNotes(),
     );
     setSelectedDrawingId((previous) =>
       previous && verticalLinesRef.current.some((item) => item.id === previous) ? previous : null,
     );
-  }, [persistDrawings, renderVerticalLines, snapshotHorizontalLines, snapshotNotes, snapshotRectangles, snapshotTrendlines]);
+  }, [persistDrawings, renderVerticalLines, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotRectangles, snapshotTrendlines]);
 
   const removeTrendline = useCallback((id: string) => {
     const nextTrendlines = trendlinesRef.current.filter((item) => item.id !== id);
@@ -2356,11 +3040,12 @@ function App() {
       snapshotHorizontalLines(),
       snapshotVerticalLines(),
       nextTrendlines,
+      snapshotRays(),
       snapshotRectangles(),
       snapshotNotes(),
     );
     setSelectedDrawingId((previous) => (previous === id ? null : previous));
-  }, [persistDrawings, renderTrendlines, snapshotHorizontalLines, snapshotNotes, snapshotRectangles, snapshotVerticalLines]);
+  }, [persistDrawings, renderTrendlines, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotRectangles, snapshotVerticalLines]);
 
   const clearTrendlines = useCallback(() => {
     if (!trendlinesRef.current.length) return;
@@ -2372,13 +3057,51 @@ function App() {
       snapshotHorizontalLines(),
       snapshotVerticalLines(),
       [],
+      snapshotRays(),
       snapshotRectangles(),
       snapshotNotes(),
     );
     setSelectedDrawingId((previous) =>
       previous && trendlinesRef.current.some((item) => item.id === previous) ? previous : null,
     );
-  }, [persistDrawings, renderTrendlines, snapshotHorizontalLines, snapshotNotes, snapshotRectangles, snapshotVerticalLines]);
+  }, [persistDrawings, renderTrendlines, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotRectangles, snapshotVerticalLines]);
+
+  const removeRay = useCallback((id: string) => {
+    const nextRays = raysRef.current.filter((item) => item.id !== id);
+    if (nextRays.length === raysRef.current.length) return;
+
+    renderRays(nextRays);
+    void persistDrawings(
+      selectedSymbolRef.current,
+      selectedIntervalRef.current,
+      snapshotHorizontalLines(),
+      snapshotVerticalLines(),
+      snapshotTrendlines(),
+      nextRays,
+      snapshotRectangles(),
+      snapshotNotes(),
+    );
+    setSelectedDrawingId((previous) => (previous === id ? null : previous));
+  }, [persistDrawings, renderRays, snapshotHorizontalLines, snapshotNotes, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
+
+  const clearRays = useCallback(() => {
+    if (!raysRef.current.length) return;
+
+    renderRays([]);
+    void persistDrawings(
+      selectedSymbolRef.current,
+      selectedIntervalRef.current,
+      snapshotHorizontalLines(),
+      snapshotVerticalLines(),
+      snapshotTrendlines(),
+      [],
+      snapshotRectangles(),
+      snapshotNotes(),
+    );
+    setSelectedDrawingId((previous) =>
+      previous && raysRef.current.some((item) => item.id === previous) ? previous : null,
+    );
+  }, [persistDrawings, renderRays, snapshotHorizontalLines, snapshotNotes, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
 
   const removeRectangle = useCallback((id: string) => {
     const nextRectangles = rectanglesRef.current.filter((item) => item.id !== id);
@@ -2391,11 +3114,12 @@ function App() {
       snapshotHorizontalLines(),
       snapshotVerticalLines(),
       snapshotTrendlines(),
+      snapshotRays(),
       nextRectangles,
       snapshotNotes(),
     );
     setSelectedDrawingId((previous) => (previous === id ? null : previous));
-  }, [persistDrawings, renderRectangles, snapshotHorizontalLines, snapshotNotes, snapshotTrendlines, snapshotVerticalLines]);
+  }, [persistDrawings, renderRectangles, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotTrendlines, snapshotVerticalLines]);
 
   const clearRectangles = useCallback(() => {
     if (!rectanglesRef.current.length) return;
@@ -2407,13 +3131,14 @@ function App() {
       snapshotHorizontalLines(),
       snapshotVerticalLines(),
       snapshotTrendlines(),
+      snapshotRays(),
       [],
       snapshotNotes(),
     );
     setSelectedDrawingId((previous) =>
       previous && rectanglesRef.current.some((item) => item.id === previous) ? previous : null,
     );
-  }, [persistDrawings, renderRectangles, snapshotHorizontalLines, snapshotNotes, snapshotTrendlines, snapshotVerticalLines]);
+  }, [persistDrawings, renderRectangles, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotTrendlines, snapshotVerticalLines]);
 
   const removeNote = useCallback((id: string) => {
     const nextNotes = notesRef.current.filter((item) => item.id !== id);
@@ -2426,11 +3151,12 @@ function App() {
       snapshotHorizontalLines(),
       snapshotVerticalLines(),
       snapshotTrendlines(),
+      snapshotRays(),
       snapshotRectangles(),
       nextNotes,
     );
     setSelectedDrawingId((previous) => (previous === id ? null : previous));
-  }, [persistDrawings, renderNotes, snapshotHorizontalLines, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
+  }, [persistDrawings, renderNotes, snapshotHorizontalLines, snapshotRays, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
 
   const clearNotes = useCallback(() => {
     if (!notesRef.current.length) return;
@@ -2442,13 +3168,14 @@ function App() {
       snapshotHorizontalLines(),
       snapshotVerticalLines(),
       snapshotTrendlines(),
+      snapshotRays(),
       snapshotRectangles(),
       [],
     );
     setSelectedDrawingId((previous) =>
       previous && notesRef.current.some((item) => item.id === previous) ? previous : null,
     );
-  }, [persistDrawings, renderNotes, snapshotHorizontalLines, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
+  }, [persistDrawings, renderNotes, snapshotHorizontalLines, snapshotRays, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
 
   const clearAllDrawings = useCallback(() => {
     const series = candleSeriesRef.current;
@@ -2461,15 +3188,17 @@ function App() {
     horizontalLinesRef.current = [];
     setHorizontalLines([]);
     trendlinesRef.current = [];
+    raysRef.current = [];
     rectanglesRef.current = [];
     notesRef.current = [];
     setTrendlines([]);
+    setRays([]);
     setRectangles([]);
     setNotes([]);
     renderVerticalLines([]);
     setSelectedDrawingId(null);
     setPendingShapeStart(null);
-    void persistDrawings(selectedSymbolRef.current, selectedIntervalRef.current, [], [], [], [], []);
+    void persistDrawings(selectedSymbolRef.current, selectedIntervalRef.current, [], [], [], [], [], []);
   }, [persistDrawings, renderVerticalLines]);
 
   const deleteDrawingById = useCallback((id: string) => {
@@ -2485,6 +3214,10 @@ function App() {
       removeTrendline(id);
       return;
     }
+    if (raysRef.current.some((item) => item.id === id)) {
+      removeRay(id);
+      return;
+    }
     if (rectanglesRef.current.some((item) => item.id === id)) {
       removeRectangle(id);
       return;
@@ -2492,7 +3225,7 @@ function App() {
     if (notesRef.current.some((item) => item.id === id)) {
       removeNote(id);
     }
-  }, [removeHorizontalLine, removeNote, removeRectangle, removeTrendline, removeVerticalLine]);
+  }, [removeHorizontalLine, removeNote, removeRay, removeRectangle, removeTrendline, removeVerticalLine]);
 
   const deleteSelectedDrawing = useCallback(() => {
     if (!selectedDrawingId) return;
@@ -2528,6 +3261,12 @@ function App() {
       if (key === 't') {
         event.preventDefault();
         setActiveTool('trendline');
+        return;
+      }
+
+      if (key === 'y') {
+        event.preventDefault();
+        setActiveTool('ray');
         return;
       }
 
@@ -2599,7 +3338,7 @@ function App() {
   const selectedCode = selectedSymbolMeta ? getDisplayCode(selectedSymbolMeta) : shortTicker(selectedSymbol);
   const selectedName = selectedSymbolMeta?.name ?? shortTicker(selectedSymbol);
   const exchangeText = marketExchangeText(selectedMarket);
-  const totalDrawings = horizontalLines.length + verticalLines.length + trendlines.length + rectangles.length + notes.length;
+  const totalDrawings = horizontalLines.length + verticalLines.length + trendlines.length + rays.length + rectangles.length + notes.length;
   const activeToolDescription =
     activeTool === 'horizontal'
       ? `수평선 툴 활성화 · 클릭으로 추가 (${horizontalLines.length})`
@@ -2607,6 +3346,8 @@ function App() {
         ? `수직선 툴 활성화 · 클릭으로 추가 (${verticalLines.length})`
         : activeTool === 'trendline'
           ? `추세선 툴 활성화 · 2회 클릭으로 추가 (${trendlines.length})`
+          : activeTool === 'ray'
+            ? `레이 툴 활성화 · 2회 클릭으로 추가 (${rays.length})`
           : activeTool === 'rectangle'
             ? `사각형 툴 활성화 · 2회 클릭으로 추가 (${rectangles.length})`
             : activeTool === 'note'
@@ -2629,6 +3370,11 @@ function App() {
         kind: 'trendline' as const,
         label: `T ${formatDrawingTime(line.startTime)}→${formatDrawingTime(line.endTime)}`,
       })),
+      ...rays.map((line) => ({
+        id: line.id,
+        kind: 'ray' as const,
+        label: `Y ${formatDrawingTime(line.startTime)}→${formatDrawingTime(line.endTime)}`,
+      })),
       ...rectangles.map((line) => ({
         id: line.id,
         kind: 'rectangle' as const,
@@ -2640,7 +3386,7 @@ function App() {
         label: `N ${summarizeNoteText(note.text)}`,
       })),
     ],
-    [horizontalLines, notes, rectangles, trendlines, verticalLines],
+    [horizontalLines, notes, rays, rectangles, trendlines, verticalLines],
   );
   const drawingOverlayGeometry = useMemo(() => {
     void overlayTick;
@@ -2652,7 +3398,7 @@ function App() {
     const height = container?.clientHeight ?? 0;
 
     if (!chart || !series || width <= 0 || height <= 0) {
-      return { width, height, trendlines: [], rectangles: [], notes: [] };
+      return { width, height, trendlines: [], rays: [], rectangles: [], notes: [] };
     }
 
     const toCoordinate = (time: UTCTimestamp, price: number) => {
@@ -2700,6 +3446,31 @@ function App() {
       });
     }
 
+    const rayShapes: Array<{ id: string; x1: number; y1: number; x2: number; y2: number }> = [];
+    for (const shape of rays) {
+      const start = toCoordinate(shape.startTime, shape.startPrice);
+      const end = toCoordinate(shape.endTime, shape.endPrice);
+      if (!start || !end) continue;
+
+      const x1 = Number(start.x);
+      const y1 = Number(start.y);
+      const x2 = Number(end.x);
+      const y2 = Number(end.y);
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const length = Math.hypot(dx, dy);
+      if (length <= 1e-6) continue;
+
+      const extendDistance = Math.max(width, height) * 2;
+      rayShapes.push({
+        id: shape.id,
+        x1,
+        y1,
+        x2: x2 + (dx / length) * extendDistance,
+        y2: y2 + (dy / length) * extendDistance,
+      });
+    }
+
     const noteShapes: Array<{ id: string; x: number; y: number; text: string }> = [];
     for (const note of notes) {
       const point = toCoordinate(note.time, note.price);
@@ -2717,10 +3488,11 @@ function App() {
       width,
       height,
       trendlines: trendlineShapes,
+      rays: rayShapes,
       rectangles: rectangleShapes,
       notes: noteShapes,
     };
-  }, [notes, overlayTick, rectangles, trendlines]);
+  }, [notes, overlayTick, rays, rectangles, trendlines]);
   const activeIndicatorConfigs = indicatorConfigs.filter((config) => enabledIndicators[config.key]);
   const compareSymbolMeta =
     watchlistSymbols.find((item) => item.symbol === compareSymbol) ??
@@ -2913,7 +3685,15 @@ function App() {
             </div>
           ) : null}
 
-          <div className="chart-area" onMouseLeave={clearHoveredCandle}>
+          <div
+            ref={chartAreaRef}
+            className={`chart-area${isDraggingDrawing ? ' is-dragging' : ''}`}
+            onMouseLeave={clearHoveredCandle}
+            onPointerDown={handleChartPointerDown}
+            onPointerMove={handleChartPointerMove}
+            onPointerUp={handleChartPointerUpOrCancel}
+            onPointerCancel={handleChartPointerUpOrCancel}
+          >
             <div className="chart-canvas" ref={containerRef} />
             <div className="vertical-lines-overlay" ref={verticalOverlayRef} />
             {drawingOverlayGeometry.width > 0 && drawingOverlayGeometry.height > 0 ? (
@@ -2932,6 +3712,16 @@ function App() {
                     x2={shape.x2}
                     y2={shape.y2}
                     className={`drawing-shape trendline${selectedDrawingId === shape.id ? ' selected' : ''}`}
+                  />
+                ))}
+                {drawingOverlayGeometry.rays.map((shape) => (
+                  <line
+                    key={shape.id}
+                    x1={shape.x1}
+                    y1={shape.y1}
+                    x2={shape.x2}
+                    y2={shape.y2}
+                    className={`drawing-shape ray${selectedDrawingId === shape.id ? ' selected' : ''}`}
                   />
                 ))}
                 {drawingOverlayGeometry.rectangles.map((shape) => (
@@ -2986,9 +3776,10 @@ function App() {
             <span>{loading ? '데이터를 불러오는 중...' : '실시간 UI 프로토타입'}</span>
             {topActionFeedback ? <span className="status-chip">{topActionFeedback}</span> : null}
             {activeToolDescription ? <span className="status-chip">{activeToolDescription}</span> : null}
+            <span className="status-chip">단축키 H/V/T/Y/R/N · Esc · Delete/Backspace</span>
             {pendingShapeStart ? (
               <span className="status-chip">
-                {pendingShapeStart.tool === 'trendline' ? '추세선' : '사각형'} 시작점 고정 · 다음 클릭으로 완료
+                {pendingShapeStart.tool === 'trendline' ? '추세선' : pendingShapeStart.tool === 'ray' ? '레이' : '사각형'} 시작점 고정 · 다음 클릭으로 완료
               </span>
             ) : null}
 
@@ -3008,6 +3799,11 @@ function App() {
                 {activeTool === 'trendline' && trendlines.length > 0 ? (
                   <button className="status-button" onClick={clearTrendlines}>
                     추세선 전체 삭제
+                  </button>
+                ) : null}
+                {activeTool === 'ray' && rays.length > 0 ? (
+                  <button className="status-button" onClick={clearRays}>
+                    레이 전체 삭제
                   </button>
                 ) : null}
                 {activeTool === 'rectangle' && rectangles.length > 0 ? (
