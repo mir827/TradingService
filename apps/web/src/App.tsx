@@ -835,6 +835,8 @@ function App() {
     });
     observer.observe(containerRef.current);
 
+    const verticalLineNodes = verticalLineNodesRef.current;
+
     return () => {
       observer.disconnect();
       chart.unsubscribeCrosshairMove(onCrosshairMove);
@@ -846,10 +848,10 @@ function App() {
       volumeSeriesRef.current = null;
       horizontalLinesRef.current = [];
       verticalLinesRef.current = [];
-      for (const node of verticalLineNodesRef.current.values()) {
+      for (const node of verticalLineNodes.values()) {
         node.remove();
       }
-      verticalLineNodesRef.current.clear();
+      verticalLineNodes.clear();
       setHorizontalLines([]);
       setVerticalLines([]);
       setChartReady(false);
