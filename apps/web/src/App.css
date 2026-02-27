@@ -97,6 +97,7 @@ select {
 }
 
 .intervals button.active,
+.top-actions button.active,
 .watch-tabs button.active,
 .bottom-tabs button.active {
   background: #2962ff;
@@ -273,6 +274,113 @@ select {
   font-size: 12px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.chart-meta-wrap {
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+}
+
+.chart-legend-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.chart-legend-item {
+  border: 1px solid #2c3342;
+  background: #1a1f2b;
+  color: #bac1cf;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  display: inline-block;
+  flex: 0 0 auto;
+}
+
+.chart-control-panels {
+  border-bottom: 1px solid #22293a;
+  padding: 6px 12px;
+  display: grid;
+  gap: 6px;
+  background: #101521;
+}
+
+.chart-control-group {
+  display: grid;
+  gap: 6px;
+}
+
+.chart-control-group strong {
+  font-size: 11px;
+  color: #9eabc0;
+}
+
+.indicator-toggle-list {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.indicator-toggle-list label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #c2c9d6;
+}
+
+.indicator-toggle-list input {
+  margin: 0;
+}
+
+.compare-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.compare-controls select {
+  min-width: 220px;
+  max-width: 100%;
+  border: 1px solid #2b2f3a;
+  background: #1e222d;
+  color: #d1d4dc;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.compare-controls button {
+  border: 1px solid #2c4f3f;
+  background: #193227;
+  color: #9be9c4;
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.compare-controls button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.control-feedback {
+  margin: 0;
+  color: #90a0b9;
+  font-size: 11px;
 }
 
 .chart-area {
@@ -1045,6 +1153,14 @@ select {
 
   .alert-history-controls {
     grid-template-columns: 1fr;
+  }
+
+  .compare-controls {
+    flex-wrap: wrap;
+  }
+
+  .compare-controls select {
+    min-width: 180px;
   }
 }
 

@@ -3,17 +3,20 @@ import {
   CandlestickSeries,
   ColorType,
   HistogramSeries,
+  LineSeries,
   createChart,
   type CandlestickData,
   type HistogramData,
   type IChartApi,
   type ISeriesApi,
+  type LineData,
   type IPriceLine,
   type MouseEventParams,
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts';
 import './App.css';
+import { calculateEMA, calculateSMA, normalizeCompareOverlay, toTimeValuePoints } from './lib/chartMath';
 import {
   formatSigned,
   getDisplayCode,
@@ -100,9 +103,20 @@ type AlertHistoryEvent = AlertCheckEvent & {
 
 type WatchTab = 'watchlist' | 'detail' | 'alerts';
 type BottomTab = 'pine' | 'strategy' | 'trading';
+type TopActionKey = 'indicator' | 'compare' | 'alerts' | 'replay';
 type WatchSortKey = 'symbol' | 'price' | 'changePercent';
 type WatchSortDir = 'asc' | 'desc';
 type WatchMarketFilter = 'ALL' | MarketType;
+type IndicatorKind = 'SMA' | 'EMA';
+type IndicatorKey = 'sma20' | 'sma60' | 'ema20';
+type IndicatorConfig = {
+  key: IndicatorKey;
+  label: string;
+  kind: IndicatorKind;
+  period: number;
+  color: string;
+  legend: string;
+};
 
 type WatchPrefs = {
   watchSortKey: WatchSortKey;
@@ -143,7 +157,18 @@ const leftTools = [
   { key: 'emoji', icon: '😊', label: '아이콘' },
   { key: 'magnet', icon: '🧲', label: '자석' },
 ];
-const topActions = ['지표', '비교', '알림', '리플레이'];
+const topActions: Array<{ key: TopActionKey; label: string }> = [
+  { key: 'indicator', label: '지표' },
+  { key: 'compare', label: '비교' },
+  { key: 'alerts', label: '알림' },
+  { key: 'replay', label: '리플레이' },
+];
+const indicatorConfigs: IndicatorConfig[] = [
+  { key: 'sma20', label: 'SMA 20', kind: 'SMA', period: 20, color: '#f0b429', legend: 'SMA 20' },
+  { key: 'sma60', label: 'SMA 60', kind: 'SMA', period: 60, color: '#4da4ff', legend: 'SMA 60' },
+  { key: 'ema20', label: 'EMA 20', kind: 'EMA', period: 20, color: '#ff7f50', legend: 'EMA 20' },
+];
+const compareOverlayColor = '#85d47b';
 const bottomTabs: Array<{ id: BottomTab; label: string }> = [
   { id: 'pine', label: 'Pine Editor' },
   { id: 'strategy', label: '전략 테스터' },
@@ -292,6 +317,12 @@ function App() {
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  const indicatorSeriesRefs = useRef<Record<IndicatorKey, ISeriesApi<'Line'> | null>>({
+    sma20: null,
+    sma60: null,
+    ema20: null,
+  });
+  const compareSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const candleMapRef = useRef<Map<number, Candle>>(new Map());
   const activeToolRef = useRef('cursor');
   const horizontalLinesRef = useRef<HorizontalLine[]>([]);
@@ -323,6 +354,18 @@ function App() {
   const [searching, setSearching] = useState(false);
   const [bottomTab, setBottomTab] = useState<BottomTab>('pine');
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
+  const [indicatorPanelOpen, setIndicatorPanelOpen] = useState(false);
+  const [comparisonPanelOpen, setComparisonPanelOpen] = useState(false);
+  const [enabledIndicators, setEnabledIndicators] = useState<Record<IndicatorKey, boolean>>({
+    sma20: false,
+    sma60: false,
+    ema20: false,
+  });
+  const [compareSymbol, setCompareSymbol] = useState('');
+  const [compareCandles, setCompareCandles] = useState<Candle[]>([]);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareError, setCompareError] = useState<string | null>(null);
+  const [topActionFeedback, setTopActionFeedback] = useState<string | null>(null);
   const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
   const [hoveredPoint, setHoveredPoint] = useState<{ x: number; y: number } | null>(null);
   const [horizontalLines, setHorizontalLines] = useState<HorizontalLineState[]>([]);
@@ -363,6 +406,18 @@ function App() {
   useEffect(() => {
     selectedIntervalRef.current = selectedInterval;
   }, [selectedInterval]);
+
+  useEffect(() => {
+    if (!topActionFeedback) return;
+
+    const timer = window.setTimeout(() => {
+      setTopActionFeedback(null);
+    }, 2500);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [topActionFeedback]);
 
   const clearHoveredCandle = useCallback(() => {
     setHoveredCandle(null);
@@ -723,6 +778,36 @@ function App() {
       color: '#2962FF66',
     });
 
+    const sma20Series = chart.addSeries(LineSeries, {
+      color: indicatorConfigs[0].color,
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    const sma60Series = chart.addSeries(LineSeries, {
+      color: indicatorConfigs[1].color,
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    const ema20Series = chart.addSeries(LineSeries, {
+      color: indicatorConfigs[2].color,
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    const compareSeries = chart.addSeries(LineSeries, {
+      color: compareOverlayColor,
+      lineWidth: 2,
+      lineStyle: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+
     volumeSeries.priceScale().applyOptions({
       scaleMargins: {
         top: 0.82,
@@ -827,6 +912,12 @@ function App() {
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     volumeSeriesRef.current = volumeSeries;
+    indicatorSeriesRefs.current = {
+      sma20: sma20Series,
+      sma60: sma60Series,
+      ema20: ema20Series,
+    };
+    compareSeriesRef.current = compareSeries;
     setChartReady(true);
 
     const observer = new ResizeObserver(() => {
@@ -846,6 +937,8 @@ function App() {
       chartRef.current = null;
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;
+      indicatorSeriesRefs.current = { sma20: null, sma60: null, ema20: null };
+      compareSeriesRef.current = null;
       horizontalLinesRef.current = [];
       verticalLinesRef.current = [];
       for (const node of verticalLineNodes.values()) {
@@ -917,6 +1010,58 @@ function App() {
       canceled = true;
     };
   }, [clearHoveredCandle, selectedSymbol, selectedInterval]);
+
+  useEffect(() => {
+    if (!compareSymbol) {
+      setCompareCandles([]);
+      setCompareError(null);
+      setCompareLoading(false);
+      return;
+    }
+
+    if (compareSymbol === selectedSymbol) {
+      setCompareCandles([]);
+      setCompareError('비교 심볼은 현재 심볼과 달라야 합니다.');
+      return;
+    }
+
+    let canceled = false;
+
+    const loadCompareCandles = async () => {
+      setCompareLoading(true);
+      setCompareError(null);
+
+      try {
+        const response = await fetch(
+          `${apiBase}/api/candles?symbol=${encodeURIComponent(compareSymbol)}&interval=${encodeURIComponent(selectedInterval)}&limit=500`,
+        );
+
+        if (!response.ok) {
+          throw new Error('compare candle fetch failed');
+        }
+
+        const data = (await response.json()) as { candles: Candle[] };
+        if (!canceled) {
+          setCompareCandles(data.candles ?? []);
+        }
+      } catch {
+        if (!canceled) {
+          setCompareCandles([]);
+          setCompareError('비교 심볼 데이터를 불러오지 못했습니다.');
+        }
+      } finally {
+        if (!canceled) {
+          setCompareLoading(false);
+        }
+      }
+    };
+
+    void loadCompareCandles();
+
+    return () => {
+      canceled = true;
+    };
+  }, [compareSymbol, selectedInterval, selectedSymbol]);
 
   const quoteTargetSymbols = useMemo(() => {
     const set = new Set<string>();
@@ -1073,8 +1218,15 @@ function App() {
 
   useEffect(() => {
     candleMapRef.current = new Map(candles.map((candle) => [candle.time, candle]));
+    if (!candleSeriesRef.current || !volumeSeriesRef.current || !chartRef.current) return;
 
-    if (!candles.length || !candleSeriesRef.current || !volumeSeriesRef.current || !chartRef.current) return;
+    if (!candles.length) {
+      candleSeriesRef.current.setData([]);
+      volumeSeriesRef.current.setData([]);
+      chartRef.current.timeScale().fitContent();
+      syncVerticalLinePositions();
+      return;
+    }
 
     const candleData: CandlestickData[] = candles.map((candle) => ({
       time: candle.time as UTCTimestamp,
@@ -1095,6 +1247,54 @@ function App() {
     chartRef.current.timeScale().fitContent();
     syncVerticalLinePositions();
   }, [candles, syncVerticalLinePositions]);
+
+  useEffect(() => {
+    const closeValues = candles.map((candle) => candle.close);
+
+    for (const config of indicatorConfigs) {
+      const series = indicatorSeriesRefs.current[config.key];
+      if (!series) continue;
+
+      if (!enabledIndicators[config.key] || closeValues.length === 0) {
+        series.setData([]);
+        continue;
+      }
+
+      const values =
+        config.kind === 'SMA'
+          ? calculateSMA(closeValues, config.period)
+          : calculateEMA(closeValues, config.period);
+
+      const points: LineData[] = toTimeValuePoints(candles, values).map((point) => ({
+        time: point.time as UTCTimestamp,
+        value: point.value,
+      }));
+
+      series.setData(points);
+    }
+  }, [candles, enabledIndicators]);
+
+  const normalizedComparePoints = useMemo(() => {
+    if (!compareSymbol || compareLoading || compareError) return [];
+    return normalizeCompareOverlay(candles, compareCandles);
+  }, [candles, compareCandles, compareError, compareLoading, compareSymbol]);
+
+  useEffect(() => {
+    const series = compareSeriesRef.current;
+    if (!series) return;
+
+    if (!compareSymbol || compareLoading || compareError || normalizedComparePoints.length === 0) {
+      series.setData([]);
+      return;
+    }
+
+    const points: LineData[] = normalizedComparePoints.map((point) => ({
+      time: point.time as UTCTimestamp,
+      value: point.value,
+    }));
+
+    series.setData(points);
+  }, [compareError, compareLoading, compareSymbol, normalizedComparePoints]);
 
   const selectedQuote = quotes[selectedSymbol];
   const latestCandle = candles.at(-1) ?? null;
@@ -1682,10 +1882,56 @@ function App() {
     void persistDrawings(selectedSymbolRef.current, selectedIntervalRef.current, [], []);
   }, [persistDrawings, renderVerticalLines]);
 
+  const toggleIndicator = useCallback((key: IndicatorKey) => {
+    setEnabledIndicators((prev) => ({
+      ...prev,
+      [key]: !prev[key],
+    }));
+  }, []);
+
+  const handleTopActionClick = useCallback((key: TopActionKey) => {
+    if (key === 'indicator') {
+      setIndicatorPanelOpen((prev) => !prev);
+      return;
+    }
+
+    if (key === 'compare') {
+      setComparisonPanelOpen((prev) => !prev);
+      return;
+    }
+
+    if (key === 'alerts') {
+      setRightPanelCollapsed(false);
+      setWatchTab('alerts');
+      return;
+    }
+
+    setTopActionFeedback('리플레이 기능은 준비중입니다.');
+  }, []);
+
+  const clearCompareSymbol = useCallback(() => {
+    setCompareSymbol('');
+    setCompareCandles([]);
+    setCompareError(null);
+  }, []);
+
   const selectedCode = selectedSymbolMeta ? getDisplayCode(selectedSymbolMeta) : shortTicker(selectedSymbol);
   const selectedName = selectedSymbolMeta?.name ?? shortTicker(selectedSymbol);
   const exchangeText = marketExchangeText(selectedMarket);
   const totalDrawings = horizontalLines.length + verticalLines.length;
+  const activeIndicatorConfigs = indicatorConfigs.filter((config) => enabledIndicators[config.key]);
+  const compareSymbolMeta =
+    watchlistSymbols.find((item) => item.symbol === compareSymbol) ??
+    searchResults.find((item) => item.symbol === compareSymbol) ??
+    null;
+  const compareCandidates = watchlistSymbols.filter((item) => item.symbol !== selectedSymbol);
+  const compareStatus = compareError
+    ? compareError
+    : compareLoading
+      ? '비교 데이터를 불러오는 중...'
+      : compareSymbol && compareCandles.length > 0 && normalizedComparePoints.length === 0
+        ? '비교 가능한 공통 구간이 없습니다.'
+        : null;
 
   return (
     <div className="tv-app">
@@ -1718,7 +1964,19 @@ function App() {
 
           <div className="top-actions">
             {topActions.map((action) => (
-              <button key={action}>{action}</button>
+              <button
+                key={action.key}
+                className={
+                  (action.key === 'indicator' && indicatorPanelOpen) ||
+                  (action.key === 'compare' && comparisonPanelOpen) ||
+                  (action.key === 'alerts' && !rightPanelCollapsed && watchTab === 'alerts')
+                    ? 'active'
+                    : ''
+                }
+                onClick={() => handleTopActionClick(action.key)}
+              >
+                {action.label}
+              </button>
             ))}
           </div>
         </div>
@@ -1769,18 +2027,89 @@ function App() {
               <span>{exchangeText} · 실시간 데이터</span>
             </div>
 
-            <div className="chart-meta">
-              <span>O {displayCandle ? formatPrice(displayCandle.open) : '--'}</span>
-              <span>H {displayCandle ? formatPrice(displayCandle.high) : '--'}</span>
-              <span>L {displayCandle ? formatPrice(displayCandle.low) : '--'}</span>
-              <span>C {displayCandle ? formatPrice(displayCandle.close) : '--'}</span>
-              <span className={priceDiff >= 0 ? 'up' : 'down'}>
-                {priceDiff >= 0 ? '+' : ''}
-                {priceDiff.toFixed(2)} ({priceDiffPercent.toFixed(2)}%)
-              </span>
-              <span>Vol {displayCandle ? formatVolume(displayCandle.volume) : '--'}</span>
+            <div className="chart-meta-wrap">
+              <div className="chart-meta">
+                <span>O {displayCandle ? formatPrice(displayCandle.open) : '--'}</span>
+                <span>H {displayCandle ? formatPrice(displayCandle.high) : '--'}</span>
+                <span>L {displayCandle ? formatPrice(displayCandle.low) : '--'}</span>
+                <span>C {displayCandle ? formatPrice(displayCandle.close) : '--'}</span>
+                <span className={priceDiff >= 0 ? 'up' : 'down'}>
+                  {priceDiff >= 0 ? '+' : ''}
+                  {priceDiff.toFixed(2)} ({priceDiffPercent.toFixed(2)}%)
+                </span>
+                <span>Vol {displayCandle ? formatVolume(displayCandle.volume) : '--'}</span>
+              </div>
+
+              {activeIndicatorConfigs.length > 0 || compareSymbol ? (
+                <div className="chart-legend-row">
+                  {activeIndicatorConfigs.map((config) => (
+                    <span key={config.key} className="chart-legend-item">
+                      <span className="legend-dot" style={{ backgroundColor: config.color }} />
+                      {config.legend}
+                    </span>
+                  ))}
+                  {compareSymbol ? (
+                    <span className="chart-legend-item">
+                      <span className="legend-dot" style={{ backgroundColor: compareOverlayColor }} />
+                      비교 {compareSymbolMeta ? getDisplayCode(compareSymbolMeta) : shortTicker(compareSymbol)} (정규화)
+                    </span>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           </div>
+
+          {indicatorPanelOpen || comparisonPanelOpen ? (
+            <div className="chart-control-panels">
+              {indicatorPanelOpen ? (
+                <div className="chart-control-group">
+                  <strong>지표</strong>
+                  <div className="indicator-toggle-list">
+                    {indicatorConfigs.map((config) => (
+                      <label key={config.key}>
+                        <input
+                          type="checkbox"
+                          checked={enabledIndicators[config.key]}
+                          onChange={() => toggleIndicator(config.key)}
+                        />
+                        <span className="legend-dot" style={{ backgroundColor: config.color }} />
+                        <span>{config.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {comparisonPanelOpen ? (
+                <div className="chart-control-group">
+                  <strong>비교</strong>
+                  <div className="compare-controls">
+                    <select
+                      value={compareSymbol}
+                      onChange={(event) => {
+                        setCompareSymbol(event.target.value);
+                        setCompareError(null);
+                      }}
+                    >
+                      <option value="">비교 심볼 선택</option>
+                      {compareCandidates.map((item) => (
+                        <option key={item.symbol} value={item.symbol}>
+                          {getOptionLabel(item)}
+                        </option>
+                      ))}
+                    </select>
+                    <button type="button" onClick={clearCompareSymbol} disabled={!compareSymbol}>
+                      비교 해제
+                    </button>
+                  </div>
+                  {compareCandidates.length === 0 ? (
+                    <p className="control-feedback">관심종목에 비교 가능한 심볼이 없습니다.</p>
+                  ) : null}
+                  {compareStatus ? <p className="control-feedback">{compareStatus}</p> : null}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
 
           <div className="chart-area" onMouseLeave={clearHoveredCandle}>
             <div className="chart-canvas" ref={containerRef} />
@@ -1815,6 +2144,7 @@ function App() {
 
           <div className="status-row">
             <span>{loading ? '데이터를 불러오는 중...' : '실시간 UI 프로토타입'}</span>
+            {topActionFeedback ? <span className="status-chip">{topActionFeedback}</span> : null}
 
             {activeTool === 'horizontal' ? (
               <div className="status-actions">
