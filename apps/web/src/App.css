@@ -377,6 +377,49 @@ select {
   cursor: default;
 }
 
+.replay-group {
+  gap: 8px;
+}
+
+.replay-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.replay-controls button {
+  border: 1px solid #29517a;
+  background: #173047;
+  color: #b5dcff;
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.replay-controls button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.replay-speed-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #c2c9d6;
+  font-size: 12px;
+}
+
+.replay-speed-select select {
+  border: 1px solid #2b2f3a;
+  background: #1e222d;
+  color: #d1d4dc;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
 .control-feedback {
   margin: 0;
   color: #90a0b9;
@@ -504,6 +547,10 @@ select {
 .status-chip {
   color: #ffcc66;
   font-size: 11px;
+}
+
+.replay-status-chip {
+  color: #8bc8ff;
 }
 
 .status-button {

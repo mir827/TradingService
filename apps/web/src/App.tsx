@@ -28,6 +28,14 @@ import {
 import './App.css';
 import { calculateEMA, calculateSMA, normalizeCompareOverlay, toTimeValuePoints } from './lib/chartMath';
 import {
+  REPLAY_TICK_MS_BY_SPEED,
+  getReplayProgress,
+  getReplayStartVisibleCount,
+  replaySpeedOptions,
+  stepReplayVisibleCount,
+  type ReplaySpeed,
+} from './lib/replay';
+import {
   formatSigned,
   getDisplayCode,
   getOptionLabel,
@@ -540,6 +548,11 @@ function App() {
   const [compareLoading, setCompareLoading] = useState(false);
   const [compareError, setCompareError] = useState<string | null>(null);
   const [topActionFeedback, setTopActionFeedback] = useState<string | null>(null);
+  const [replayMode, setReplayMode] = useState(false);
+  const [replayPlaying, setReplayPlaying] = useState(false);
+  const [replaySpeed, setReplaySpeed] = useState<ReplaySpeed>(1);
+  const [replayStartBars, setReplayStartBars] = useState(0);
+  const [replayVisibleBars, setReplayVisibleBars] = useState(0);
   const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
   const [hoveredPoint, setHoveredPoint] = useState<{ x: number; y: number } | null>(null);
   const [horizontalLines, setHorizontalLines] = useState<HorizontalLineState[]>([]);
@@ -581,6 +594,15 @@ function App() {
   const [alertsHistoryLoading, setAlertsHistoryLoading] = useState(false);
   const [alertsHistoryClearing, setAlertsHistoryClearing] = useState(false);
 
+  const replayProgress = useMemo(
+    () => getReplayProgress(candles.length, replayStartBars, replayVisibleBars),
+    [candles.length, replayStartBars, replayVisibleBars],
+  );
+  const activeCandles = useMemo(() => {
+    if (!replayMode) return candles;
+    return candles.slice(0, replayProgress.visibleBars);
+  }, [candles, replayMode, replayProgress.visibleBars]);
+
   useEffect(() => {
     activeToolRef.current = activeTool;
   }, [activeTool]);
@@ -592,6 +614,13 @@ function App() {
   useEffect(() => {
     selectedIntervalRef.current = selectedInterval;
   }, [selectedInterval]);
+
+  useEffect(() => {
+    setReplayMode(false);
+    setReplayPlaying(false);
+    setReplayStartBars(0);
+    setReplayVisibleBars(0);
+  }, [selectedInterval, selectedSymbol]);
 
   useEffect(() => {
     if (activeTool !== 'trendline' && activeTool !== 'ray' && activeTool !== 'rectangle') {
@@ -638,6 +667,39 @@ function App() {
     setHoveredCandle(null);
     setHoveredPoint(null);
   }, []);
+
+  useEffect(() => {
+    if (!hoveredCandle) return;
+
+    const stillVisible = activeCandles.some((candle) => candle.time === hoveredCandle.time);
+    if (!stillVisible) {
+      clearHoveredCandle();
+    }
+  }, [activeCandles, clearHoveredCandle, hoveredCandle]);
+
+  useEffect(() => {
+    if (!replayMode || !replayPlaying || replayProgress.isAtEnd) return;
+
+    const timer = window.setTimeout(() => {
+      setReplayVisibleBars((previous) => stepReplayVisibleCount(previous, candles.length, 1));
+    }, REPLAY_TICK_MS_BY_SPEED[replaySpeed]);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [
+    candles.length,
+    replayMode,
+    replayPlaying,
+    replayProgress.completedSteps,
+    replayProgress.isAtEnd,
+    replaySpeed,
+  ]);
+
+  useEffect(() => {
+    if (!replayMode || !replayPlaying || !replayProgress.isAtEnd) return;
+    setReplayPlaying(false);
+  }, [replayMode, replayPlaying, replayProgress.isAtEnd]);
 
   const refreshDrawingOverlay = useCallback(() => {
     setOverlayTick((previous) => previous + 1);
@@ -1922,10 +1984,10 @@ function App() {
   }, [loadAlertHistory, watchTab]);
 
   useEffect(() => {
-    candleMapRef.current = new Map(candles.map((candle) => [candle.time, candle]));
+    candleMapRef.current = new Map(activeCandles.map((candle) => [candle.time, candle]));
     if (!candleSeriesRef.current || !volumeSeriesRef.current || !chartRef.current) return;
 
-    if (!candles.length) {
+    if (!activeCandles.length) {
       candleSeriesRef.current.setData([]);
       volumeSeriesRef.current.setData([]);
       chartRef.current.timeScale().fitContent();
@@ -1934,7 +1996,7 @@ function App() {
       return;
     }
 
-    const candleData: CandlestickData[] = candles.map((candle) => ({
+    const candleData: CandlestickData[] = activeCandles.map((candle) => ({
       time: candle.time as UTCTimestamp,
       open: candle.open,
       high: candle.high,
@@ -1942,7 +2004,7 @@ function App() {
       close: candle.close,
     }));
 
-    const volumeData: HistogramData[] = candles.map((candle) => ({
+    const volumeData: HistogramData[] = activeCandles.map((candle) => ({
       time: candle.time as UTCTimestamp,
       value: candle.volume,
       color: candle.close >= candle.open ? '#26A69A66' : '#EF535066',
@@ -1953,10 +2015,10 @@ function App() {
     chartRef.current.timeScale().fitContent();
     syncVerticalLinePositions();
     refreshDrawingOverlay();
-  }, [candles, refreshDrawingOverlay, syncVerticalLinePositions]);
+  }, [activeCandles, refreshDrawingOverlay, syncVerticalLinePositions]);
 
   useEffect(() => {
-    const closeValues = candles.map((candle) => candle.close);
+    const closeValues = activeCandles.map((candle) => candle.close);
 
     for (const config of indicatorConfigs) {
       const series = indicatorSeriesRefs.current[config.key];
@@ -1972,19 +2034,19 @@ function App() {
           ? calculateSMA(closeValues, config.period)
           : calculateEMA(closeValues, config.period);
 
-      const points: LineData[] = toTimeValuePoints(candles, values).map((point) => ({
+      const points: LineData[] = toTimeValuePoints(activeCandles, values).map((point) => ({
         time: point.time as UTCTimestamp,
         value: point.value,
       }));
 
       series.setData(points);
     }
-  }, [candles, enabledIndicators]);
+  }, [activeCandles, enabledIndicators]);
 
   const normalizedComparePoints = useMemo(() => {
     if (!compareSymbol || compareLoading || compareError) return [];
-    return normalizeCompareOverlay(candles, compareCandles);
-  }, [candles, compareCandles, compareError, compareLoading, compareSymbol]);
+    return normalizeCompareOverlay(activeCandles, compareCandles);
+  }, [activeCandles, compareCandles, compareError, compareLoading, compareSymbol]);
 
   useEffect(() => {
     const series = compareSeriesRef.current;
@@ -2004,7 +2066,7 @@ function App() {
   }, [compareError, compareLoading, compareSymbol, normalizedComparePoints]);
 
   const selectedQuote = quotes[selectedSymbol];
-  const latestCandle = candles.at(-1) ?? null;
+  const latestCandle = activeCandles.at(-1) ?? null;
   const displayCandle = hoveredCandle ?? latestCandle;
   const hoveredCandleDiff = hoveredCandle ? hoveredCandle.close - hoveredCandle.open : 0;
   const hoveredCandleDiffPercent =
@@ -3309,6 +3371,45 @@ function App() {
     }));
   }, []);
 
+  const startReplay = useCallback(() => {
+    if (candles.length === 0) return false;
+
+    const initialBars = getReplayStartVisibleCount(candles.length);
+    setReplayMode(true);
+    setReplayPlaying(false);
+    setReplaySpeed(1);
+    setReplayStartBars(initialBars);
+    setReplayVisibleBars(initialBars);
+    clearHoveredCandle();
+    return true;
+  }, [candles.length, clearHoveredCandle]);
+
+  const exitReplay = useCallback(() => {
+    setReplayMode(false);
+    setReplayPlaying(false);
+    setReplayStartBars(0);
+    setReplayVisibleBars(0);
+    clearHoveredCandle();
+  }, [clearHoveredCandle]);
+
+  const toggleReplayPlayback = useCallback(() => {
+    if (!replayMode) return;
+
+    if (replayProgress.isAtEnd) {
+      setReplayPlaying(false);
+      return;
+    }
+
+    setReplayPlaying((previous) => !previous);
+  }, [replayMode, replayProgress.isAtEnd]);
+
+  const stepReplayForward = useCallback(() => {
+    if (!replayMode) return;
+
+    setReplayPlaying(false);
+    setReplayVisibleBars((previous) => stepReplayVisibleCount(previous, candles.length, 1));
+  }, [candles.length, replayMode]);
+
   const handleTopActionClick = useCallback((key: TopActionKey) => {
     if (key === 'indicator') {
       setIndicatorPanelOpen((prev) => !prev);
@@ -3326,8 +3427,20 @@ function App() {
       return;
     }
 
-    setTopActionFeedback('리플레이 기능은 준비중입니다.');
-  }, []);
+    if (replayMode) {
+      exitReplay();
+      setTopActionFeedback('리플레이 모드를 종료했습니다.');
+      return;
+    }
+
+    const started = startReplay();
+    if (!started) {
+      setTopActionFeedback('리플레이를 시작할 캔들 데이터가 없습니다.');
+      return;
+    }
+
+    setTopActionFeedback('리플레이 모드를 시작했습니다.');
+  }, [exitReplay, replayMode, startReplay]);
 
   const clearCompareSymbol = useCallback(() => {
     setCompareSymbol('');
@@ -3506,6 +3619,9 @@ function App() {
       : compareSymbol && compareCandles.length > 0 && normalizedComparePoints.length === 0
         ? '비교 가능한 공통 구간이 없습니다.'
         : null;
+  const replayStatusText = replayMode
+    ? `리플레이 ${replayPlaying ? '재생중' : replayProgress.isAtEnd ? '완료' : '일시정지'} · 스텝 ${replayProgress.completedSteps}/${replayProgress.totalSteps} · 속도 x${replaySpeed}`
+    : null;
 
   return (
     <div className="tv-app">
@@ -3543,7 +3659,8 @@ function App() {
                 className={
                   (action.key === 'indicator' && indicatorPanelOpen) ||
                   (action.key === 'compare' && comparisonPanelOpen) ||
-                  (action.key === 'alerts' && !rightPanelCollapsed && watchTab === 'alerts')
+                  (action.key === 'alerts' && !rightPanelCollapsed && watchTab === 'alerts') ||
+                  (action.key === 'replay' && replayMode)
                     ? 'active'
                     : ''
                 }
@@ -3633,7 +3750,7 @@ function App() {
             </div>
           </div>
 
-          {indicatorPanelOpen || comparisonPanelOpen ? (
+          {indicatorPanelOpen || comparisonPanelOpen || replayMode ? (
             <div className="chart-control-panels">
               {indicatorPanelOpen ? (
                 <div className="chart-control-group">
@@ -3680,6 +3797,45 @@ function App() {
                     <p className="control-feedback">관심종목에 비교 가능한 심볼이 없습니다.</p>
                   ) : null}
                   {compareStatus ? <p className="control-feedback">{compareStatus}</p> : null}
+                </div>
+              ) : null}
+
+              {replayMode ? (
+                <div className="chart-control-group replay-group">
+                  <strong>리플레이</strong>
+                  <div className="replay-controls">
+                    <button type="button" onClick={toggleReplayPlayback} disabled={replayProgress.isAtEnd}>
+                      {replayPlaying ? '일시정지' : '재생'}
+                    </button>
+                    <button type="button" onClick={stepReplayForward} disabled={replayProgress.isAtEnd}>
+                      +1 bar
+                    </button>
+                    <label className="replay-speed-select">
+                      <span>속도</span>
+                      <select
+                        value={replaySpeed}
+                        onChange={(event) => {
+                          const nextSpeed = Number(event.target.value);
+                          if (nextSpeed === 1 || nextSpeed === 2 || nextSpeed === 4) {
+                            setReplaySpeed(nextSpeed);
+                          }
+                        }}
+                      >
+                        {replaySpeedOptions.map((speed) => (
+                          <option key={speed} value={speed}>
+                            x{speed}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button type="button" onClick={exitReplay}>
+                      리플레이 종료
+                    </button>
+                  </div>
+                  <p className="control-feedback">
+                    모드: 리플레이 · 스텝 {replayProgress.completedSteps}/{replayProgress.totalSteps} · 표시{' '}
+                    {replayProgress.visibleBars}/{replayProgress.totalBars} bars · 속도 x{replaySpeed}
+                  </p>
                 </div>
               ) : null}
             </div>
@@ -3776,6 +3932,7 @@ function App() {
             <span>{loading ? '데이터를 불러오는 중...' : '실시간 UI 프로토타입'}</span>
             {topActionFeedback ? <span className="status-chip">{topActionFeedback}</span> : null}
             {activeToolDescription ? <span className="status-chip">{activeToolDescription}</span> : null}
+            {replayStatusText ? <span className="status-chip replay-status-chip">{replayStatusText}</span> : null}
             <span className="status-chip">단축키 H/V/T/Y/R/N · Esc · Delete/Backspace</span>
             {pendingShapeStart ? (
               <span className="status-chip">
