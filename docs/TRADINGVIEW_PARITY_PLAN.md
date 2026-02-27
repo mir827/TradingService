@@ -1,0 +1,113 @@
+# TradingView Parity Plan (Engineering)
+
+## Scope
+This document defines practical feature-parity milestones for the current TradingService stack (`apps/web`, `apps/api`) with explicit delivery order and Definition of Done (DoD).
+
+## Current Product Baseline
+- Web chart: candlestick + volume via `lightweight-charts`
+- Symbol + interval switching with persisted watchlist
+- Right panel: watchlist/detail/alerts
+- Drawing support: horizontal + vertical lines with persistence
+- Alert rules: create/delete/check, watchlist auto-check, history
+
+## Feature Matrix
+| Area | TradingView Baseline | Current in this Repo | Gap | Target Milestone |
+| --- | --- | --- | --- | --- |
+| Top action buttons | Functional shortcuts (Indicators/Compare/Alerts/Replay) | Buttons rendered but mostly non-functional | Missing action wiring and user feedback | M1 |
+| Moving-average overlays | Toggleable overlays with deterministic styles + legend | Candles + volume only | No SMA/EMA overlays, no overlay legend | M1 |
+| Symbol comparison | Overlay compare symbol (normalized or % mode) | None | No compare picker/data fetch/overlay/removal flow | M1 |
+| Chart indicator framework | Multiple indicators with reusable math + tests | No indicator math module | Utility layer absent | M1 |
+| Layout behavior for overlays | Compact controls integrated in chart workflow | No controls for indicator/compare | Controls/panel integration missing | M1 |
+| Replay | Bar replay mode with timeline controls | Placeholder only | No actionable feedback or state | M1 (placeholder UX), M3 (functional replay) |
+| Drawing toolset | Expanded tools (trendline/ray/rect/text) | Horizontal/vertical only | Missing major drawing primitives and editing UX | M2 |
+| Multi-chart / layout | Split layouts and synced symbols/timeframes | Single chart view | Missing layout orchestration/state sync | M3 |
+| Indicator depth | RSI/MACD/Bollinger etc. + configurable params | No advanced indicator set | Missing indicator catalog + panel/params persistence | M3 |
+| Alert depth | Rich conditions + UI management | Basic metric/operator/threshold alerts | Missing indicator-based/compound alerts + richer filters | M3 |
+| Strategy/backtest parity | Strategy tester metrics/execution simulation | Bottom panel placeholder text | No strategy execution engine or report UI | M4 |
+| Trading panel parity | Order ticket/positions/orders/trades workflows | Placeholder | Missing end-to-end trade lifecycle UI/API | M4 |
+| Persistence/state resilience | Saved chart layouts/templates per user | Partial (watchlist/drawings/alert prefs) | No unified chart-layout model + migrations | M4 |
+
+## Gap Summary (What Matters Next)
+1. Chart context actions currently do not drive workflow, so users cannot discover/operate indicators/compare quickly.
+2. Overlay architecture is missing reusable math and deterministic rendering rules.
+3. Compare workflow needs normalization + error isolation so base chart never regresses.
+4. Mid/late parity needs larger architectural work (multi-layout state, strategy runtime, trading workflow).
+
+## Milestone Order
+- M1: Actionable chart controls + baseline overlay parity
+- M2: Drawing and chart-interaction parity expansion
+- M3: Advanced analysis parity (replay runtime, indicator catalog, richer alerts, multi-chart)
+- M4: Execution and strategy parity (strategy tester + trading panel + persistence hardening)
+
+## Milestone Details and DoD
+
+### M1 - Actionable Controls + Baseline Overlays
+Deliverables:
+- Top action buttons are wired:
+  - `지표`: opens/toggles indicator controls
+  - `비교`: opens/toggles comparison controls
+  - `알림`: opens right panel and focuses alerts tab
+  - `리플레이`: placeholder with clear `준비중` feedback
+- Main chart overlay indicators:
+  - SMA 20 toggle
+  - SMA 60 toggle
+  - EMA 20 toggle
+  - deterministic colors + legend labels in chart header/meta zone
+- Symbol comparison overlay:
+  - picker from known UI symbols/watchlist
+  - compare candles fetched for selected interval
+  - normalized overlay rendering (relative movement comparable)
+  - clear/remove compare symbol
+  - compare failures do not break base candlestick/volume chart
+- Reusable math helpers in `apps/web/src/lib` for SMA/EMA/normalization + unit tests
+
+DoD:
+- UI flows are reachable from top actions with no dead buttons.
+- Base chart still renders and updates candles/volume exactly as before.
+- Compare error states are surfaced in UI and base chart remains interactive.
+- Unit tests cover SMA/EMA/normalization edge cases and pass.
+- `npm run lint`, `npm run build`, `npm test` all pass.
+
+### M2 - Drawing and Interaction Parity
+Deliverables:
+- Additional drawing primitives (trendline, ray, rectangle, text notes)
+- Select/move/delete interactions for existing drawings
+- Consistent serialization format for all drawing entities
+- Keyboard shortcuts for key drawing actions
+
+DoD:
+- Every drawing type is persistable/restorable by symbol+interval.
+- Edit interactions are deterministic and do not corrupt drawing state.
+- Regression tests cover serialization compatibility with existing drawing data.
+- No regression in current alert/watchlist/chart flows.
+
+### M3 - Advanced Analysis Parity
+Deliverables:
+- Functional replay mode (play/pause/speed/step/exit)
+- Indicator catalog + parameterized settings (e.g., RSI/MACD/Bollinger)
+- Multi-chart layout skeleton with shared symbol/interval controls
+- Extended alerts (indicator conditions and scoped filtering)
+
+DoD:
+- Replay runs from historical candles and can be exited without full chart reset.
+- Indicator settings are persisted per chart context.
+- Multi-chart synchronization does not exceed agreed render/perf budget.
+- Alert checks remain backward-compatible with current rule schema.
+
+### M4 - Strategy and Trading Parity
+Deliverables:
+- Strategy tester runtime + result views (equity, drawdown, trade list)
+- Trading panel workflows (order entry, position/order list, fill history)
+- Unified chart layout persistence and migration versioning
+- Operational hardening (error telemetry and recovery UX)
+
+DoD:
+- Strategy outputs are reproducible for same input dataset/config.
+- Trading workflows handle API failures without UI lockups or data loss.
+- Layout schema includes versioned migration path.
+- End-to-end smoke coverage for watchlist -> chart -> alert -> strategy/trading workflows.
+
+## Execution Notes
+- Keep `apps/web/src/App.tsx` changes incremental until chart features are split into modules.
+- Prefer pure math utilities in `apps/web/src/lib` with tests before adding new overlays.
+- Protect existing flows (watchlist, alerts, drawings) with regression checks on every milestone.
