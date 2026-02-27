@@ -75,6 +75,10 @@ Deliverables:
 - Consistent serialization format for all drawing entities
 - Keyboard shortcuts for key drawing actions
 
+Progress note (2026-02-27):
+- M2-1 completed: trendline/rectangle/note drawing types, two-click + note prompt workflows, persistence/runtime restore, selection/deletion chips, and drawing tool keyboard shortcuts (`H/V/T/R/N`, `Esc`, `Delete/Backspace`).
+- Remaining for M2: ray tool parity, move/drag edit interactions on-canvas, and broader interaction hardening for complex draw/edit sequences.
+
 DoD:
 - Every drawing type is persistable/restorable by symbol+interval.
 - Edit interactions are deterministic and do not corrupt drawing state.

@@ -4,6 +4,13 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
+import {
+  normalizeDrawingItems,
+  normalizeDrawingLines,
+  toLegacyDrawingLines,
+  type DrawingInputItem,
+  type DrawingItem,
+} from './drawings.js';
 
 type MarketType = 'CRYPTO' | 'KOSPI' | 'KOSDAQ';
 
@@ -64,25 +71,6 @@ type AlertHistoryEvent = AlertCheckEvent & {
   source?: AlertHistoryEventSource;
   sourceSymbol?: string;
 };
-
-type DrawingLine = {
-  id: string;
-  price: number;
-};
-
-type HorizontalDrawing = {
-  id: string;
-  type: 'horizontal';
-  price: number;
-};
-
-type VerticalDrawing = {
-  id: string;
-  type: 'vertical';
-  time: number;
-};
-
-type DrawingItem = HorizontalDrawing | VerticalDrawing;
 
 type MarketStatusState = 'OPEN' | 'CLOSED';
 type MarketStatusReason = 'WEEKEND' | 'OUT_OF_SESSION' | 'SESSION_ACTIVE';
@@ -250,16 +238,39 @@ const drawingLineSchema = z.object({
   price: z.number().finite(),
 });
 
-const drawingItemSchema = z.discriminatedUnion('type', [
+const drawingItemSchema: z.ZodType<DrawingInputItem> = z.discriminatedUnion('type', [
   z.object({
-    id: z.string().min(1).optional(),
+    id: z.string().trim().min(1).optional(),
     type: z.literal('horizontal'),
     price: z.number().finite(),
   }),
   z.object({
-    id: z.string().min(1).optional(),
+    id: z.string().trim().min(1).optional(),
     type: z.literal('vertical'),
     time: z.number().int().nonnegative(),
+  }),
+  z.object({
+    id: z.string().trim().min(1).optional(),
+    type: z.literal('trendline'),
+    startTime: z.number().int().nonnegative(),
+    startPrice: z.number().finite(),
+    endTime: z.number().int().nonnegative(),
+    endPrice: z.number().finite(),
+  }),
+  z.object({
+    id: z.string().trim().min(1).optional(),
+    type: z.literal('rectangle'),
+    startTime: z.number().int().nonnegative(),
+    startPrice: z.number().finite(),
+    endTime: z.number().int().nonnegative(),
+    endPrice: z.number().finite(),
+  }),
+  z.object({
+    id: z.string().trim().min(1).optional(),
+    type: z.literal('note'),
+    time: z.number().int().nonnegative(),
+    price: z.number().finite(),
+    text: z.string().trim().min(1).max(240),
   }),
 ]);
 
@@ -477,54 +488,6 @@ function parseDrawingStoreKey(key: string) {
     symbol: key.slice(0, separatorIndex),
     interval: key.slice(separatorIndex + 1),
   };
-}
-
-function createDrawingLineId() {
-  return `line_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function createDrawingVerticalId() {
-  return `vline_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function normalizeDrawingLines(lines: Array<{ id?: string; price: number }>): DrawingItem[] {
-  return lines.map((line) => ({
-    id: line.id?.trim() || createDrawingLineId(),
-    type: 'horizontal',
-    price: line.price,
-  }));
-}
-
-function normalizeDrawingItems(
-  drawings: Array<
-    | { id?: string; type: 'horizontal'; price: number }
-    | { id?: string; type: 'vertical'; time: number }
-  >,
-): DrawingItem[] {
-  return drawings.map((drawing) => {
-    if (drawing.type === 'horizontal') {
-      return {
-        id: drawing.id?.trim() || createDrawingLineId(),
-        type: 'horizontal',
-        price: drawing.price,
-      };
-    }
-
-    return {
-      id: drawing.id?.trim() || createDrawingVerticalId(),
-      type: 'vertical',
-      time: drawing.time,
-    };
-  });
-}
-
-function toLegacyDrawingLines(drawings: DrawingItem[]): DrawingLine[] {
-  return drawings
-    .filter((drawing): drawing is HorizontalDrawing => drawing.type === 'horizontal')
-    .map((drawing) => ({
-      id: drawing.id,
-      price: drawing.price,
-    }));
 }
 
 function trimAlertHistoryOverflow() {

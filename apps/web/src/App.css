@@ -402,6 +402,13 @@ select {
   z-index: 3;
 }
 
+.drawing-shape-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+
 .vertical-line-marker {
   position: absolute;
   top: 0;
@@ -474,6 +481,7 @@ select {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .status-actions {
@@ -513,6 +521,70 @@ select {
   padding: 2px 8px;
   font-size: 10px;
   cursor: pointer;
+}
+
+.line-tag.selected {
+  border-color: #3d5886;
+  background: #1d2a40;
+  color: #d8e8ff;
+}
+
+.line-tag.horizontal {
+  border-color: #5a4c30;
+}
+
+.line-tag.vertical {
+  border-color: #355b7a;
+  color: #b7dcff;
+}
+
+.line-tag.trendline {
+  border-color: #4f6d2d;
+  color: #c5eba0;
+}
+
+.line-tag.rectangle {
+  border-color: #7a4b32;
+  color: #ffc3a0;
+}
+
+.line-tag.note {
+  border-color: #664e86;
+  color: #e1c9ff;
+}
+
+.drawing-shape {
+  vector-effect: non-scaling-stroke;
+}
+
+.drawing-shape.trendline {
+  stroke: #9be9c4;
+  stroke-width: 2;
+}
+
+.drawing-shape.rectangle {
+  stroke: #ffb67f;
+  stroke-width: 1.5;
+  fill: rgb(255 140 66 / 14%);
+}
+
+.drawing-shape.note circle {
+  fill: #d6b4ff;
+  stroke: #2a1c40;
+  stroke-width: 1.5;
+}
+
+.drawing-shape.note text {
+  fill: #e7d7ff;
+  font-size: 11px;
+  paint-order: stroke;
+  stroke: rgb(12 18 30 / 92%);
+  stroke-width: 2.5;
+  stroke-linejoin: round;
+}
+
+.drawing-shape.selected {
+  filter: brightness(1.2);
 }
 
 .status-time {

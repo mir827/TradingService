@@ -1210,7 +1210,7 @@ describe('api drawings persistence', () => {
       symbol: string;
       interval: string;
       lines: Array<{ id: string; price: number }>;
-      drawings: Array<{ id: string; type: 'horizontal' | 'vertical'; price?: number; time?: number }>;
+      drawings: Array<Record<string, unknown>>;
     };
 
     expect(saved.symbol).toBe('BTCUSDT');
@@ -1238,7 +1238,7 @@ describe('api drawings persistence', () => {
     });
   });
 
-  it('saves and loads mixed horizontal/vertical drawings', async () => {
+  it('saves and loads mixed drawing primitives', async () => {
     const saveResponse = await app.inject({
       method: 'PUT',
       url: '/api/drawings',
@@ -1248,7 +1248,9 @@ describe('api drawings persistence', () => {
         drawings: [
           { id: 'h-fixed', type: 'horizontal', price: 3210.5 },
           { id: 'v-fixed', type: 'vertical', time: 1735689600 },
-          { type: 'vertical', time: 1735693200 },
+          { id: 'trend-fixed', type: 'trendline', startTime: 1735693200, startPrice: 3201.2, endTime: 1735696800, endPrice: 3300.4 },
+          { type: 'rectangle', startTime: 1735695000, startPrice: 3188.7, endTime: 1735700400, endPrice: 3345.1 },
+          { id: 'note-fixed', type: 'note', time: 1735700400, price: 3299.1, text: '  breakout  ' },
         ],
       },
     });
@@ -1259,18 +1261,36 @@ describe('api drawings persistence', () => {
       symbol: string;
       interval: string;
       lines: Array<{ id: string; price: number }>;
-      drawings: Array<{ id: string; type: 'horizontal' | 'vertical'; price?: number; time?: number }>;
+      drawings: Array<Record<string, unknown>>;
     };
 
     expect(saved.symbol).toBe('ETHUSDT');
     expect(saved.interval).toBe('60');
-    expect(saved.drawings).toHaveLength(3);
+    expect(saved.drawings).toHaveLength(5);
     expect(saved.drawings[0]).toEqual({ id: 'h-fixed', type: 'horizontal', price: 3210.5 });
     expect(saved.drawings[1]).toEqual({ id: 'v-fixed', type: 'vertical', time: 1735689600 });
     expect(saved.drawings[2]).toEqual({
-      id: expect.stringMatching(/^vline_/),
-      type: 'vertical',
-      time: 1735693200,
+      id: 'trend-fixed',
+      type: 'trendline',
+      startTime: 1735693200,
+      startPrice: 3201.2,
+      endTime: 1735696800,
+      endPrice: 3300.4,
+    });
+    expect(saved.drawings[3]).toEqual({
+      id: expect.stringMatching(/^rect_/),
+      type: 'rectangle',
+      startTime: 1735695000,
+      startPrice: 3188.7,
+      endTime: 1735700400,
+      endPrice: 3345.1,
+    });
+    expect(saved.drawings[4]).toEqual({
+      id: 'note-fixed',
+      type: 'note',
+      time: 1735700400,
+      price: 3299.1,
+      text: 'breakout',
     });
     expect(saved.lines).toEqual([{ id: 'h-fixed', price: 3210.5 }]);
 
@@ -1298,6 +1318,9 @@ describe('api drawings persistence', () => {
         drawings: [
           { id: 'persist-h', type: 'horizontal', price: 2500 },
           { id: 'persist-v', type: 'vertical', time: 1735700000 },
+          { id: 'persist-trend', type: 'trendline', startTime: 1735700000, startPrice: 2488.4, endTime: 1735703600, endPrice: 2522.7 },
+          { id: 'persist-rect', type: 'rectangle', startTime: 1735701800, startPrice: 2475.2, endTime: 1735707200, endPrice: 2550.5 },
+          { id: 'persist-note', type: 'note', time: 1735707200, price: 2512.3, text: 'hold' },
         ],
       },
     });
@@ -1309,6 +1332,23 @@ describe('api drawings persistence', () => {
       drawings: [
         { id: 'persist-h', type: 'horizontal', price: 2500 },
         { id: 'persist-v', type: 'vertical', time: 1735700000 },
+        {
+          id: 'persist-trend',
+          type: 'trendline',
+          startTime: 1735700000,
+          startPrice: 2488.4,
+          endTime: 1735703600,
+          endPrice: 2522.7,
+        },
+        {
+          id: 'persist-rect',
+          type: 'rectangle',
+          startTime: 1735701800,
+          startPrice: 2475.2,
+          endTime: 1735707200,
+          endPrice: 2550.5,
+        },
+        { id: 'persist-note', type: 'note', time: 1735707200, price: 2512.3, text: 'hold' },
       ],
       lines: [{ id: 'persist-h', price: 2500 }],
     });
@@ -1327,6 +1367,23 @@ describe('api drawings persistence', () => {
       drawings: [
         { id: 'persist-h', type: 'horizontal', price: 2500 },
         { id: 'persist-v', type: 'vertical', time: 1735700000 },
+        {
+          id: 'persist-trend',
+          type: 'trendline',
+          startTime: 1735700000,
+          startPrice: 2488.4,
+          endTime: 1735703600,
+          endPrice: 2522.7,
+        },
+        {
+          id: 'persist-rect',
+          type: 'rectangle',
+          startTime: 1735701800,
+          startPrice: 2475.2,
+          endTime: 1735707200,
+          endPrice: 2550.5,
+        },
+        { id: 'persist-note', type: 'note', time: 1735707200, price: 2512.3, text: 'hold' },
       ],
       lines: [{ id: 'persist-h', price: 2500 }],
     });
@@ -1363,5 +1420,29 @@ describe('api drawings persistence', () => {
     });
 
     expect(invalidVerticalDrawing.statusCode).toBe(400);
+
+    const invalidRectangleDrawing = await app.inject({
+      method: 'PUT',
+      url: '/api/drawings',
+      payload: {
+        symbol: 'BTCUSDT',
+        interval: '60',
+        drawings: [{ type: 'rectangle', startTime: 1735689600, startPrice: 100, endPrice: 120 }],
+      },
+    });
+
+    expect(invalidRectangleDrawing.statusCode).toBe(400);
+
+    const invalidNoteDrawing = await app.inject({
+      method: 'PUT',
+      url: '/api/drawings',
+      payload: {
+        symbol: 'BTCUSDT',
+        interval: '60',
+        drawings: [{ type: 'note', time: 1735689600, price: 100, text: '   ' }],
+      },
+    });
+
+    expect(invalidNoteDrawing.statusCode).toBe(400);
   });
 });

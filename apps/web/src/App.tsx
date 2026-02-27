@@ -142,19 +142,43 @@ type VerticalLineState = {
   id: string;
   time: UTCTimestamp;
 };
+type TrendlineState = {
+  id: string;
+  startTime: UTCTimestamp;
+  startPrice: number;
+  endTime: UTCTimestamp;
+  endPrice: number;
+};
+type RectangleState = {
+  id: string;
+  startTime: UTCTimestamp;
+  startPrice: number;
+  endTime: UTCTimestamp;
+  endPrice: number;
+};
+type NoteState = {
+  id: string;
+  time: UTCTimestamp;
+  price: number;
+  text: string;
+};
+type ToolKey = 'cursor' | 'crosshair' | 'vertical' | 'horizontal' | 'trendline' | 'rectangle' | 'note' | 'magnet';
 type DrawingPayloadItem =
   | { id: string; type: 'horizontal'; price: number }
-  | { id: string; type: 'vertical'; time: number };
+  | { id: string; type: 'vertical'; time: number }
+  | { id: string; type: 'trendline'; startTime: number; startPrice: number; endTime: number; endPrice: number }
+  | { id: string; type: 'rectangle'; startTime: number; startPrice: number; endTime: number; endPrice: number }
+  | { id: string; type: 'note'; time: number; price: number; text: string };
 
 const intervals = ['1', '5', '15', '60', '240', '1D', '1W'];
-const leftTools = [
+const leftTools: Array<{ key: ToolKey; icon: string; label: string }> = [
   { key: 'cursor', icon: '↖', label: '커서' },
   { key: 'crosshair', icon: '＋', label: '크로스헤어' },
   { key: 'vertical', icon: '｜', label: '수직선' },
   { key: 'horizontal', icon: '―', label: '수평선' },
-  { key: 'fib', icon: '📐', label: '피보나치' },
-  { key: 'brush', icon: '✏️', label: '브러시' },
-  { key: 'emoji', icon: '😊', label: '아이콘' },
+  { key: 'trendline', icon: 'T', label: '추세선' },
+  { key: 'rectangle', icon: 'R', label: '사각형' },
+  { key: 'note', icon: 'N', label: '노트' },
   { key: 'magnet', icon: '🧲', label: '자석' },
 ];
 const topActions: Array<{ key: TopActionKey; label: string }> = [
@@ -288,6 +312,18 @@ function createVerticalLineId() {
   return `vline_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function createTrendlineId() {
+  return `trend_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createRectangleId() {
+  return `rect_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createNoteId() {
+  return `note_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function normalizeLinePrice(price: number) {
   return Number(price.toFixed(Math.abs(price) < 10 ? 4 : 2));
 }
@@ -299,6 +335,10 @@ function formatDrawingTime(time: UTCTimestamp) {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function summarizeNoteText(text: string) {
+  return text.length > 18 ? `${text.slice(0, 18)}…` : text;
 }
 
 function formatCandleDateTime(time: number) {
@@ -324,9 +364,12 @@ function App() {
   });
   const compareSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const candleMapRef = useRef<Map<number, Candle>>(new Map());
-  const activeToolRef = useRef('cursor');
+  const activeToolRef = useRef<ToolKey>('cursor');
   const horizontalLinesRef = useRef<HorizontalLine[]>([]);
   const verticalLinesRef = useRef<VerticalLineState[]>([]);
+  const trendlinesRef = useRef<TrendlineState[]>([]);
+  const rectanglesRef = useRef<RectangleState[]>([]);
+  const notesRef = useRef<NoteState[]>([]);
   const verticalLineNodesRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const selectedSymbolRef = useRef('BTCUSDT');
   const selectedIntervalRef = useRef('60');
@@ -343,7 +386,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [activeTool, setActiveTool] = useState('cursor');
+  const [activeTool, setActiveTool] = useState<ToolKey>('cursor');
   const [watchTab, setWatchTab] = useState<WatchTab>('watchlist');
   const [watchQuery, setWatchQuery] = useState('');
   const [watchSortKey, setWatchSortKey] = useState<WatchSortKey>(() => getStoredWatchPrefs().watchSortKey ?? 'symbol');
@@ -370,6 +413,16 @@ function App() {
   const [hoveredPoint, setHoveredPoint] = useState<{ x: number; y: number } | null>(null);
   const [horizontalLines, setHorizontalLines] = useState<HorizontalLineState[]>([]);
   const [verticalLines, setVerticalLines] = useState<VerticalLineState[]>([]);
+  const [trendlines, setTrendlines] = useState<TrendlineState[]>([]);
+  const [rectangles, setRectangles] = useState<RectangleState[]>([]);
+  const [notes, setNotes] = useState<NoteState[]>([]);
+  const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
+  const [pendingShapeStart, setPendingShapeStart] = useState<{
+    tool: 'trendline' | 'rectangle';
+    time: UTCTimestamp;
+    price: number;
+  } | null>(null);
+  const [overlayTick, setOverlayTick] = useState(0);
   const [chartReady, setChartReady] = useState(false);
   const [alertRules, setAlertRules] = useState<AlertRule[]>([]);
   const [alertsLoading, setAlertsLoading] = useState(false);
@@ -408,6 +461,27 @@ function App() {
   }, [selectedInterval]);
 
   useEffect(() => {
+    if (activeTool !== 'trendline' && activeTool !== 'rectangle') {
+      setPendingShapeStart(null);
+    }
+  }, [activeTool]);
+
+  useEffect(() => {
+    if (!selectedDrawingId) return;
+
+    const exists =
+      horizontalLines.some((item) => item.id === selectedDrawingId) ||
+      verticalLines.some((item) => item.id === selectedDrawingId) ||
+      trendlines.some((item) => item.id === selectedDrawingId) ||
+      rectangles.some((item) => item.id === selectedDrawingId) ||
+      notes.some((item) => item.id === selectedDrawingId);
+
+    if (!exists) {
+      setSelectedDrawingId(null);
+    }
+  }, [horizontalLines, notes, rectangles, selectedDrawingId, trendlines, verticalLines]);
+
+  useEffect(() => {
     if (!topActionFeedback) return;
 
     const timer = window.setTimeout(() => {
@@ -422,6 +496,10 @@ function App() {
   const clearHoveredCandle = useCallback(() => {
     setHoveredCandle(null);
     setHoveredPoint(null);
+  }, []);
+
+  const refreshDrawingOverlay = useCallback(() => {
+    setOverlayTick((previous) => previous + 1);
   }, []);
 
   const toHorizontalLineState = useCallback((line: { id?: string; price: number }) => {
@@ -447,6 +525,63 @@ function App() {
     };
   }, []);
 
+  const toTrendlineState = useCallback(
+    (drawing: { id?: string; startTime: number; startPrice: number; endTime: number; endPrice: number }) => {
+      const startTime = Math.floor(Number(drawing.startTime));
+      const endTime = Math.floor(Number(drawing.endTime));
+      const startPrice = Number(drawing.startPrice);
+      const endPrice = Number(drawing.endPrice);
+
+      if (startTime <= 0 || endTime <= 0) return null;
+      if (!Number.isFinite(startPrice) || !Number.isFinite(endPrice)) return null;
+
+      return {
+        id: drawing.id?.trim() || createTrendlineId(),
+        startTime: startTime as UTCTimestamp,
+        startPrice: normalizeLinePrice(startPrice),
+        endTime: endTime as UTCTimestamp,
+        endPrice: normalizeLinePrice(endPrice),
+      };
+    },
+    [],
+  );
+
+  const toRectangleState = useCallback(
+    (drawing: { id?: string; startTime: number; startPrice: number; endTime: number; endPrice: number }) => {
+      const startTime = Math.floor(Number(drawing.startTime));
+      const endTime = Math.floor(Number(drawing.endTime));
+      const startPrice = Number(drawing.startPrice);
+      const endPrice = Number(drawing.endPrice);
+
+      if (startTime <= 0 || endTime <= 0) return null;
+      if (!Number.isFinite(startPrice) || !Number.isFinite(endPrice)) return null;
+
+      return {
+        id: drawing.id?.trim() || createRectangleId(),
+        startTime: startTime as UTCTimestamp,
+        startPrice: normalizeLinePrice(startPrice),
+        endTime: endTime as UTCTimestamp,
+        endPrice: normalizeLinePrice(endPrice),
+      };
+    },
+    [],
+  );
+
+  const toNoteState = useCallback((drawing: { id?: string; time: number; price: number; text: string }) => {
+    const time = Math.floor(Number(drawing.time));
+    const price = Number(drawing.price);
+    const text = drawing.text.trim();
+
+    if (time <= 0 || !Number.isFinite(price) || text.length === 0) return null;
+
+    return {
+      id: drawing.id?.trim() || createNoteId(),
+      time: time as UTCTimestamp,
+      price: normalizeLinePrice(price),
+      text,
+    };
+  }, []);
+
   const snapshotHorizontalLines = useCallback((): HorizontalLineState[] => {
     return horizontalLinesRef.current.map((item) => ({
       id: item.id,
@@ -461,20 +596,64 @@ function App() {
     }));
   }, []);
 
-  const toDrawingPayload = useCallback((lines: HorizontalLineState[], markers: VerticalLineState[]): DrawingPayloadItem[] => {
-    return [
-      ...lines.map((line) => ({
-        id: line.id,
-        type: 'horizontal' as const,
-        price: line.price,
-      })),
-      ...markers.map((marker) => ({
-        id: marker.id,
-        type: 'vertical' as const,
-        time: Number(marker.time),
-      })),
-    ];
+  const snapshotTrendlines = useCallback((): TrendlineState[] => {
+    return trendlinesRef.current.map((item) => ({ ...item }));
   }, []);
+
+  const snapshotRectangles = useCallback((): RectangleState[] => {
+    return rectanglesRef.current.map((item) => ({ ...item }));
+  }, []);
+
+  const snapshotNotes = useCallback((): NoteState[] => {
+    return notesRef.current.map((item) => ({ ...item }));
+  }, []);
+
+  const toDrawingPayload = useCallback(
+    (
+      lines: HorizontalLineState[],
+      markers: VerticalLineState[],
+      trendShapes: TrendlineState[],
+      rectangleShapes: RectangleState[],
+      noteShapes: NoteState[],
+    ): DrawingPayloadItem[] => {
+      return [
+        ...lines.map((line) => ({
+          id: line.id,
+          type: 'horizontal' as const,
+          price: line.price,
+        })),
+        ...markers.map((marker) => ({
+          id: marker.id,
+          type: 'vertical' as const,
+          time: Number(marker.time),
+        })),
+        ...trendShapes.map((shape) => ({
+          id: shape.id,
+          type: 'trendline' as const,
+          startTime: Number(shape.startTime),
+          startPrice: shape.startPrice,
+          endTime: Number(shape.endTime),
+          endPrice: shape.endPrice,
+        })),
+        ...rectangleShapes.map((shape) => ({
+          id: shape.id,
+          type: 'rectangle' as const,
+          startTime: Number(shape.startTime),
+          startPrice: shape.startPrice,
+          endTime: Number(shape.endTime),
+          endPrice: shape.endPrice,
+        })),
+        ...noteShapes.map((shape) => ({
+          id: shape.id,
+          type: 'note' as const,
+          time: Number(shape.time),
+          price: shape.price,
+          text: shape.text,
+        })),
+      ];
+    },
+    [],
+  );
 
   const syncVerticalLinePositions = useCallback(() => {
     const chart = chartRef.current;
@@ -519,7 +698,8 @@ function App() {
     }));
 
     setHorizontalLines(lines);
-  }, []);
+    refreshDrawingOverlay();
+  }, [refreshDrawingOverlay]);
 
   const renderVerticalLines = useCallback((lines: VerticalLineState[]) => {
     verticalLinesRef.current = lines;
@@ -545,28 +725,58 @@ function App() {
     }
 
     syncVerticalLinePositions();
-  }, [syncVerticalLinePositions]);
+    refreshDrawingOverlay();
+  }, [refreshDrawingOverlay, syncVerticalLinePositions]);
 
-  const persistDrawings = useCallback(async (symbol: string, interval: string, lines: HorizontalLineState[], markers: VerticalLineState[]) => {
-    try {
-      const response = await fetch(`${apiBase}/api/drawings`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symbol,
-          interval,
-          lines,
-          drawings: toDrawingPayload(lines, markers),
-        }),
-      });
+  const renderTrendlines = useCallback((items: TrendlineState[]) => {
+    trendlinesRef.current = items;
+    setTrendlines(items);
+    refreshDrawingOverlay();
+  }, [refreshDrawingOverlay]);
 
-      if (!response.ok) {
-        throw new Error('persist drawings failed');
+  const renderRectangles = useCallback((items: RectangleState[]) => {
+    rectanglesRef.current = items;
+    setRectangles(items);
+    refreshDrawingOverlay();
+  }, [refreshDrawingOverlay]);
+
+  const renderNotes = useCallback((items: NoteState[]) => {
+    notesRef.current = items;
+    setNotes(items);
+    refreshDrawingOverlay();
+  }, [refreshDrawingOverlay]);
+
+  const persistDrawings = useCallback(
+    async (
+      symbol: string,
+      interval: string,
+      lines: HorizontalLineState[],
+      markers: VerticalLineState[],
+      trendShapes: TrendlineState[],
+      rectangleShapes: RectangleState[],
+      noteShapes: NoteState[],
+    ) => {
+      try {
+        const response = await fetch(`${apiBase}/api/drawings`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbol,
+            interval,
+            lines,
+            drawings: toDrawingPayload(lines, markers, trendShapes, rectangleShapes, noteShapes),
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error('persist drawings failed');
+        }
+      } catch {
+        setError((prev) => prev ?? '도형 저장에 실패했습니다.');
       }
-    } catch {
-      setError((prev) => prev ?? '도형 저장에 실패했습니다.');
-    }
-  }, [toDrawingPayload]);
+    },
+    [toDrawingPayload],
+  );
 
   const persistWatchlist = useCallback(async (items: SymbolItem[]) => {
     const response = await fetch(`${apiBase}/api/watchlist`, {
@@ -587,7 +797,16 @@ function App() {
   }, []);
 
   const loadDrawings = useCallback(
-    async (symbol: string, interval: string): Promise<{ horizontalLines: HorizontalLineState[]; verticalLines: VerticalLineState[] }> => {
+    async (
+      symbol: string,
+      interval: string,
+    ): Promise<{
+      horizontalLines: HorizontalLineState[];
+      verticalLines: VerticalLineState[];
+      trendlines: TrendlineState[];
+      rectangles: RectangleState[];
+      notes: NoteState[];
+    }> => {
       try {
         const response = await fetch(
           `${apiBase}/api/drawings?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}`,
@@ -598,12 +817,25 @@ function App() {
         }
 
         const data = (await response.json()) as {
-          drawings?: Array<{ id?: string; type?: string; price?: number; time?: number }>;
+          drawings?: Array<{
+            id?: string;
+            type?: string;
+            price?: number;
+            time?: number;
+            startTime?: number;
+            startPrice?: number;
+            endTime?: number;
+            endPrice?: number;
+            text?: string;
+          }>;
           lines?: Array<{ id?: string; price: number }>;
         };
 
         const nextHorizontalLines: HorizontalLineState[] = [];
         const nextVerticalLines: VerticalLineState[] = [];
+        const nextTrendlines: TrendlineState[] = [];
+        const nextRectangles: RectangleState[] = [];
+        const nextNotes: NoteState[] = [];
 
         if (data.drawings?.length) {
           for (const drawing of data.drawings) {
@@ -620,6 +852,61 @@ function App() {
                 nextVerticalLines.push(verticalLine);
               }
             }
+
+            if (
+              drawing.type === 'trendline' &&
+              typeof drawing.startTime === 'number' &&
+              typeof drawing.startPrice === 'number' &&
+              typeof drawing.endTime === 'number' &&
+              typeof drawing.endPrice === 'number'
+            ) {
+              const trendline = toTrendlineState({
+                id: drawing.id,
+                startTime: drawing.startTime,
+                startPrice: drawing.startPrice,
+                endTime: drawing.endTime,
+                endPrice: drawing.endPrice,
+              });
+              if (trendline) {
+                nextTrendlines.push(trendline);
+              }
+            }
+
+            if (
+              drawing.type === 'rectangle' &&
+              typeof drawing.startTime === 'number' &&
+              typeof drawing.startPrice === 'number' &&
+              typeof drawing.endTime === 'number' &&
+              typeof drawing.endPrice === 'number'
+            ) {
+              const rectangle = toRectangleState({
+                id: drawing.id,
+                startTime: drawing.startTime,
+                startPrice: drawing.startPrice,
+                endTime: drawing.endTime,
+                endPrice: drawing.endPrice,
+              });
+              if (rectangle) {
+                nextRectangles.push(rectangle);
+              }
+            }
+
+            if (
+              drawing.type === 'note' &&
+              typeof drawing.time === 'number' &&
+              typeof drawing.price === 'number' &&
+              typeof drawing.text === 'string'
+            ) {
+              const note = toNoteState({
+                id: drawing.id,
+                time: drawing.time,
+                price: drawing.price,
+                text: drawing.text,
+              });
+              if (note) {
+                nextNotes.push(note);
+              }
+            }
           }
         } else {
           nextHorizontalLines.push(
@@ -632,13 +919,16 @@ function App() {
         return {
           horizontalLines: nextHorizontalLines,
           verticalLines: nextVerticalLines,
+          trendlines: nextTrendlines,
+          rectangles: nextRectangles,
+          notes: nextNotes,
         };
       } catch {
         setError((prev) => prev ?? '도형을 불러오지 못했습니다.');
-        return { horizontalLines: [], verticalLines: [] };
+        return { horizontalLines: [], verticalLines: [], trendlines: [], rectangles: [], notes: [] };
       }
     },
-    [toHorizontalLineState, toVerticalLineState],
+    [toHorizontalLineState, toNoteState, toRectangleState, toTrendlineState, toVerticalLineState],
   );
 
   useEffect(() => {
@@ -848,7 +1138,9 @@ function App() {
     };
 
     const onChartClick = (param: MouseEventParams<Time>) => {
-      if (activeToolRef.current === 'horizontal') {
+      const nextTool = activeToolRef.current;
+
+      if (nextTool === 'horizontal') {
         if (!param.point) return;
 
         const price = candleSeries.coordinateToPrice(param.point.y);
@@ -880,29 +1172,143 @@ function App() {
           selectedIntervalRef.current,
           nextHorizontalLines,
           snapshotVerticalLines(),
+          snapshotTrendlines(),
+          snapshotRectangles(),
+          snapshotNotes(),
         );
         return;
       }
 
-      if (activeToolRef.current !== 'vertical') return;
-      if (typeof param.time !== 'number') return;
+      if (nextTool === 'vertical') {
+        if (typeof param.time !== 'number') return;
+
+        const timestamp = Math.floor(param.time) as UTCTimestamp;
+        const duplicated = verticalLinesRef.current.some((item) => Number(item.time) === Number(timestamp));
+        if (duplicated) return;
+
+        const nextVerticalLines = [...snapshotVerticalLines(), { id: createVerticalLineId(), time: timestamp }];
+        renderVerticalLines(nextVerticalLines);
+        void persistDrawings(
+          selectedSymbolRef.current,
+          selectedIntervalRef.current,
+          snapshotHorizontalLines(),
+          nextVerticalLines,
+          snapshotTrendlines(),
+          snapshotRectangles(),
+          snapshotNotes(),
+        );
+        return;
+      }
+
+      if (nextTool === 'trendline' || nextTool === 'rectangle') {
+        if (!param.point || typeof param.time !== 'number') return;
+
+        const price = candleSeries.coordinateToPrice(param.point.y);
+        if (typeof price !== 'number' || !Number.isFinite(price)) return;
+
+        const timestamp = Math.floor(param.time) as UTCTimestamp;
+        const normalizedPrice = normalizeLinePrice(price);
+        const pending = pendingShapeStart;
+
+        if (pending?.tool === nextTool) {
+          const samePoint =
+            Number(pending.time) === Number(timestamp) &&
+            Math.abs(pending.price - normalizedPrice) < 0.0001;
+          if (samePoint) return;
+
+          if (nextTool === 'trendline') {
+            const nextTrendlines = [
+              ...snapshotTrendlines(),
+              {
+                id: createTrendlineId(),
+                startTime: pending.time,
+                startPrice: pending.price,
+                endTime: timestamp,
+                endPrice: normalizedPrice,
+              },
+            ];
+            renderTrendlines(nextTrendlines);
+            void persistDrawings(
+              selectedSymbolRef.current,
+              selectedIntervalRef.current,
+              snapshotHorizontalLines(),
+              snapshotVerticalLines(),
+              nextTrendlines,
+              snapshotRectangles(),
+              snapshotNotes(),
+            );
+          } else {
+            const nextRectangles = [
+              ...snapshotRectangles(),
+              {
+                id: createRectangleId(),
+                startTime: pending.time,
+                startPrice: pending.price,
+                endTime: timestamp,
+                endPrice: normalizedPrice,
+              },
+            ];
+            renderRectangles(nextRectangles);
+            void persistDrawings(
+              selectedSymbolRef.current,
+              selectedIntervalRef.current,
+              snapshotHorizontalLines(),
+              snapshotVerticalLines(),
+              snapshotTrendlines(),
+              nextRectangles,
+              snapshotNotes(),
+            );
+          }
+
+          setPendingShapeStart(null);
+          return;
+        }
+
+        setPendingShapeStart({
+          tool: nextTool,
+          time: timestamp,
+          price: normalizedPrice,
+        });
+        return;
+      }
+
+      if (nextTool !== 'note') return;
+      if (!param.point || typeof param.time !== 'number') return;
+
+      const price = candleSeries.coordinateToPrice(param.point.y);
+      if (typeof price !== 'number' || !Number.isFinite(price)) return;
+
+      const textInput = window.prompt('노트 내용을 입력하세요');
+      if (textInput === null) return;
+
+      const text = textInput.trim();
+      if (!text) return;
 
       const timestamp = Math.floor(param.time) as UTCTimestamp;
-      const duplicated = verticalLinesRef.current.some((item) => Number(item.time) === Number(timestamp));
-      if (duplicated) return;
-
-      const nextVerticalLines = [...snapshotVerticalLines(), { id: createVerticalLineId(), time: timestamp }];
-      renderVerticalLines(nextVerticalLines);
+      const nextNotes = [
+        ...snapshotNotes(),
+        {
+          id: createNoteId(),
+          time: timestamp,
+          price: normalizeLinePrice(price),
+          text,
+        },
+      ];
+      renderNotes(nextNotes);
       void persistDrawings(
         selectedSymbolRef.current,
         selectedIntervalRef.current,
         snapshotHorizontalLines(),
-        nextVerticalLines,
+        snapshotVerticalLines(),
+        snapshotTrendlines(),
+        snapshotRectangles(),
+        nextNotes,
       );
     };
 
     const onVisibleLogicalRangeChange = () => {
       syncVerticalLinePositions();
+      refreshDrawingOverlay();
     };
 
     chart.subscribeCrosshairMove(onCrosshairMove);
@@ -923,6 +1329,7 @@ function App() {
     const observer = new ResizeObserver(() => {
       chart.timeScale().fitContent();
       syncVerticalLinePositions();
+      refreshDrawingOverlay();
     });
     observer.observe(containerRef.current);
 
@@ -941,15 +1348,38 @@ function App() {
       compareSeriesRef.current = null;
       horizontalLinesRef.current = [];
       verticalLinesRef.current = [];
+      trendlinesRef.current = [];
+      rectanglesRef.current = [];
+      notesRef.current = [];
       for (const node of verticalLineNodes.values()) {
         node.remove();
       }
       verticalLineNodes.clear();
       setHorizontalLines([]);
       setVerticalLines([]);
+      setTrendlines([]);
+      setRectangles([]);
+      setNotes([]);
+      setPendingShapeStart(null);
+      setSelectedDrawingId(null);
       setChartReady(false);
     };
-  }, [clearHoveredCandle, persistDrawings, renderVerticalLines, snapshotHorizontalLines, snapshotVerticalLines, syncVerticalLinePositions]);
+  }, [
+    clearHoveredCandle,
+    pendingShapeStart,
+    persistDrawings,
+    refreshDrawingOverlay,
+    renderNotes,
+    renderRectangles,
+    renderTrendlines,
+    renderVerticalLines,
+    snapshotHorizontalLines,
+    snapshotNotes,
+    snapshotRectangles,
+    snapshotTrendlines,
+    snapshotVerticalLines,
+    syncVerticalLinePositions,
+  ]);
 
   useEffect(() => {
     if (!chartReady) return;
@@ -961,6 +1391,11 @@ function App() {
       if (canceled) return;
       renderHorizontalLines(loaded.horizontalLines);
       renderVerticalLines(loaded.verticalLines);
+      renderTrendlines(loaded.trendlines);
+      renderRectangles(loaded.rectangles);
+      renderNotes(loaded.notes);
+      setPendingShapeStart(null);
+      setSelectedDrawingId(null);
     };
 
     void loadPersistedDrawings();
@@ -968,7 +1403,17 @@ function App() {
     return () => {
       canceled = true;
     };
-  }, [chartReady, loadDrawings, renderHorizontalLines, renderVerticalLines, selectedInterval, selectedSymbol]);
+  }, [
+    chartReady,
+    loadDrawings,
+    renderHorizontalLines,
+    renderNotes,
+    renderRectangles,
+    renderTrendlines,
+    renderVerticalLines,
+    selectedInterval,
+    selectedSymbol,
+  ]);
 
   useEffect(() => {
     let canceled = false;
@@ -1225,6 +1670,7 @@ function App() {
       volumeSeriesRef.current.setData([]);
       chartRef.current.timeScale().fitContent();
       syncVerticalLinePositions();
+      refreshDrawingOverlay();
       return;
     }
 
@@ -1246,7 +1692,8 @@ function App() {
     volumeSeriesRef.current.setData(volumeData);
     chartRef.current.timeScale().fitContent();
     syncVerticalLinePositions();
-  }, [candles, syncVerticalLinePositions]);
+    refreshDrawingOverlay();
+  }, [candles, refreshDrawingOverlay, syncVerticalLinePositions]);
 
   useEffect(() => {
     const closeValues = candles.map((candle) => candle.close);
@@ -1832,8 +2279,12 @@ function App() {
       selectedIntervalRef.current,
       nextHorizontalLines,
       snapshotVerticalLines(),
+      snapshotTrendlines(),
+      snapshotRectangles(),
+      snapshotNotes(),
     );
-  }, [persistDrawings, snapshotHorizontalLines, snapshotVerticalLines]);
+    setSelectedDrawingId((previous) => (previous === id ? null : previous));
+  }, [persistDrawings, snapshotHorizontalLines, snapshotNotes, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
 
   const clearHorizontalLines = useCallback(() => {
     const series = candleSeriesRef.current;
@@ -1845,8 +2296,19 @@ function App() {
 
     horizontalLinesRef.current = [];
     setHorizontalLines([]);
-    void persistDrawings(selectedSymbolRef.current, selectedIntervalRef.current, [], snapshotVerticalLines());
-  }, [persistDrawings, snapshotVerticalLines]);
+    void persistDrawings(
+      selectedSymbolRef.current,
+      selectedIntervalRef.current,
+      [],
+      snapshotVerticalLines(),
+      snapshotTrendlines(),
+      snapshotRectangles(),
+      snapshotNotes(),
+    );
+    setSelectedDrawingId((previous) =>
+      previous && horizontalLinesRef.current.some((item) => item.id === previous) ? previous : null,
+    );
+  }, [persistDrawings, snapshotNotes, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
 
   const removeVerticalLine = useCallback((id: string) => {
     const nextVerticalLines = verticalLinesRef.current.filter((item) => item.id !== id);
@@ -1858,15 +2320,135 @@ function App() {
       selectedIntervalRef.current,
       snapshotHorizontalLines(),
       nextVerticalLines,
+      snapshotTrendlines(),
+      snapshotRectangles(),
+      snapshotNotes(),
     );
-  }, [persistDrawings, renderVerticalLines, snapshotHorizontalLines]);
+    setSelectedDrawingId((previous) => (previous === id ? null : previous));
+  }, [persistDrawings, renderVerticalLines, snapshotHorizontalLines, snapshotNotes, snapshotRectangles, snapshotTrendlines]);
 
   const clearVerticalLines = useCallback(() => {
     if (!verticalLinesRef.current.length) return;
 
     renderVerticalLines([]);
-    void persistDrawings(selectedSymbolRef.current, selectedIntervalRef.current, snapshotHorizontalLines(), []);
-  }, [persistDrawings, renderVerticalLines, snapshotHorizontalLines]);
+    void persistDrawings(
+      selectedSymbolRef.current,
+      selectedIntervalRef.current,
+      snapshotHorizontalLines(),
+      [],
+      snapshotTrendlines(),
+      snapshotRectangles(),
+      snapshotNotes(),
+    );
+    setSelectedDrawingId((previous) =>
+      previous && verticalLinesRef.current.some((item) => item.id === previous) ? previous : null,
+    );
+  }, [persistDrawings, renderVerticalLines, snapshotHorizontalLines, snapshotNotes, snapshotRectangles, snapshotTrendlines]);
+
+  const removeTrendline = useCallback((id: string) => {
+    const nextTrendlines = trendlinesRef.current.filter((item) => item.id !== id);
+    if (nextTrendlines.length === trendlinesRef.current.length) return;
+
+    renderTrendlines(nextTrendlines);
+    void persistDrawings(
+      selectedSymbolRef.current,
+      selectedIntervalRef.current,
+      snapshotHorizontalLines(),
+      snapshotVerticalLines(),
+      nextTrendlines,
+      snapshotRectangles(),
+      snapshotNotes(),
+    );
+    setSelectedDrawingId((previous) => (previous === id ? null : previous));
+  }, [persistDrawings, renderTrendlines, snapshotHorizontalLines, snapshotNotes, snapshotRectangles, snapshotVerticalLines]);
+
+  const clearTrendlines = useCallback(() => {
+    if (!trendlinesRef.current.length) return;
+
+    renderTrendlines([]);
+    void persistDrawings(
+      selectedSymbolRef.current,
+      selectedIntervalRef.current,
+      snapshotHorizontalLines(),
+      snapshotVerticalLines(),
+      [],
+      snapshotRectangles(),
+      snapshotNotes(),
+    );
+    setSelectedDrawingId((previous) =>
+      previous && trendlinesRef.current.some((item) => item.id === previous) ? previous : null,
+    );
+  }, [persistDrawings, renderTrendlines, snapshotHorizontalLines, snapshotNotes, snapshotRectangles, snapshotVerticalLines]);
+
+  const removeRectangle = useCallback((id: string) => {
+    const nextRectangles = rectanglesRef.current.filter((item) => item.id !== id);
+    if (nextRectangles.length === rectanglesRef.current.length) return;
+
+    renderRectangles(nextRectangles);
+    void persistDrawings(
+      selectedSymbolRef.current,
+      selectedIntervalRef.current,
+      snapshotHorizontalLines(),
+      snapshotVerticalLines(),
+      snapshotTrendlines(),
+      nextRectangles,
+      snapshotNotes(),
+    );
+    setSelectedDrawingId((previous) => (previous === id ? null : previous));
+  }, [persistDrawings, renderRectangles, snapshotHorizontalLines, snapshotNotes, snapshotTrendlines, snapshotVerticalLines]);
+
+  const clearRectangles = useCallback(() => {
+    if (!rectanglesRef.current.length) return;
+
+    renderRectangles([]);
+    void persistDrawings(
+      selectedSymbolRef.current,
+      selectedIntervalRef.current,
+      snapshotHorizontalLines(),
+      snapshotVerticalLines(),
+      snapshotTrendlines(),
+      [],
+      snapshotNotes(),
+    );
+    setSelectedDrawingId((previous) =>
+      previous && rectanglesRef.current.some((item) => item.id === previous) ? previous : null,
+    );
+  }, [persistDrawings, renderRectangles, snapshotHorizontalLines, snapshotNotes, snapshotTrendlines, snapshotVerticalLines]);
+
+  const removeNote = useCallback((id: string) => {
+    const nextNotes = notesRef.current.filter((item) => item.id !== id);
+    if (nextNotes.length === notesRef.current.length) return;
+
+    renderNotes(nextNotes);
+    void persistDrawings(
+      selectedSymbolRef.current,
+      selectedIntervalRef.current,
+      snapshotHorizontalLines(),
+      snapshotVerticalLines(),
+      snapshotTrendlines(),
+      snapshotRectangles(),
+      nextNotes,
+    );
+    setSelectedDrawingId((previous) => (previous === id ? null : previous));
+  }, [persistDrawings, renderNotes, snapshotHorizontalLines, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
+
+  const clearNotes = useCallback(() => {
+    if (!notesRef.current.length) return;
+
+    renderNotes([]);
+    void persistDrawings(
+      selectedSymbolRef.current,
+      selectedIntervalRef.current,
+      snapshotHorizontalLines(),
+      snapshotVerticalLines(),
+      snapshotTrendlines(),
+      snapshotRectangles(),
+      [],
+    );
+    setSelectedDrawingId((previous) =>
+      previous && notesRef.current.some((item) => item.id === previous) ? previous : null,
+    );
+  }, [persistDrawings, renderNotes, snapshotHorizontalLines, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
 
   const clearAllDrawings = useCallback(() => {
     const series = candleSeriesRef.current;
@@ -1878,9 +2460,108 @@ function App() {
 
     horizontalLinesRef.current = [];
     setHorizontalLines([]);
+    trendlinesRef.current = [];
+    rectanglesRef.current = [];
+    notesRef.current = [];
+    setTrendlines([]);
+    setRectangles([]);
+    setNotes([]);
     renderVerticalLines([]);
-    void persistDrawings(selectedSymbolRef.current, selectedIntervalRef.current, [], []);
+    setSelectedDrawingId(null);
+    setPendingShapeStart(null);
+    void persistDrawings(selectedSymbolRef.current, selectedIntervalRef.current, [], [], [], [], []);
   }, [persistDrawings, renderVerticalLines]);
+
+  const deleteDrawingById = useCallback((id: string) => {
+    if (horizontalLinesRef.current.some((item) => item.id === id)) {
+      removeHorizontalLine(id);
+      return;
+    }
+    if (verticalLinesRef.current.some((item) => item.id === id)) {
+      removeVerticalLine(id);
+      return;
+    }
+    if (trendlinesRef.current.some((item) => item.id === id)) {
+      removeTrendline(id);
+      return;
+    }
+    if (rectanglesRef.current.some((item) => item.id === id)) {
+      removeRectangle(id);
+      return;
+    }
+    if (notesRef.current.some((item) => item.id === id)) {
+      removeNote(id);
+    }
+  }, [removeHorizontalLine, removeNote, removeRectangle, removeTrendline, removeVerticalLine]);
+
+  const deleteSelectedDrawing = useCallback(() => {
+    if (!selectedDrawingId) return;
+    deleteDrawingById(selectedDrawingId);
+  }, [deleteDrawingById, selectedDrawingId]);
+
+  useEffect(() => {
+    const isTextInputTarget = (target: EventTarget | null) => {
+      if (!(target instanceof HTMLElement)) return false;
+      if (target.isContentEditable) return true;
+
+      const tag = target.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+    };
+
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (isTextInputTarget(event.target)) return;
+
+      const key = event.key.toLowerCase();
+      if (key === 'h') {
+        event.preventDefault();
+        setActiveTool('horizontal');
+        return;
+      }
+
+      if (key === 'v') {
+        event.preventDefault();
+        setActiveTool('vertical');
+        return;
+      }
+
+      if (key === 't') {
+        event.preventDefault();
+        setActiveTool('trendline');
+        return;
+      }
+
+      if (key === 'r') {
+        event.preventDefault();
+        setActiveTool('rectangle');
+        return;
+      }
+
+      if (key === 'n') {
+        event.preventDefault();
+        setActiveTool('note');
+        return;
+      }
+
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setActiveTool('cursor');
+        setPendingShapeStart(null);
+        return;
+      }
+
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        if (!selectedDrawingId) return;
+        event.preventDefault();
+        deleteSelectedDrawing();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [deleteSelectedDrawing, selectedDrawingId]);
 
   const toggleIndicator = useCallback((key: IndicatorKey) => {
     setEnabledIndicators((prev) => ({
@@ -1918,7 +2599,128 @@ function App() {
   const selectedCode = selectedSymbolMeta ? getDisplayCode(selectedSymbolMeta) : shortTicker(selectedSymbol);
   const selectedName = selectedSymbolMeta?.name ?? shortTicker(selectedSymbol);
   const exchangeText = marketExchangeText(selectedMarket);
-  const totalDrawings = horizontalLines.length + verticalLines.length;
+  const totalDrawings = horizontalLines.length + verticalLines.length + trendlines.length + rectangles.length + notes.length;
+  const activeToolDescription =
+    activeTool === 'horizontal'
+      ? `수평선 툴 활성화 · 클릭으로 추가 (${horizontalLines.length})`
+      : activeTool === 'vertical'
+        ? `수직선 툴 활성화 · 클릭으로 추가 (${verticalLines.length})`
+        : activeTool === 'trendline'
+          ? `추세선 툴 활성화 · 2회 클릭으로 추가 (${trendlines.length})`
+          : activeTool === 'rectangle'
+            ? `사각형 툴 활성화 · 2회 클릭으로 추가 (${rectangles.length})`
+            : activeTool === 'note'
+              ? `노트 툴 활성화 · 클릭 후 텍스트 입력 (${notes.length})`
+              : null;
+  const drawingChips = useMemo(
+    () => [
+      ...horizontalLines.map((line) => ({
+        id: line.id,
+        kind: 'horizontal' as const,
+        label: `H ${formatPrice(line.price)}`,
+      })),
+      ...verticalLines.map((line) => ({
+        id: line.id,
+        kind: 'vertical' as const,
+        label: `V ${formatDrawingTime(line.time)}`,
+      })),
+      ...trendlines.map((line) => ({
+        id: line.id,
+        kind: 'trendline' as const,
+        label: `T ${formatDrawingTime(line.startTime)}→${formatDrawingTime(line.endTime)}`,
+      })),
+      ...rectangles.map((line) => ({
+        id: line.id,
+        kind: 'rectangle' as const,
+        label: `R ${formatDrawingTime(line.startTime)}→${formatDrawingTime(line.endTime)}`,
+      })),
+      ...notes.map((note) => ({
+        id: note.id,
+        kind: 'note' as const,
+        label: `N ${summarizeNoteText(note.text)}`,
+      })),
+    ],
+    [horizontalLines, notes, rectangles, trendlines, verticalLines],
+  );
+  const drawingOverlayGeometry = useMemo(() => {
+    void overlayTick;
+    const chart = chartRef.current;
+    const series = candleSeriesRef.current;
+    const container = containerRef.current;
+
+    const width = container?.clientWidth ?? 0;
+    const height = container?.clientHeight ?? 0;
+
+    if (!chart || !series || width <= 0 || height <= 0) {
+      return { width, height, trendlines: [], rectangles: [], notes: [] };
+    }
+
+    const toCoordinate = (time: UTCTimestamp, price: number) => {
+      const x = chart.timeScale().timeToCoordinate(time as Time);
+      const y = series.priceToCoordinate(price);
+      if (x === null || y === null || !Number.isFinite(x) || !Number.isFinite(y)) {
+        return null;
+      }
+
+      return { x, y };
+    };
+
+    const trendlineShapes: Array<{ id: string; x1: number; y1: number; x2: number; y2: number }> = [];
+    for (const shape of trendlines) {
+      const start = toCoordinate(shape.startTime, shape.startPrice);
+      const end = toCoordinate(shape.endTime, shape.endPrice);
+      if (!start || !end) continue;
+
+      trendlineShapes.push({
+        id: shape.id,
+        x1: Number(start.x),
+        y1: Number(start.y),
+        x2: Number(end.x),
+        y2: Number(end.y),
+      });
+    }
+
+    const rectangleShapes: Array<{ id: string; x: number; y: number; width: number; height: number }> = [];
+    for (const shape of rectangles) {
+      const start = toCoordinate(shape.startTime, shape.startPrice);
+      const end = toCoordinate(shape.endTime, shape.endPrice);
+      if (!start || !end) continue;
+
+      const startX = Number(start.x);
+      const endX = Number(end.x);
+      const startY = Number(start.y);
+      const endY = Number(end.y);
+
+      rectangleShapes.push({
+        id: shape.id,
+        x: Math.min(startX, endX),
+        y: Math.min(startY, endY),
+        width: Math.abs(endX - startX),
+        height: Math.abs(endY - startY),
+      });
+    }
+
+    const noteShapes: Array<{ id: string; x: number; y: number; text: string }> = [];
+    for (const note of notes) {
+      const point = toCoordinate(note.time, note.price);
+      if (!point) continue;
+
+      noteShapes.push({
+        id: note.id,
+        x: Number(point.x),
+        y: Number(point.y),
+        text: note.text,
+      });
+    }
+
+    return {
+      width,
+      height,
+      trendlines: trendlineShapes,
+      rectangles: rectangleShapes,
+      notes: noteShapes,
+    };
+  }, [notes, overlayTick, rectangles, trendlines]);
   const activeIndicatorConfigs = indicatorConfigs.filter((config) => enabledIndicators[config.key]);
   const compareSymbolMeta =
     watchlistSymbols.find((item) => item.symbol === compareSymbol) ??
@@ -2114,6 +2916,44 @@ function App() {
           <div className="chart-area" onMouseLeave={clearHoveredCandle}>
             <div className="chart-canvas" ref={containerRef} />
             <div className="vertical-lines-overlay" ref={verticalOverlayRef} />
+            {drawingOverlayGeometry.width > 0 && drawingOverlayGeometry.height > 0 ? (
+              <svg
+                className="drawing-shape-overlay"
+                width={drawingOverlayGeometry.width}
+                height={drawingOverlayGeometry.height}
+                viewBox={`0 0 ${drawingOverlayGeometry.width} ${drawingOverlayGeometry.height}`}
+                preserveAspectRatio="none"
+              >
+                {drawingOverlayGeometry.trendlines.map((shape) => (
+                  <line
+                    key={shape.id}
+                    x1={shape.x1}
+                    y1={shape.y1}
+                    x2={shape.x2}
+                    y2={shape.y2}
+                    className={`drawing-shape trendline${selectedDrawingId === shape.id ? ' selected' : ''}`}
+                  />
+                ))}
+                {drawingOverlayGeometry.rectangles.map((shape) => (
+                  <rect
+                    key={shape.id}
+                    x={shape.x}
+                    y={shape.y}
+                    width={shape.width}
+                    height={shape.height}
+                    className={`drawing-shape rectangle${selectedDrawingId === shape.id ? ' selected' : ''}`}
+                  />
+                ))}
+                {drawingOverlayGeometry.notes.map((shape) => (
+                  <g key={shape.id} className={`drawing-shape note${selectedDrawingId === shape.id ? ' selected' : ''}`}>
+                    <circle cx={shape.x} cy={shape.y} r={4} />
+                    <text x={shape.x + 8} y={shape.y - 8}>
+                      {summarizeNoteText(shape.text)}
+                    </text>
+                  </g>
+                ))}
+              </svg>
+            ) : null}
             {hoveredCandle && hoverTooltipStyle ? (
               <div className="candle-hover-tooltip" style={hoverTooltipStyle}>
                 <div className="candle-hover-tooltip-time">{formatCandleDateTime(hoveredCandle.time)}</div>
@@ -2145,63 +2985,61 @@ function App() {
           <div className="status-row">
             <span>{loading ? '데이터를 불러오는 중...' : '실시간 UI 프로토타입'}</span>
             {topActionFeedback ? <span className="status-chip">{topActionFeedback}</span> : null}
+            {activeToolDescription ? <span className="status-chip">{activeToolDescription}</span> : null}
+            {pendingShapeStart ? (
+              <span className="status-chip">
+                {pendingShapeStart.tool === 'trendline' ? '추세선' : '사각형'} 시작점 고정 · 다음 클릭으로 완료
+              </span>
+            ) : null}
 
-            {activeTool === 'horizontal' ? (
+            {totalDrawings > 0 ? (
               <div className="status-actions">
-                <span className="status-chip">수평선 툴 활성화 · 차트 클릭으로 추가 ({horizontalLines.length})</span>
-                {horizontalLines.length > 0 ? (
+                <span className="status-chip">저장된 도형 {totalDrawings}</span>
+                {activeTool === 'horizontal' && horizontalLines.length > 0 ? (
                   <button className="status-button" onClick={clearHorizontalLines}>
                     수평선 전체 삭제
                   </button>
                 ) : null}
-                {totalDrawings > 0 ? (
-                  <button className="status-button" onClick={clearAllDrawings}>
-                    도형 전체 삭제
-                  </button>
-                ) : null}
-              </div>
-            ) : null}
-
-            {activeTool === 'vertical' ? (
-              <div className="status-actions">
-                <span className="status-chip">수직선 툴 활성화 · 차트 클릭으로 추가 ({verticalLines.length})</span>
-                {verticalLines.length > 0 ? (
+                {activeTool === 'vertical' && verticalLines.length > 0 ? (
                   <button className="status-button" onClick={clearVerticalLines}>
                     수직선 전체 삭제
                   </button>
                 ) : null}
-                {totalDrawings > 0 ? (
-                  <button className="status-button" onClick={clearAllDrawings}>
-                    도형 전체 삭제
+                {activeTool === 'trendline' && trendlines.length > 0 ? (
+                  <button className="status-button" onClick={clearTrendlines}>
+                    추세선 전체 삭제
                   </button>
                 ) : null}
-              </div>
-            ) : null}
-
-            {activeTool !== 'horizontal' && activeTool !== 'vertical' && totalDrawings > 0 ? (
-              <div className="status-actions">
-                <span className="status-chip">저장된 도형 {totalDrawings}</span>
+                {activeTool === 'rectangle' && rectangles.length > 0 ? (
+                  <button className="status-button" onClick={clearRectangles}>
+                    사각형 전체 삭제
+                  </button>
+                ) : null}
+                {activeTool === 'note' && notes.length > 0 ? (
+                  <button className="status-button" onClick={clearNotes}>
+                    노트 전체 삭제
+                  </button>
+                ) : null}
+                {selectedDrawingId ? (
+                  <button className="status-button" onClick={deleteSelectedDrawing}>
+                    선택 도형 삭제
+                  </button>
+                ) : null}
                 <button className="status-button" onClick={clearAllDrawings}>
                   도형 전체 삭제
                 </button>
               </div>
             ) : null}
 
-            {activeTool === 'horizontal' && horizontalLines.length > 0 ? (
-              <div className="line-tags" aria-label="수평선 목록">
-                {horizontalLines.slice(-4).map((line) => (
-                  <button key={line.id} className="line-tag" onClick={() => removeHorizontalLine(line.id)}>
-                    {formatPrice(line.price)} ×
-                  </button>
-                ))}
-              </div>
-            ) : null}
-
-            {activeTool === 'vertical' && verticalLines.length > 0 ? (
-              <div className="line-tags" aria-label="수직선 목록">
-                {verticalLines.slice(-6).map((line) => (
-                  <button key={line.id} className="line-tag" onClick={() => removeVerticalLine(line.id)}>
-                    {formatDrawingTime(line.time)} ×
+            {drawingChips.length > 0 ? (
+              <div className="line-tags" aria-label="도형 목록">
+                {drawingChips.slice(-12).map((chip) => (
+                  <button
+                    key={chip.id}
+                    className={`line-tag ${chip.kind}${selectedDrawingId === chip.id ? ' selected' : ''}`}
+                    onClick={() => setSelectedDrawingId(chip.id)}
+                  >
+                    {chip.label}
                   </button>
                 ))}
               </div>
