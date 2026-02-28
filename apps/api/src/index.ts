@@ -18,6 +18,7 @@ import {
   type BollingerBandsValues,
   type MacdValues,
 } from './indicatorMath.js';
+import { runMaCrossoverBacktest } from './strategyBacktest.js';
 
 type MarketType = 'CRYPTO' | 'KOSPI' | 'KOSDAQ';
 
@@ -455,6 +456,28 @@ const alertHistoryQuerySchema = z.object({
       path: ['fromTs'],
     },
   );
+
+const strategyBacktestBodySchema = z.object({
+  symbol: z.string().trim().min(1),
+  interval: z.string().trim().min(1),
+  limit: z.coerce.number().int().min(50).max(1000).default(500),
+  params: z.object({
+    initialCapital: z.coerce.number().finite().positive().max(1_000_000_000_000),
+    feeBps: z.coerce.number().finite().min(0).max(2000).default(10),
+    positionSizeMode: z.literal('fixed-percent'),
+    fixedPercent: z.coerce.number().finite().gt(0).max(100),
+  }),
+  strategy: z
+    .object({
+      type: z.literal('maCrossover'),
+      fastPeriod: z.coerce.number().int().min(2).max(300),
+      slowPeriod: z.coerce.number().int().min(3).max(600),
+    })
+    .refine((data) => data.fastPeriod < data.slowPeriod, {
+      message: 'fastPeriod must be less than slowPeriod',
+      path: ['fastPeriod'],
+    }),
+});
 
 const persistedAlertRuleSchema = z.object({
   id: z.string().trim().min(1),
@@ -1698,6 +1721,64 @@ app.get('/api/candles', async (request, reply) => {
     app.log.error({ error, symbol: normalizedSymbol, interval }, 'Failed to fetch candles');
     return reply.code(502).send({ error: 'Failed to fetch candle data from upstream exchange' });
   }
+});
+
+app.post('/api/strategy/backtest', async (request, reply) => {
+  const parsed = strategyBacktestBodySchema.safeParse(request.body ?? {});
+
+  if (!parsed.success) {
+    return reply.code(400).send({ error: 'Invalid body', detail: parsed.error.format() });
+  }
+
+  const symbol = normalizeSymbol(parsed.data.symbol);
+  const interval = normalizeInterval(parsed.data.interval);
+  const limit = parsed.data.limit;
+  const cacheKey = `${symbol}:${interval}:${limit}`;
+  let candles = getCachedCandles(cacheKey);
+
+  if (!candles) {
+    try {
+      candles = isKrxSymbol(symbol)
+        ? await fetchKrxCandles(symbol, interval, limit)
+        : await fetchCryptoCandles(symbol, interval, limit);
+
+      setCachedCandles(cacheKey, candles);
+    } catch (error) {
+      app.log.error({ error, symbol, interval }, 'Failed to fetch candles for strategy backtest');
+      return reply.code(502).send({ error: 'Failed to fetch candle data from upstream exchange' });
+    }
+  }
+
+  if (!candles.length) {
+    return reply.code(422).send({ error: 'Insufficient candle data for backtest' });
+  }
+
+  const result = runMaCrossoverBacktest(
+    candles,
+    {
+      initialCapital: parsed.data.params.initialCapital,
+      feeBps: parsed.data.params.feeBps,
+      positionSizeMode: parsed.data.params.positionSizeMode,
+      fixedPercent: parsed.data.params.fixedPercent,
+    },
+    {
+      fastPeriod: parsed.data.strategy.fastPeriod,
+      slowPeriod: parsed.data.strategy.slowPeriod,
+    },
+  );
+
+  return {
+    symbol,
+    interval,
+    limit,
+    params: parsed.data.params,
+    strategy: {
+      type: parsed.data.strategy.type,
+      fastPeriod: parsed.data.strategy.fastPeriod,
+      slowPeriod: parsed.data.strategy.slowPeriod,
+    },
+    ...result,
+  };
 });
 
 app.get('/api/quote', async (request, reply) => {

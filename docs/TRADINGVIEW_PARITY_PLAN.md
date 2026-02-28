@@ -116,6 +116,13 @@ Deliverables:
 - Unified chart layout persistence and migration versioning
 - Operational hardening (error telemetry and recovery UX)
 
+Progress note (2026-02-28):
+- M4-1 completed: MA crossover strategy tester runtime is now available via `POST /api/strategy/backtest` with deterministic metrics/trade history/equity-drawdown curves, API validation tests + math utility tests, and a functional `전략 테스터` panel in `apps/web` (inputs, run/loading/error states, summary cards, mini charts, recent trades, localStorage input persistence).
+- Remaining M4 items:
+  - M4-2: Trading panel workflows (order entry, position/order list, fill history).
+  - M4-3: Unified chart layout persistence + migration versioning.
+  - M4-4: Operational hardening (error telemetry and recovery UX).
+
 DoD:
 - Strategy outputs are reproducible for same input dataset/config.
 - Trading workflows handle API failures without UI lockups or data loss.

@@ -404,6 +404,131 @@ describe('api watchlist persistence', () => {
   });
 });
 
+describe('api strategy backtest', () => {
+  it('rejects invalid backtest payloads', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/strategy/backtest',
+      payload: {
+        symbol: 'BTCUSDT',
+        interval: '60',
+        limit: 200,
+        params: {
+          initialCapital: 10_000,
+          feeBps: 10,
+          positionSizeMode: 'fixed-percent',
+          fixedPercent: 50,
+        },
+        strategy: {
+          type: 'maCrossover',
+          fastPeriod: 30,
+          slowPeriod: 20,
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      error: 'Invalid body',
+    });
+  });
+
+  it('returns deterministic MA crossover backtest results', async () => {
+    const closes = [100, 100, 100, 110, 120, 115, 90, 95, 105, 110];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const rawUrl =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const url = new URL(rawUrl);
+      const symbol = url.searchParams.get('symbol');
+
+      if (url.hostname === 'api.binance.com' && url.pathname === '/api/v3/klines' && symbol === 'BTCUSDT') {
+        return jsonResponse(toBinanceKlines(closes));
+      }
+
+      return jsonResponse({ error: 'unexpected request' }, 404);
+    });
+
+    const payload = {
+      symbol: 'BTCUSDT',
+      interval: '60',
+      limit: 50,
+      params: {
+        initialCapital: 10_000,
+        feeBps: 10,
+        positionSizeMode: 'fixed-percent' as const,
+        fixedPercent: 50,
+      },
+      strategy: {
+        type: 'maCrossover' as const,
+        fastPeriod: 2,
+        slowPeriod: 3,
+      },
+    };
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/api/strategy/backtest',
+      payload,
+    });
+
+    expect(firstResponse.statusCode).toBe(200);
+
+    const firstBody = firstResponse.json() as {
+      symbol: string;
+      interval: string;
+      summary: {
+        netPnl: number;
+        returnPct: number;
+        maxDrawdownPct: number;
+        winRate: number;
+        tradeCount: number;
+      };
+      equityCurve: Array<{ time: number; value: number }>;
+      drawdownCurve: Array<{ time: number; value: number }>;
+      trades: Array<{
+        entryTime: number;
+        exitTime: number;
+        side: string;
+        qty: number;
+        entryPrice: number;
+        exitPrice: number;
+        pnl: number;
+      }>;
+    };
+
+    expect(firstBody.symbol).toBe('BTCUSDT');
+    expect(firstBody.interval).toBe('60');
+    expect(firstBody.summary.tradeCount).toBeGreaterThanOrEqual(1);
+    expect(Number.isFinite(firstBody.summary.netPnl)).toBe(true);
+    expect(Number.isFinite(firstBody.summary.returnPct)).toBe(true);
+    expect(Number.isFinite(firstBody.summary.maxDrawdownPct)).toBe(true);
+    expect(Number.isFinite(firstBody.summary.winRate)).toBe(true);
+    expect(firstBody.equityCurve).toHaveLength(closes.length);
+    expect(firstBody.drawdownCurve).toHaveLength(closes.length);
+
+    if (firstBody.trades.length > 0) {
+      expect(firstBody.trades[0]).toMatchObject({
+        side: 'LONG',
+      });
+      expect(firstBody.trades[0].exitTime).toBeGreaterThanOrEqual(firstBody.trades[0].entryTime);
+    }
+
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/api/strategy/backtest',
+      payload,
+    });
+
+    expect(secondResponse.statusCode).toBe(200);
+    expect(secondResponse.json()).toEqual(firstBody);
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+});
+
 describe('api alerts rules', () => {
   it('supports create/list/delete flow', async () => {
     const listBefore = await app.inject({

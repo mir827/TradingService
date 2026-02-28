@@ -221,6 +221,52 @@ type AlertAutoCheckPrefs = {
   intervalSec: AlertAutoCheckIntervalSec;
 };
 
+type StrategyTesterFormState = {
+  symbol: string;
+  interval: string;
+  limit: string;
+  initialCapital: string;
+  feeBps: string;
+  fixedPercent: string;
+  fastPeriod: string;
+  slowPeriod: string;
+};
+
+type StrategyFormField = keyof StrategyTesterFormState;
+
+type StrategyBacktestSummary = {
+  netPnl: number;
+  returnPct: number;
+  maxDrawdownPct: number;
+  winRate: number;
+  tradeCount: number;
+};
+
+type StrategyBacktestPoint = {
+  time: number;
+  value: number;
+};
+
+type StrategyBacktestTrade = {
+  entryTime: number;
+  exitTime: number;
+  side: 'LONG';
+  qty: number;
+  entryPrice: number;
+  exitPrice: number;
+  pnl: number;
+};
+
+type StrategyBacktestResult = {
+  symbol: string;
+  interval: string;
+  limit: number;
+  summary: StrategyBacktestSummary;
+  equityCurve: StrategyBacktestPoint[];
+  drawdownCurve: StrategyBacktestPoint[];
+  trades: StrategyBacktestTrade[];
+};
+
 type HorizontalLine = {
   id: string;
   price: number;
@@ -373,15 +419,27 @@ const WATCH_PREFS_STORAGE_KEY = 'tradingservice.watchprefs.v1';
 const ALERT_AUTO_CHECK_STORAGE_KEY = 'tradingservice.alerts.autocheck.v1';
 const INDICATOR_PREFS_STORAGE_KEY = 'tradingservice.indicators.v2';
 const CHART_LAYOUT_STORAGE_KEY = 'tradingservice.chartlayout.v1';
+const STRATEGY_TESTER_STORAGE_KEY = 'tradingservice.strategytester.v1';
 const DEFAULT_WATCHLIST_NAME = 'default';
 const ALERT_EVENT_DEDUP_WINDOW_MS = 10_000;
 const ALERT_EVENT_MAX_ITEMS = 20;
+const STRATEGY_RECENT_TRADES_LIMIT = 8;
 const HOVER_TOOLTIP_WIDTH = 232;
 const HOVER_TOOLTIP_HEIGHT = 174;
 const HOVER_TOOLTIP_MARGIN = 14;
 const DRAWING_HIT_TOLERANCE_PX = 8;
 const NOTE_HIT_RADIUS_PX = 14;
 const INDICATOR_PREFS_VERSION = 2;
+const DEFAULT_STRATEGY_TESTER_FORM: StrategyTesterFormState = {
+  symbol: 'BTCUSDT',
+  interval: '60',
+  limit: '500',
+  initialCapital: '10000',
+  feeBps: '10',
+  fixedPercent: '100',
+  fastPeriod: '12',
+  slowPeriod: '26',
+};
 
 const DEFAULT_ENABLED_INDICATORS: Record<IndicatorKey, boolean> = {
   sma20: false,
@@ -548,6 +606,45 @@ function getStoredChartLayoutMode(): ChartLayoutMode {
   }
 }
 
+function toStoredStrategyField(value: unknown, fallback: string) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+    if (normalized.length > 0) return normalized;
+  }
+
+  return fallback;
+}
+
+function getStoredStrategyTesterForm(): StrategyTesterFormState {
+  if (typeof window === 'undefined') {
+    return { ...DEFAULT_STRATEGY_TESTER_FORM };
+  }
+
+  try {
+    const raw = window.localStorage.getItem(STRATEGY_TESTER_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_STRATEGY_TESTER_FORM };
+
+    const parsed = JSON.parse(raw) as Partial<Record<StrategyFormField, unknown>>;
+
+    return {
+      symbol: toStoredStrategyField(parsed.symbol, DEFAULT_STRATEGY_TESTER_FORM.symbol).toUpperCase(),
+      interval: toStoredStrategyField(parsed.interval, DEFAULT_STRATEGY_TESTER_FORM.interval).toUpperCase(),
+      limit: toStoredStrategyField(parsed.limit, DEFAULT_STRATEGY_TESTER_FORM.limit),
+      initialCapital: toStoredStrategyField(parsed.initialCapital, DEFAULT_STRATEGY_TESTER_FORM.initialCapital),
+      feeBps: toStoredStrategyField(parsed.feeBps, DEFAULT_STRATEGY_TESTER_FORM.feeBps),
+      fixedPercent: toStoredStrategyField(parsed.fixedPercent, DEFAULT_STRATEGY_TESTER_FORM.fixedPercent),
+      fastPeriod: toStoredStrategyField(parsed.fastPeriod, DEFAULT_STRATEGY_TESTER_FORM.fastPeriod),
+      slowPeriod: toStoredStrategyField(parsed.slowPeriod, DEFAULT_STRATEGY_TESTER_FORM.slowPeriod),
+    };
+  } catch {
+    return { ...DEFAULT_STRATEGY_TESTER_FORM };
+  }
+}
+
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -664,6 +761,62 @@ function formatCandleDateTime(time: number) {
   });
 }
 
+function formatSignedCurrency(value: number) {
+  return `${value >= 0 ? '+' : '-'}${formatPrice(Math.abs(value))}`;
+}
+
+function createMiniChartPath(points: StrategyBacktestPoint[]) {
+  if (points.length === 0) {
+    return null;
+  }
+
+  const values = points.map((point) => point.value);
+  const minValue = Math.min(...values);
+  const maxValue = Math.max(...values);
+  const range = Math.max(maxValue - minValue, 1e-9);
+
+  const path = points
+    .map((point, index) => {
+      const x = points.length === 1 ? 50 : (index / (points.length - 1)) * 100;
+      const y = ((maxValue - point.value) / range) * 100;
+      return `${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`;
+    })
+    .join(' ');
+
+  const zeroY =
+    minValue <= 0 && maxValue >= 0
+      ? Number((((maxValue - 0) / range) * 100).toFixed(2))
+      : null;
+
+  return {
+    path,
+    zeroY,
+  };
+}
+
+function MiniLineChart({
+  points,
+  stroke,
+  emptyText,
+}: {
+  points: StrategyBacktestPoint[];
+  stroke: string;
+  emptyText: string;
+}) {
+  const chart = createMiniChartPath(points);
+
+  if (!chart) {
+    return <div className="strategy-mini-empty">{emptyText}</div>;
+  }
+
+  return (
+    <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="strategy-mini-chart" aria-hidden="true">
+      {typeof chart.zeroY === 'number' ? <line x1="0" y1={chart.zeroY} x2="100" y2={chart.zeroY} className="strategy-mini-zero" /> : null}
+      <path d={chart.path} className="strategy-mini-line" style={{ stroke }} />
+    </svg>
+  );
+}
+
 function formatIndicatorLegend(config: IndicatorConfig, settings: IndicatorSettings) {
   if (config.key === 'rsi') {
     return `RSI ${settings.rsi.period}`;
@@ -734,6 +887,10 @@ function App() {
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
   const [searching, setSearching] = useState(false);
   const [bottomTab, setBottomTab] = useState<BottomTab>('pine');
+  const [strategyForm, setStrategyForm] = useState<StrategyTesterFormState>(() => getStoredStrategyTesterForm());
+  const [strategyResult, setStrategyResult] = useState<StrategyBacktestResult | null>(null);
+  const [strategyLoading, setStrategyLoading] = useState(false);
+  const [strategyError, setStrategyError] = useState<string | null>(null);
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [indicatorPanelOpen, setIndicatorPanelOpen] = useState(false);
   const [comparisonPanelOpen, setComparisonPanelOpen] = useState(false);
@@ -1488,6 +1645,11 @@ function App() {
     if (typeof window === 'undefined') return;
     window.localStorage.setItem(CHART_LAYOUT_STORAGE_KEY, chartLayoutMode);
   }, [chartLayoutMode]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(STRATEGY_TESTER_STORAGE_KEY, JSON.stringify(strategyForm));
+  }, [strategyForm]);
 
   useEffect(() => {
     let canceled = false;
@@ -2962,6 +3124,117 @@ function App() {
     }
   };
 
+  const updateStrategyField = useCallback((field: StrategyFormField, value: string) => {
+    setStrategyError(null);
+    setStrategyForm((previous) => ({
+      ...previous,
+      [field]: field === 'symbol' || field === 'interval' ? value.toUpperCase() : value,
+    }));
+  }, []);
+
+  const applyCurrentChartToStrategy = useCallback(() => {
+    setStrategyError(null);
+    setStrategyForm((previous) => ({
+      ...previous,
+      symbol: selectedSymbol,
+      interval: selectedInterval,
+    }));
+  }, [selectedInterval, selectedSymbol]);
+
+  const handleRunStrategyBacktest = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    const symbol = strategyForm.symbol.trim().toUpperCase();
+    const interval = strategyForm.interval.trim().toUpperCase();
+    const limit = Number.parseInt(strategyForm.limit, 10);
+    const initialCapital = Number(strategyForm.initialCapital);
+    const feeBps = Number(strategyForm.feeBps);
+    const fixedPercent = Number(strategyForm.fixedPercent);
+    const fastPeriod = Number.parseInt(strategyForm.fastPeriod, 10);
+    const slowPeriod = Number.parseInt(strategyForm.slowPeriod, 10);
+
+    if (!symbol || !interval) {
+      setStrategyError('심볼과 주기를 입력해주세요.');
+      return;
+    }
+    if (!Number.isInteger(limit) || limit < 50 || limit > 1000) {
+      setStrategyError('캔들 개수는 50~1000 사이 정수여야 합니다.');
+      return;
+    }
+    if (!Number.isFinite(initialCapital) || initialCapital <= 0) {
+      setStrategyError('초기 자본은 0보다 커야 합니다.');
+      return;
+    }
+    if (!Number.isFinite(feeBps) || feeBps < 0 || feeBps > 2000) {
+      setStrategyError('수수료(bps)는 0~2000 범위여야 합니다.');
+      return;
+    }
+    if (!Number.isFinite(fixedPercent) || fixedPercent <= 0 || fixedPercent > 100) {
+      setStrategyError('포지션 크기(%)는 0 초과 100 이하로 입력해주세요.');
+      return;
+    }
+    if (!Number.isInteger(fastPeriod) || fastPeriod < 2 || fastPeriod > 300) {
+      setStrategyError('빠른 이동평균 기간은 2~300 정수여야 합니다.');
+      return;
+    }
+    if (!Number.isInteger(slowPeriod) || slowPeriod < 3 || slowPeriod > 600) {
+      setStrategyError('느린 이동평균 기간은 3~600 정수여야 합니다.');
+      return;
+    }
+    if (fastPeriod >= slowPeriod) {
+      setStrategyError('빠른 이동평균 기간은 느린 기간보다 작아야 합니다.');
+      return;
+    }
+
+    setStrategyLoading(true);
+    setStrategyError(null);
+
+    try {
+      const response = await fetch(`${apiBase}/api/strategy/backtest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol,
+          interval,
+          limit,
+          params: {
+            initialCapital,
+            feeBps,
+            positionSizeMode: 'fixed-percent',
+            fixedPercent,
+          },
+          strategy: {
+            type: 'maCrossover',
+            fastPeriod,
+            slowPeriod,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        let message = '전략 백테스트 실행에 실패했습니다.';
+        try {
+          const payload = (await response.json()) as { error?: string };
+          if (typeof payload.error === 'string' && payload.error.trim().length > 0) {
+            message = payload.error;
+          }
+        } catch (parseError) {
+          void parseError;
+        }
+
+        throw new Error(message);
+      }
+
+      const data = (await response.json()) as StrategyBacktestResult;
+      setStrategyResult(data);
+    } catch (error) {
+      const message = error instanceof Error && error.message ? error.message : '전략 백테스트 실행에 실패했습니다.';
+      setStrategyError(message);
+    } finally {
+      setStrategyLoading(false);
+    }
+  }, [strategyForm]);
+
   const handleCreateAlertRule = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
@@ -4242,6 +4515,10 @@ function App() {
   const replayStatusText = replayMode
     ? `리플레이 ${replayPlaying ? '재생중' : replayProgress.isAtEnd ? '완료' : '일시정지'} · 스텝 ${replayProgress.completedSteps}/${replayProgress.totalSteps} · 속도 x${replaySpeed}`
     : null;
+  const strategyRecentTrades = useMemo(
+    () => (strategyResult ? [...strategyResult.trades].slice(-STRATEGY_RECENT_TRADES_LIMIT).reverse() : []),
+    [strategyResult],
+  );
 
   return (
     <div className="tv-app">
@@ -5283,9 +5560,207 @@ function App() {
         </div>
 
         <div className="bottom-content">
-          {bottomTab === 'pine' ? 'Pine Script 편집기 연동 준비 중 (키워드 자동완성 / 저장소 연결 예정)' : null}
-          {bottomTab === 'strategy' ? '전략 백테스트 레이아웃 구현 중 (체결/수익률 패널 추가 예정)' : null}
-          {bottomTab === 'trading' ? '트레이딩 패널 구현 중 (주문창/포지션/체결내역 패널 예정)' : null}
+          {bottomTab === 'pine' ? (
+            <p className="bottom-placeholder">Pine Script 편집기 연동 준비 중 (키워드 자동완성 / 저장소 연결 예정)</p>
+          ) : null}
+
+          {bottomTab === 'strategy' ? (
+            <div className="strategy-tester-panel">
+              <form className="strategy-form" onSubmit={handleRunStrategyBacktest}>
+                <div className="strategy-form-grid">
+                  <label>
+                    <span>심볼</span>
+                    <input
+                      type="text"
+                      value={strategyForm.symbol}
+                      onChange={(event) => updateStrategyField('symbol', event.target.value)}
+                      placeholder="예: BTCUSDT"
+                    />
+                  </label>
+                  <label>
+                    <span>주기</span>
+                    <input
+                      type="text"
+                      value={strategyForm.interval}
+                      onChange={(event) => updateStrategyField('interval', event.target.value)}
+                      placeholder="예: 60"
+                    />
+                  </label>
+                  <label>
+                    <span>캔들 개수</span>
+                    <input
+                      type="number"
+                      min={50}
+                      max={1000}
+                      step={1}
+                      value={strategyForm.limit}
+                      onChange={(event) => updateStrategyField('limit', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>초기 자본</span>
+                    <input
+                      type="number"
+                      min={1}
+                      step="100"
+                      value={strategyForm.initialCapital}
+                      onChange={(event) => updateStrategyField('initialCapital', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>수수료 (bps)</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={2000}
+                      step="0.1"
+                      value={strategyForm.feeBps}
+                      onChange={(event) => updateStrategyField('feeBps', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>포지션 크기 (%)</span>
+                    <input
+                      type="number"
+                      min={0.1}
+                      max={100}
+                      step="0.1"
+                      value={strategyForm.fixedPercent}
+                      onChange={(event) => updateStrategyField('fixedPercent', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>MA Fast</span>
+                    <input
+                      type="number"
+                      min={2}
+                      max={300}
+                      step={1}
+                      value={strategyForm.fastPeriod}
+                      onChange={(event) => updateStrategyField('fastPeriod', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>MA Slow</span>
+                    <input
+                      type="number"
+                      min={3}
+                      max={600}
+                      step={1}
+                      value={strategyForm.slowPeriod}
+                      onChange={(event) => updateStrategyField('slowPeriod', event.target.value)}
+                    />
+                  </label>
+                </div>
+
+                <div className="strategy-form-actions">
+                  <button type="button" onClick={applyCurrentChartToStrategy} disabled={strategyLoading}>
+                    현재 차트 적용
+                  </button>
+                  <button type="submit" disabled={strategyLoading}>
+                    {strategyLoading ? '백테스트 실행 중...' : '백테스트 실행'}
+                  </button>
+                </div>
+
+                {strategyError ? <p className="strategy-error">{strategyError}</p> : null}
+              </form>
+
+              {strategyResult ? (
+                <div className="strategy-results">
+                  <div className="strategy-summary-grid">
+                    <div className="strategy-summary-card">
+                      <span>순손익</span>
+                      <strong className={strategyResult.summary.netPnl >= 0 ? 'up' : 'down'}>
+                        {formatSignedCurrency(strategyResult.summary.netPnl)}
+                      </strong>
+                    </div>
+                    <div className="strategy-summary-card">
+                      <span>수익률</span>
+                      <strong className={strategyResult.summary.returnPct >= 0 ? 'up' : 'down'}>
+                        {formatSigned(strategyResult.summary.returnPct, 2)}%
+                      </strong>
+                    </div>
+                    <div className="strategy-summary-card">
+                      <span>최대 낙폭</span>
+                      <strong>{strategyResult.summary.maxDrawdownPct.toFixed(2)}%</strong>
+                    </div>
+                    <div className="strategy-summary-card">
+                      <span>승률</span>
+                      <strong>{strategyResult.summary.winRate.toFixed(2)}%</strong>
+                    </div>
+                    <div className="strategy-summary-card">
+                      <span>거래 횟수</span>
+                      <strong>{strategyResult.summary.tradeCount.toLocaleString('en-US')}</strong>
+                    </div>
+                  </div>
+
+                  <div className="strategy-chart-grid">
+                    <div className="strategy-chart-card">
+                      <div className="strategy-chart-title">Equity Curve</div>
+                      <MiniLineChart
+                        points={strategyResult.equityCurve}
+                        stroke="#4da4ff"
+                        emptyText="에쿼티 데이터 없음"
+                      />
+                    </div>
+                    <div className="strategy-chart-card">
+                      <div className="strategy-chart-title">Drawdown Curve</div>
+                      <MiniLineChart
+                        points={strategyResult.drawdownCurve}
+                        stroke="#ef5350"
+                        emptyText="드로우다운 데이터 없음"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="strategy-trades-card">
+                    <div className="strategy-trades-title">
+                      최근 체결 ({strategyRecentTrades.length}/{strategyResult.trades.length})
+                    </div>
+
+                    {strategyRecentTrades.length === 0 ? (
+                      <p className="strategy-empty">체결 내역이 없습니다.</p>
+                    ) : (
+                      <div className="strategy-trades-table-wrap">
+                        <table className="strategy-trades-table">
+                          <thead>
+                            <tr>
+                              <th>진입</th>
+                              <th>청산</th>
+                              <th>방향</th>
+                              <th>수량</th>
+                              <th>진입가</th>
+                              <th>청산가</th>
+                              <th>손익</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {strategyRecentTrades.map((trade, index) => (
+                              <tr key={`${trade.entryTime}-${trade.exitTime}-${trade.qty}-${index}`}>
+                                <td>{formatCandleDateTime(trade.entryTime)}</td>
+                                <td>{formatCandleDateTime(trade.exitTime)}</td>
+                                <td>{trade.side}</td>
+                                <td>{trade.qty.toFixed(6)}</td>
+                                <td>{formatPrice(trade.entryPrice)}</td>
+                                <td>{formatPrice(trade.exitPrice)}</td>
+                                <td className={trade.pnl >= 0 ? 'up' : 'down'}>{formatSignedCurrency(trade.pnl)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <p className="strategy-empty">MA 교차 전략 파라미터를 입력한 뒤 백테스트를 실행하세요.</p>
+              )}
+            </div>
+          ) : null}
+
+          {bottomTab === 'trading' ? (
+            <p className="bottom-placeholder">트레이딩 패널 구현 중 (주문창/포지션/체결내역 패널 예정)</p>
+          ) : null}
         </div>
       </footer>
     </div>

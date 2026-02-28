@@ -1,0 +1,241 @@
+export type StrategyBacktestCandle = {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+};
+
+export type StrategyBacktestParams = {
+  initialCapital: number;
+  feeBps: number;
+  positionSizeMode: 'fixed-percent';
+  fixedPercent: number;
+};
+
+export type MaCrossoverStrategyConfig = {
+  fastPeriod: number;
+  slowPeriod: number;
+};
+
+export type StrategyBacktestSummary = {
+  netPnl: number;
+  returnPct: number;
+  maxDrawdownPct: number;
+  winRate: number;
+  tradeCount: number;
+};
+
+export type StrategyBacktestPoint = {
+  time: number;
+  value: number;
+};
+
+export type StrategyBacktestTrade = {
+  entryTime: number;
+  exitTime: number;
+  side: 'LONG';
+  qty: number;
+  entryPrice: number;
+  exitPrice: number;
+  pnl: number;
+};
+
+export type StrategyBacktestResult = {
+  summary: StrategyBacktestSummary;
+  equityCurve: StrategyBacktestPoint[];
+  drawdownCurve: StrategyBacktestPoint[];
+  trades: StrategyBacktestTrade[];
+};
+
+type OpenTrade = {
+  entryTime: number;
+  entryPrice: number;
+  qty: number;
+  entryFee: number;
+};
+
+function roundTo(value: number, digits = 6) {
+  if (!Number.isFinite(value)) return 0;
+  const multiplier = 10 ** digits;
+  return Math.round((value + Number.EPSILON) * multiplier) / multiplier;
+}
+
+function isFiniteNumber(value: number | null) {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function calculateSma(values: number[], period: number) {
+  const result = Array<number | null>(values.length).fill(null);
+
+  if (!Number.isInteger(period) || period <= 0 || values.length < period) {
+    return result;
+  }
+
+  let rollingSum = 0;
+
+  for (let index = 0; index < values.length; index += 1) {
+    const value = values[index];
+    if (!Number.isFinite(value)) {
+      return Array<number | null>(values.length).fill(null);
+    }
+
+    rollingSum += value;
+
+    if (index >= period) {
+      rollingSum -= values[index - period];
+    }
+
+    if (index >= period - 1) {
+      result[index] = rollingSum / period;
+    }
+  }
+
+  return result;
+}
+
+function pushCurvePoint(curve: StrategyBacktestPoint[], time: number, value: number) {
+  curve.push({
+    time,
+    value: roundTo(value),
+  });
+}
+
+export function runMaCrossoverBacktest(
+  candles: StrategyBacktestCandle[],
+  params: StrategyBacktestParams,
+  strategy: MaCrossoverStrategyConfig,
+): StrategyBacktestResult {
+  if (!candles.length) {
+    return {
+      summary: {
+        netPnl: 0,
+        returnPct: 0,
+        maxDrawdownPct: 0,
+        winRate: 0,
+        tradeCount: 0,
+      },
+      equityCurve: [],
+      drawdownCurve: [],
+      trades: [],
+    };
+  }
+
+  const closeValues = candles.map((candle) => Number(candle.close));
+  const fastSma = calculateSma(closeValues, strategy.fastPeriod);
+  const slowSma = calculateSma(closeValues, strategy.slowPeriod);
+  const feeRate = params.feeBps / 10_000;
+  const sizeRatio = params.fixedPercent / 100;
+
+  let cash = params.initialCapital;
+  let openTrade: OpenTrade | null = null;
+  let peakEquity = params.initialCapital;
+  let maxDrawdownPct = 0;
+
+  const equityCurve: StrategyBacktestPoint[] = [];
+  const drawdownCurve: StrategyBacktestPoint[] = [];
+  const trades: StrategyBacktestTrade[] = [];
+
+  const firstCandle = candles[0];
+  pushCurvePoint(equityCurve, firstCandle.time, params.initialCapital);
+  pushCurvePoint(drawdownCurve, firstCandle.time, 0);
+
+  for (let index = 1; index < candles.length; index += 1) {
+    const candle = candles[index];
+    const closePrice = Number(candle.close);
+
+    if (!Number.isFinite(closePrice) || closePrice <= 0) {
+      continue;
+    }
+
+    const previousFast = fastSma[index - 1];
+    const previousSlow = slowSma[index - 1];
+    const currentFast = fastSma[index];
+    const currentSlow = slowSma[index];
+
+    const canEvaluateCross =
+      isFiniteNumber(previousFast) &&
+      isFiniteNumber(previousSlow) &&
+      isFiniteNumber(currentFast) &&
+      isFiniteNumber(currentSlow);
+
+    let bullishCross = false;
+    let bearishCross = false;
+
+    if (canEvaluateCross) {
+      const previousFastValue = previousFast as number;
+      const previousSlowValue = previousSlow as number;
+      const currentFastValue = currentFast as number;
+      const currentSlowValue = currentSlow as number;
+
+      bullishCross = previousFastValue <= previousSlowValue && currentFastValue > currentSlowValue;
+      bearishCross = previousFastValue >= previousSlowValue && currentFastValue < currentSlowValue;
+    }
+
+    if (openTrade && (bearishCross || index === candles.length - 1)) {
+      const exitNotional = openTrade.qty * closePrice;
+      const exitFee = exitNotional * feeRate;
+      const tradePnl = (closePrice - openTrade.entryPrice) * openTrade.qty - openTrade.entryFee - exitFee;
+
+      cash += exitNotional - exitFee;
+
+      trades.push({
+        entryTime: openTrade.entryTime,
+        exitTime: candle.time,
+        side: 'LONG',
+        qty: roundTo(openTrade.qty, 8),
+        entryPrice: roundTo(openTrade.entryPrice),
+        exitPrice: roundTo(closePrice),
+        pnl: roundTo(tradePnl),
+      });
+
+      openTrade = null;
+    } else if (!openTrade && bullishCross && index < candles.length - 1) {
+      const desiredNotional = cash * sizeRatio;
+      const maxNotional = cash / (1 + feeRate);
+      const notional = Math.min(desiredNotional, maxNotional);
+
+      if (notional > 0) {
+        const entryFee = notional * feeRate;
+        const qty = notional / closePrice;
+
+        cash -= notional + entryFee;
+        openTrade = {
+          entryTime: candle.time,
+          entryPrice: closePrice,
+          qty,
+          entryFee,
+        };
+      }
+    }
+
+    const equity = cash + (openTrade ? openTrade.qty * closePrice : 0);
+    peakEquity = Math.max(peakEquity, equity);
+    const drawdownPct = peakEquity > 0 ? ((equity - peakEquity) / peakEquity) * 100 : 0;
+
+    maxDrawdownPct = Math.max(maxDrawdownPct, Math.abs(drawdownPct));
+
+    pushCurvePoint(equityCurve, candle.time, equity);
+    pushCurvePoint(drawdownCurve, candle.time, drawdownPct);
+  }
+
+  const finalEquity = equityCurve.length ? equityCurve[equityCurve.length - 1].value : params.initialCapital;
+  const netPnl = finalEquity - params.initialCapital;
+  const returnPct = params.initialCapital > 0 ? (netPnl / params.initialCapital) * 100 : 0;
+  const winningTrades = trades.filter((trade) => trade.pnl > 0).length;
+  const winRate = trades.length > 0 ? (winningTrades / trades.length) * 100 : 0;
+
+  return {
+    summary: {
+      netPnl: roundTo(netPnl),
+      returnPct: roundTo(returnPct),
+      maxDrawdownPct: roundTo(maxDrawdownPct),
+      winRate: roundTo(winRate),
+      tradeCount: trades.length,
+    },
+    equityCurve,
+    drawdownCurve,
+    trades,
+  };
+}
