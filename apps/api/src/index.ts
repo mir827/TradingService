@@ -51,6 +51,37 @@ type Quote = {
 type AlertMetric = 'price' | 'changePercent';
 type AlertOperator = '>=' | '<=' | '>' | '<';
 type AlertIndicatorComparator = '>=' | '<=';
+type AlertHistoryEventSource = 'manual' | 'watchlist';
+type AlertLifecycleState = 'active' | 'triggered' | 'cooldown' | 'error';
+type AlertHistoryEventType = 'triggered' | 'error';
+type AlertStateTransitionReason =
+  | 'ruleCreated'
+  | 'conditionMet'
+  | 'conditionNotMet'
+  | 'cooldownSuppressed'
+  | 'evaluationError';
+
+type AlertStateTransition = {
+  from: AlertLifecycleState | null;
+  to: AlertLifecycleState;
+  transitionedAt: number;
+  reason: AlertStateTransitionReason;
+  message?: string;
+};
+
+type AlertLastTriggerMetadata = {
+  triggeredAt: number;
+  currentValue: number;
+  source: AlertHistoryEventSource;
+  sourceSymbol?: string;
+};
+
+type AlertLastErrorMetadata = {
+  failedAt: number;
+  message: string;
+  source: AlertHistoryEventSource;
+  sourceSymbol?: string;
+};
 
 type AlertIndicatorCondition =
   | {
@@ -90,6 +121,11 @@ type AlertRule = {
   indicatorConditions?: AlertIndicatorCondition[];
   createdAt: number;
   lastTriggeredAt: number | null;
+  state: AlertLifecycleState;
+  stateUpdatedAt: number;
+  lastStateTransition: AlertStateTransition;
+  lastTrigger?: AlertLastTriggerMetadata;
+  lastError?: AlertLastErrorMetadata;
 };
 
 type AlertCheckEvent = {
@@ -98,17 +134,30 @@ type AlertCheckEvent = {
   metric: AlertMetric;
   operator: AlertOperator;
   threshold: number;
-  currentValue: number;
+  currentValue?: number;
   triggeredAt: number;
   cooldownSec: number;
   indicatorConditions?: AlertIndicatorCondition[];
+  eventType?: AlertHistoryEventType;
+  state?: AlertLifecycleState;
+  transition?: AlertStateTransition;
+  errorMessage?: string;
 };
-
-type AlertHistoryEventSource = 'manual' | 'watchlist';
 
 type AlertHistoryEvent = AlertCheckEvent & {
   source?: AlertHistoryEventSource;
   sourceSymbol?: string;
+};
+
+type AlertCooldownSuppression = {
+  ruleId: string;
+  symbol: string;
+  metric: AlertMetric;
+  suppressedAt: number;
+  cooldownSec: number;
+  remainingMs: number;
+  state: 'cooldown';
+  transition?: AlertStateTransition;
 };
 
 type MarketStatusState = 'OPEN' | 'CLOSED';
@@ -274,6 +323,7 @@ const ALERT_MACD_SLOW_DEFAULT_PERIOD = 26;
 const ALERT_MACD_SIGNAL_DEFAULT_PERIOD = 9;
 const ALERT_BOLLINGER_DEFAULT_PERIOD = 20;
 const ALERT_BOLLINGER_DEFAULT_STD_DEV = 2;
+const ALERT_ERROR_EVENT_DEDUP_WINDOW_MS = 30_000;
 const OPS_ERROR_MAX_EVENTS = 500;
 const OPS_RECOVERY_MAX_EVENTS = 500;
 const paperTradingState = createInitialPaperTradingState();
@@ -443,6 +493,22 @@ const alertQueryIndicatorAwareOnlySchema = z.preprocess((value) => {
   return value;
 }, z.boolean().optional());
 
+const alertQueryStateSchema = z.preprocess((value) => {
+  if (typeof value === 'string') {
+    return value.trim().toLowerCase();
+  }
+
+  return value;
+}, z.enum(['active', 'triggered', 'cooldown', 'error']).optional());
+
+const alertQueryTypeSchema = z.preprocess((value) => {
+  if (typeof value === 'string') {
+    return value.trim().toLowerCase();
+  }
+
+  return value;
+}, z.enum(['triggered', 'error', 'all']).optional());
+
 const alertRuleQuerySchema = z.object({
   symbol: z.string().optional(),
   symbols: alertQuerySymbolsSchema,
@@ -593,6 +659,8 @@ const alertHistoryQuerySchema = z.object({
   fromTs: z.coerce.number().int().nonnegative().optional(),
   toTs: z.coerce.number().int().nonnegative().optional(),
   source: z.enum(['manual', 'watchlist']).optional(),
+  state: alertQueryStateSchema,
+  type: alertQueryTypeSchema,
   indicatorAwareOnly: alertQueryIndicatorAwareOnlySchema,
   limit: z.coerce.number().int().min(1).default(50).transform((value) => Math.min(value, 200)),
 })
@@ -697,6 +765,37 @@ const persistedTradingStateSchema = z.object({
   updatedAt: z.coerce.number().int().nonnegative().optional(),
 });
 
+const alertLifecycleStateSchema = z.enum(['active', 'triggered', 'cooldown', 'error']);
+const alertStateTransitionReasonSchema = z.enum([
+  'ruleCreated',
+  'conditionMet',
+  'conditionNotMet',
+  'cooldownSuppressed',
+  'evaluationError',
+]);
+
+const persistedAlertStateTransitionSchema = z.object({
+  from: z.union([z.null(), alertLifecycleStateSchema]),
+  to: alertLifecycleStateSchema,
+  transitionedAt: z.coerce.number().int().nonnegative(),
+  reason: alertStateTransitionReasonSchema,
+  message: z.string().trim().min(1).max(300).optional(),
+});
+
+const persistedAlertLastTriggerSchema = z.object({
+  triggeredAt: z.coerce.number().int().nonnegative(),
+  currentValue: z.coerce.number().finite(),
+  source: z.enum(['manual', 'watchlist']),
+  sourceSymbol: z.string().trim().min(1).optional(),
+});
+
+const persistedAlertLastErrorSchema = z.object({
+  failedAt: z.coerce.number().int().nonnegative(),
+  message: z.string().trim().min(1).max(300),
+  source: z.enum(['manual', 'watchlist']),
+  sourceSymbol: z.string().trim().min(1).optional(),
+});
+
 const persistedAlertRuleSchema = z.object({
   id: z.string().trim().min(1),
   symbol: z.string().trim().min(1),
@@ -707,6 +806,11 @@ const persistedAlertRuleSchema = z.object({
   indicatorConditions: z.array(alertIndicatorConditionSchema).max(4).optional(),
   createdAt: z.coerce.number().int().nonnegative(),
   lastTriggeredAt: z.union([z.null(), z.coerce.number().int().nonnegative()]),
+  state: alertLifecycleStateSchema.optional(),
+  stateUpdatedAt: z.coerce.number().int().nonnegative().optional(),
+  lastStateTransition: persistedAlertStateTransitionSchema.optional(),
+  lastTrigger: persistedAlertLastTriggerSchema.optional(),
+  lastError: persistedAlertLastErrorSchema.optional(),
 });
 
 const persistedAlertHistoryEventSchema = z.object({
@@ -715,10 +819,14 @@ const persistedAlertHistoryEventSchema = z.object({
   metric: z.enum(['price', 'changePercent']),
   operator: z.enum(['>=', '<=', '>', '<']),
   threshold: z.coerce.number().finite(),
-  currentValue: z.coerce.number().finite(),
+  currentValue: z.coerce.number().finite().optional(),
   triggeredAt: z.coerce.number().int().nonnegative(),
   cooldownSec: z.coerce.number().int().min(0).max(86400),
   indicatorConditions: z.array(alertIndicatorConditionSchema).max(4).optional(),
+  eventType: z.enum(['triggered', 'error']).optional(),
+  state: alertLifecycleStateSchema.optional(),
+  transition: persistedAlertStateTransitionSchema.optional(),
+  errorMessage: z.string().trim().min(1).max(300).optional(),
   source: z.enum(['manual', 'watchlist']).optional(),
   sourceSymbol: z.string().trim().min(1).optional(),
 });
@@ -1483,7 +1591,27 @@ function createRuntimeStatePayload() {
   return {
     version: RUNTIME_STATE_VERSION,
     alertRules: [...alertRuleStore.values()].map(serializeAlertRule),
-    alertHistory: alertHistoryStore.map((eventItem) => ({ ...eventItem })),
+    alertHistory: alertHistoryStore.map((eventItem) => ({
+      ruleId: eventItem.ruleId,
+      symbol: eventItem.symbol,
+      metric: eventItem.metric,
+      operator: eventItem.operator,
+      threshold: eventItem.threshold,
+      ...(typeof eventItem.currentValue === 'number' ? { currentValue: eventItem.currentValue } : {}),
+      triggeredAt: eventItem.triggeredAt,
+      cooldownSec: eventItem.cooldownSec,
+      eventType: normalizeAlertEventType(eventItem.eventType),
+      state: normalizeAlertLifecycleState(
+        eventItem.state ?? (normalizeAlertEventType(eventItem.eventType) === 'error' ? 'error' : 'triggered'),
+      ),
+      ...(eventItem.transition ? { transition: cloneAlertStateTransition(eventItem.transition)! } : {}),
+      ...(eventItem.errorMessage?.trim() ? { errorMessage: eventItem.errorMessage.trim() } : {}),
+      ...(eventItem.indicatorConditions?.length
+        ? { indicatorConditions: cloneIndicatorConditions(eventItem.indicatorConditions) }
+        : {}),
+      ...(eventItem.source ? { source: eventItem.source } : {}),
+      ...(eventItem.sourceSymbol ? { sourceSymbol: eventItem.sourceSymbol } : {}),
+    })),
     opsErrors: opsErrorStore.map((eventItem) => ({
       ...eventItem,
       ...(eventItem.context ? { context: cloneOpsContext(eventItem.context) } : {}),
@@ -1599,7 +1727,68 @@ async function loadRuntimeStateFromDisk() {
         : {}),
       createdAt: parsedRule.data.createdAt,
       lastTriggeredAt: parsedRule.data.lastTriggeredAt,
+      state: normalizeAlertLifecycleState(parsedRule.data.state),
+      stateUpdatedAt: parsedRule.data.stateUpdatedAt ?? parsedRule.data.createdAt,
+      lastStateTransition: createInitialAlertStateTransition(parsedRule.data.createdAt),
+      ...(parsedRule.data.lastTrigger
+        ? {
+            lastTrigger: {
+              triggeredAt: parsedRule.data.lastTrigger.triggeredAt,
+              currentValue: parsedRule.data.lastTrigger.currentValue,
+              source: parsedRule.data.lastTrigger.source,
+              ...(parsedRule.data.lastTrigger.sourceSymbol
+                ? { sourceSymbol: normalizeSymbol(parsedRule.data.lastTrigger.sourceSymbol) }
+                : {}),
+            },
+          }
+        : {}),
+      ...(parsedRule.data.lastError
+        ? {
+            lastError: {
+              failedAt: parsedRule.data.lastError.failedAt,
+              message: parsedRule.data.lastError.message.trim(),
+              source: parsedRule.data.lastError.source,
+              ...(parsedRule.data.lastError.sourceSymbol
+                ? { sourceSymbol: normalizeSymbol(parsedRule.data.lastError.sourceSymbol) }
+                : {}),
+            },
+          }
+        : {}),
     };
+
+    if (parsedRule.data.lastStateTransition) {
+      const transition: AlertStateTransition = {
+        from: parsedRule.data.lastStateTransition.from
+          ? normalizeAlertLifecycleState(parsedRule.data.lastStateTransition.from)
+          : null,
+        to: normalizeAlertLifecycleState(parsedRule.data.lastStateTransition.to),
+        transitionedAt: parsedRule.data.lastStateTransition.transitionedAt,
+        reason: parsedRule.data.lastStateTransition.reason,
+        ...(parsedRule.data.lastStateTransition.message?.trim()
+          ? { message: parsedRule.data.lastStateTransition.message.trim() }
+          : {}),
+      };
+
+      normalizedRule.lastStateTransition = transition;
+      normalizedRule.stateUpdatedAt = parsedRule.data.stateUpdatedAt ?? transition.transitionedAt;
+      normalizedRule.state = normalizeAlertLifecycleState(parsedRule.data.state ?? transition.to);
+
+      if (transition.to !== normalizedRule.state) {
+        normalizedRule.lastStateTransition = {
+          from: transition.to,
+          to: normalizedRule.state,
+          transitionedAt: normalizedRule.stateUpdatedAt,
+          reason: transition.reason,
+          ...(transition.message ? { message: transition.message } : {}),
+        };
+      }
+    } else {
+      normalizedRule.lastStateTransition = {
+        ...normalizedRule.lastStateTransition,
+        to: normalizedRule.state,
+        transitionedAt: normalizedRule.stateUpdatedAt,
+      };
+    }
 
     alertRuleStore.set(normalizedRule.id, normalizedRule);
   }
@@ -1618,9 +1807,34 @@ async function loadRuntimeStateFromDisk() {
       metric: parsedEvent.data.metric,
       operator: parsedEvent.data.operator,
       threshold: parsedEvent.data.threshold,
-      currentValue: parsedEvent.data.currentValue,
+      ...(typeof parsedEvent.data.currentValue === 'number'
+        ? { currentValue: parsedEvent.data.currentValue }
+        : {}),
       triggeredAt: parsedEvent.data.triggeredAt,
       cooldownSec: parsedEvent.data.cooldownSec,
+      eventType: normalizeAlertEventType(parsedEvent.data.eventType),
+      state: normalizeAlertLifecycleState(
+        parsedEvent.data.state ??
+          (normalizeAlertEventType(parsedEvent.data.eventType) === 'error' ? 'error' : 'triggered'),
+      ),
+      ...(parsedEvent.data.transition
+        ? {
+            transition: {
+              from: parsedEvent.data.transition.from
+                ? normalizeAlertLifecycleState(parsedEvent.data.transition.from)
+                : null,
+              to: normalizeAlertLifecycleState(parsedEvent.data.transition.to),
+              transitionedAt: parsedEvent.data.transition.transitionedAt,
+              reason: parsedEvent.data.transition.reason,
+              ...(parsedEvent.data.transition.message?.trim()
+                ? { message: parsedEvent.data.transition.message.trim() }
+                : {}),
+            },
+          }
+        : {}),
+      ...(parsedEvent.data.errorMessage?.trim()
+        ? { errorMessage: parsedEvent.data.errorMessage.trim() }
+        : {}),
       ...(parsedEvent.data.indicatorConditions?.length
         ? { indicatorConditions: parsedEvent.data.indicatorConditions.map((condition) => ({ ...condition })) }
         : {}),
@@ -1818,6 +2032,98 @@ type AlertIndicatorEvaluationCache = {
   bollingerByPeriod: Map<string, BollingerBandsValues>;
 };
 
+function normalizeAlertLifecycleState(state?: AlertLifecycleState | null): AlertLifecycleState {
+  if (state === 'active' || state === 'triggered' || state === 'cooldown' || state === 'error') {
+    return state;
+  }
+  return 'active';
+}
+
+function normalizeAlertEventType(type?: AlertHistoryEventType | null): AlertHistoryEventType {
+  if (type === 'triggered' || type === 'error') {
+    return type;
+  }
+  return 'triggered';
+}
+
+function cloneAlertStateTransition(transition?: AlertStateTransition) {
+  if (!transition) return undefined;
+  const message = transition.message?.trim();
+  return {
+    from: transition.from,
+    to: transition.to,
+    transitionedAt: transition.transitionedAt,
+    reason: transition.reason,
+    ...(message ? { message } : {}),
+  } satisfies AlertStateTransition;
+}
+
+function cloneAlertLastTrigger(lastTrigger?: AlertLastTriggerMetadata) {
+  if (!lastTrigger) return undefined;
+  return {
+    triggeredAt: lastTrigger.triggeredAt,
+    currentValue: lastTrigger.currentValue,
+    source: lastTrigger.source,
+    ...(lastTrigger.sourceSymbol ? { sourceSymbol: normalizeSymbol(lastTrigger.sourceSymbol) } : {}),
+  } satisfies AlertLastTriggerMetadata;
+}
+
+function cloneAlertLastError(lastError?: AlertLastErrorMetadata) {
+  if (!lastError) return undefined;
+  const message = lastError.message.trim();
+  return {
+    failedAt: lastError.failedAt,
+    message,
+    source: lastError.source,
+    ...(lastError.sourceSymbol ? { sourceSymbol: normalizeSymbol(lastError.sourceSymbol) } : {}),
+  } satisfies AlertLastErrorMetadata;
+}
+
+function createInitialAlertStateTransition(createdAt: number): AlertStateTransition {
+  return {
+    from: null,
+    to: 'active',
+    transitionedAt: createdAt,
+    reason: 'ruleCreated',
+  };
+}
+
+function transitionAlertRuleState(
+  rule: AlertRule,
+  nextState: AlertLifecycleState,
+  transitionedAt: number,
+  reason: AlertStateTransitionReason,
+  message?: string | null,
+) {
+  const normalizedMessage = typeof message === 'string' && message.trim().length > 0 ? message.trim() : undefined;
+  const previousTransition = rule.lastStateTransition;
+  const stateChanged = rule.state !== nextState;
+  const reasonChanged = previousTransition.reason !== reason;
+  const messageChanged = (previousTransition.message ?? undefined) !== normalizedMessage;
+
+  if (!stateChanged && !reasonChanged && !messageChanged) {
+    return null;
+  }
+
+  const transition: AlertStateTransition = {
+    from: rule.state,
+    to: nextState,
+    transitionedAt,
+    reason,
+    ...(normalizedMessage ? { message: normalizedMessage } : {}),
+  };
+
+  rule.state = nextState;
+  rule.stateUpdatedAt = transitionedAt;
+  rule.lastStateTransition = transition;
+
+  if (nextState !== 'error') {
+    delete rule.lastError;
+  }
+
+  return transition;
+}
+
 function cloneIndicatorConditions(conditions?: AlertIndicatorCondition[]) {
   if (!conditions?.length) return undefined;
   return conditions.map((condition) => ({ ...condition }));
@@ -1967,7 +2273,19 @@ function evaluateRuleIndicatorConditions(
 
 function serializeAlertRule(rule: AlertRule) {
   return {
-    ...rule,
+    id: rule.id,
+    symbol: rule.symbol,
+    metric: rule.metric,
+    operator: rule.operator,
+    threshold: rule.threshold,
+    cooldownSec: rule.cooldownSec,
+    createdAt: rule.createdAt,
+    lastTriggeredAt: rule.lastTriggeredAt,
+    state: rule.state,
+    stateUpdatedAt: rule.stateUpdatedAt,
+    lastStateTransition: cloneAlertStateTransition(rule.lastStateTransition)!,
+    ...(rule.lastTrigger ? { lastTrigger: cloneAlertLastTrigger(rule.lastTrigger)! } : {}),
+    ...(rule.lastError ? { lastError: cloneAlertLastError(rule.lastError)! } : {}),
     ...(rule.indicatorConditions?.length ? { indicatorConditions: cloneIndicatorConditions(rule.indicatorConditions) } : {}),
   };
 }
@@ -1993,8 +2311,22 @@ function appendAlertHistoryEvents(
   const normalizedSourceSymbol = sourceSymbol ? normalizeSymbol(sourceSymbol) : null;
 
   for (const eventItem of events) {
+    const normalizedEventType = normalizeAlertEventType(eventItem.eventType);
+    const defaultState: AlertLifecycleState = normalizedEventType === 'error' ? 'error' : 'triggered';
+
     alertHistoryStore.push({
-      ...eventItem,
+      ruleId: eventItem.ruleId,
+      symbol: eventItem.symbol,
+      metric: eventItem.metric,
+      operator: eventItem.operator,
+      threshold: eventItem.threshold,
+      ...(typeof eventItem.currentValue === 'number' ? { currentValue: eventItem.currentValue } : {}),
+      triggeredAt: eventItem.triggeredAt,
+      cooldownSec: eventItem.cooldownSec,
+      eventType: normalizedEventType,
+      state: normalizeAlertLifecycleState(eventItem.state ?? defaultState),
+      ...(eventItem.transition ? { transition: cloneAlertStateTransition(eventItem.transition)! } : {}),
+      ...(eventItem.errorMessage?.trim() ? { errorMessage: eventItem.errorMessage.trim() } : {}),
       ...(eventItem.indicatorConditions?.length
         ? { indicatorConditions: cloneIndicatorConditions(eventItem.indicatorConditions) }
         : {}),
@@ -2013,6 +2345,8 @@ function getAlertHistory(
   toTs: number | null,
   limit: number,
   indicatorAwareOnly: boolean,
+  lifecycleState: AlertLifecycleState | null,
+  eventType: AlertHistoryEventType | 'all',
 ) {
   const filtered = alertHistoryStore.filter((eventItem) => {
     if (symbols && !symbols.has(eventItem.symbol)) {
@@ -2024,6 +2358,19 @@ function getAlertHistory(
     }
 
     if (indicatorAwareOnly && !isIndicatorAwareEvent(eventItem)) {
+      return false;
+    }
+
+    const normalizedEventType = normalizeAlertEventType(eventItem.eventType);
+    const normalizedState = normalizeAlertLifecycleState(
+      eventItem.state ?? (normalizedEventType === 'error' ? 'error' : 'triggered'),
+    );
+
+    if (eventType !== 'all' && normalizedEventType !== eventType) {
+      return false;
+    }
+
+    if (lifecycleState && normalizedState !== lifecycleState) {
       return false;
     }
 
@@ -2043,10 +2390,25 @@ function getAlertHistory(
   return {
     total,
     events: filtered.slice(start).reverse().map((eventItem) => ({
-      ...eventItem,
+      ruleId: eventItem.ruleId,
+      symbol: eventItem.symbol,
+      metric: eventItem.metric,
+      operator: eventItem.operator,
+      threshold: eventItem.threshold,
+      ...(typeof eventItem.currentValue === 'number' ? { currentValue: eventItem.currentValue } : {}),
+      triggeredAt: eventItem.triggeredAt,
+      cooldownSec: eventItem.cooldownSec,
+      eventType: normalizeAlertEventType(eventItem.eventType),
+      state: normalizeAlertLifecycleState(
+        eventItem.state ?? (normalizeAlertEventType(eventItem.eventType) === 'error' ? 'error' : 'triggered'),
+      ),
+      ...(eventItem.transition ? { transition: cloneAlertStateTransition(eventItem.transition)! } : {}),
+      ...(eventItem.errorMessage?.trim() ? { errorMessage: eventItem.errorMessage.trim() } : {}),
       ...(eventItem.indicatorConditions?.length
         ? { indicatorConditions: cloneIndicatorConditions(eventItem.indicatorConditions) }
         : {}),
+      ...(eventItem.source ? { source: eventItem.source } : {}),
+      ...(eventItem.sourceSymbol ? { sourceSymbol: eventItem.sourceSymbol } : {}),
     })),
   };
 }
@@ -2062,9 +2424,14 @@ function evaluateAlertRules(
   quoteBySymbol: Map<string, { lastPrice: number; changePercent: number }>,
   evaluatedAt: number,
   indicatorCacheBySymbol: Map<string, AlertIndicatorEvaluationCache>,
+  source: AlertHistoryEventSource,
+  sourceSymbol?: string | null,
 ) {
   const triggered: AlertCheckEvent[] = [];
+  const suppressed: AlertCooldownSuppression[] = [];
   let suppressedByCooldown = 0;
+  let stateTransitionCount = 0;
+  const normalizedSourceSymbol = sourceSymbol ? normalizeSymbol(sourceSymbol) : undefined;
 
   for (const rule of rules) {
     const values = quoteBySymbol.get(rule.symbol);
@@ -2072,9 +2439,14 @@ function evaluateAlertRules(
 
     const currentValue = selectMetricValue(rule.metric, values);
     const met = compareWithOperator(currentValue, rule.operator, rule.threshold);
+    const indicatorMatched = met && evaluateRuleIndicatorConditions(rule, values, indicatorCacheBySymbol);
 
-    if (!met) continue;
-    if (!evaluateRuleIndicatorConditions(rule, values, indicatorCacheBySymbol)) continue;
+    if (!met || !indicatorMatched) {
+      if (transitionAlertRuleState(rule, 'active', evaluatedAt, 'conditionNotMet')) {
+        stateTransitionCount += 1;
+      }
+      continue;
+    }
 
     const cooldownMs = rule.cooldownSec * 1000;
     const inCooldown =
@@ -2083,11 +2455,36 @@ function evaluateAlertRules(
       evaluatedAt - rule.lastTriggeredAt < cooldownMs;
 
     if (inCooldown) {
+      const remainingMs = Math.max(rule.lastTriggeredAt! + cooldownMs - evaluatedAt, 0);
+      const transition = transitionAlertRuleState(rule, 'cooldown', evaluatedAt, 'cooldownSuppressed');
+      if (transition) {
+        stateTransitionCount += 1;
+      }
       suppressedByCooldown += 1;
+      suppressed.push({
+        ruleId: rule.id,
+        symbol: rule.symbol,
+        metric: rule.metric,
+        suppressedAt: evaluatedAt,
+        cooldownSec: rule.cooldownSec,
+        remainingMs,
+        state: 'cooldown',
+        ...(transition ? { transition: cloneAlertStateTransition(transition)! } : {}),
+      });
       continue;
     }
 
     rule.lastTriggeredAt = evaluatedAt;
+    rule.lastTrigger = {
+      triggeredAt: evaluatedAt,
+      currentValue,
+      source,
+      ...(normalizedSourceSymbol ? { sourceSymbol: normalizedSourceSymbol } : {}),
+    };
+    const transition = transitionAlertRuleState(rule, 'triggered', evaluatedAt, 'conditionMet');
+    if (transition) {
+      stateTransitionCount += 1;
+    }
     triggered.push({
       ruleId: rule.id,
       symbol: rule.symbol,
@@ -2097,6 +2494,9 @@ function evaluateAlertRules(
       currentValue,
       triggeredAt: evaluatedAt,
       cooldownSec: rule.cooldownSec,
+      eventType: 'triggered',
+      state: 'triggered',
+      ...(transition ? { transition: cloneAlertStateTransition(transition)! } : {}),
       ...(rule.indicatorConditions?.length
         ? { indicatorConditions: cloneIndicatorConditions(rule.indicatorConditions) }
         : {}),
@@ -2106,6 +2506,74 @@ function evaluateAlertRules(
   return {
     triggered,
     suppressedByCooldown,
+    suppressed,
+    stateTransitionCount,
+  };
+}
+
+function markAlertRulesAsError(
+  rules: AlertRule[],
+  failedAt: number,
+  source: AlertHistoryEventSource,
+  message: string,
+  sourceSymbol?: string | null,
+) {
+  const normalizedMessage = message.trim() || 'Alert evaluation failed';
+  const normalizedSourceSymbol = sourceSymbol ? normalizeSymbol(sourceSymbol) : undefined;
+  const errorEvents: AlertCheckEvent[] = [];
+  let changedRuleCount = 0;
+
+  for (const rule of rules) {
+    const previousError = rule.lastError;
+    const duplicateError =
+      rule.state === 'error' &&
+      previousError?.message === normalizedMessage &&
+      previousError.source === source &&
+      previousError.sourceSymbol === normalizedSourceSymbol &&
+      failedAt - previousError.failedAt < ALERT_ERROR_EVENT_DEDUP_WINDOW_MS;
+
+    const transition = transitionAlertRuleState(rule, 'error', failedAt, 'evaluationError', normalizedMessage);
+    if (transition) {
+      changedRuleCount += 1;
+    }
+
+    if (duplicateError) {
+      continue;
+    }
+
+    rule.lastError = {
+      failedAt,
+      message: normalizedMessage,
+      source,
+      ...(normalizedSourceSymbol ? { sourceSymbol: normalizedSourceSymbol } : {}),
+    };
+    changedRuleCount += 1;
+
+    errorEvents.push({
+      ruleId: rule.id,
+      symbol: rule.symbol,
+      metric: rule.metric,
+      operator: rule.operator,
+      threshold: rule.threshold,
+      triggeredAt: failedAt,
+      cooldownSec: rule.cooldownSec,
+      eventType: 'error',
+      state: 'error',
+      ...(transition ? { transition: cloneAlertStateTransition(transition)! } : {}),
+      errorMessage: normalizedMessage,
+      ...(rule.indicatorConditions?.length
+        ? { indicatorConditions: cloneIndicatorConditions(rule.indicatorConditions) }
+        : {}),
+    });
+  }
+
+  if (errorEvents.length > 0) {
+    appendAlertHistoryEvents(errorEvents, source, sourceSymbol);
+  }
+
+  return {
+    changedRuleCount,
+    errorEventCount: errorEvents.length,
   };
 }
 
@@ -2919,6 +3387,7 @@ app.post('/api/alerts/rules', async (request, reply) => {
   }
 
   const now = Date.now();
+  const initialTransition = createInitialAlertStateTransition(now);
   const rule: AlertRule = {
     id: createAlertRuleId(),
     symbol: normalizeSymbol(parsed.data.symbol),
@@ -2931,6 +3400,9 @@ app.post('/api/alerts/rules', async (request, reply) => {
       : {}),
     createdAt: now,
     lastTriggeredAt: null,
+    state: 'active',
+    stateUpdatedAt: now,
+    lastStateTransition: initialTransition,
   };
 
   alertRuleStore.set(rule.id, rule);
@@ -2977,6 +3449,8 @@ app.post('/api/alerts/check', async (request, reply) => {
       checkedRuleCount: 0,
       triggeredCount: 0,
       suppressedByCooldown: 0,
+      suppressed: [],
+      stateTransitionCount: 0,
       triggered: [],
     };
   }
@@ -3011,22 +3485,43 @@ app.post('/api/alerts/check', async (request, reply) => {
       }),
     );
   } catch (error) {
+    const failedAt = Date.now();
+    const errorMessage = 'Failed to evaluate alert rules due to quote fetch failure';
+    const { changedRuleCount } = markAlertRulesAsError(rules, failedAt, source, errorMessage, singleScopedSymbol);
+    if (changedRuleCount > 0) {
+      await persistRuntimeState();
+    }
     app.log.error({ error, symbolsToFetch }, 'Failed to fetch quotes for alert checks');
-    return reply.code(502).send({ error: 'Failed to evaluate alert rules due to quote fetch failure' });
+    return reply.code(502).send({ error: errorMessage });
   }
 
   let indicatorCacheBySymbol = new Map<string, AlertIndicatorEvaluationCache>();
   try {
     indicatorCacheBySymbol = await loadIndicatorEvaluationCache(rules);
   } catch (error) {
+    const failedAt = Date.now();
+    const errorMessage = 'Failed to evaluate indicator conditions due to candle fetch failure';
+    const { changedRuleCount } = markAlertRulesAsError(rules, failedAt, source, errorMessage, singleScopedSymbol);
+    if (changedRuleCount > 0) {
+      await persistRuntimeState();
+    }
     app.log.error({ error }, 'Failed to fetch candles for indicator alert checks');
-    return reply.code(502).send({ error: 'Failed to evaluate indicator conditions due to candle fetch failure' });
+    return reply.code(502).send({ error: errorMessage });
   }
 
   const now = Date.now();
-  const { triggered, suppressedByCooldown } = evaluateAlertRules(rules, quoteBySymbol, now, indicatorCacheBySymbol);
+  const { triggered, suppressedByCooldown, suppressed, stateTransitionCount } = evaluateAlertRules(
+    rules,
+    quoteBySymbol,
+    now,
+    indicatorCacheBySymbol,
+    source,
+    singleScopedSymbol,
+  );
   if (triggered.length > 0) {
     appendAlertHistoryEvents(triggered, source, singleScopedSymbol);
+  }
+  if (triggered.length > 0 || stateTransitionCount > 0) {
     await persistRuntimeState();
   }
 
@@ -3035,6 +3530,8 @@ app.post('/api/alerts/check', async (request, reply) => {
     checkedRuleCount: rules.length,
     triggeredCount: triggered.length,
     suppressedByCooldown,
+    suppressed,
+    stateTransitionCount,
     triggered,
   };
 });
@@ -3059,6 +3556,11 @@ app.post('/api/alerts/check-watchlist', async (request, reply) => {
     return {
       checkedAt: Date.now(),
       checkedSymbols,
+      checkedRuleCount: 0,
+      triggeredCount: 0,
+      suppressedByCooldown: 0,
+      suppressed: [],
+      stateTransitionCount: 0,
       events: [],
     };
   }
@@ -3076,28 +3578,53 @@ app.post('/api/alerts/check-watchlist', async (request, reply) => {
       }),
     );
   } catch (error) {
+    const failedAt = Date.now();
+    const errorMessage = 'Failed to evaluate watchlist alert rules due to quote fetch failure';
+    const { changedRuleCount } = markAlertRulesAsError(rules, failedAt, source, errorMessage);
+    if (changedRuleCount > 0) {
+      await persistRuntimeState();
+    }
     app.log.error({ error, checkedSymbols }, 'Failed to fetch quotes for watchlist alert checks');
-    return reply.code(502).send({ error: 'Failed to evaluate watchlist alert rules due to quote fetch failure' });
+    return reply.code(502).send({ error: errorMessage });
   }
 
   let indicatorCacheBySymbol = new Map<string, AlertIndicatorEvaluationCache>();
   try {
     indicatorCacheBySymbol = await loadIndicatorEvaluationCache(rules);
   } catch (error) {
+    const failedAt = Date.now();
+    const errorMessage = 'Failed to evaluate indicator conditions due to candle fetch failure';
+    const { changedRuleCount } = markAlertRulesAsError(rules, failedAt, source, errorMessage);
+    if (changedRuleCount > 0) {
+      await persistRuntimeState();
+    }
     app.log.error({ error }, 'Failed to fetch candles for watchlist indicator alert checks');
-    return reply.code(502).send({ error: 'Failed to evaluate indicator conditions due to candle fetch failure' });
+    return reply.code(502).send({ error: errorMessage });
   }
 
   const checkedAt = Date.now();
-  const { triggered } = evaluateAlertRules(rules, quoteBySymbol, checkedAt, indicatorCacheBySymbol);
+  const { triggered, suppressedByCooldown, suppressed, stateTransitionCount } = evaluateAlertRules(
+    rules,
+    quoteBySymbol,
+    checkedAt,
+    indicatorCacheBySymbol,
+    source,
+  );
   if (triggered.length > 0) {
     appendAlertHistoryEvents(triggered, source);
+  }
+  if (triggered.length > 0 || stateTransitionCount > 0) {
     await persistRuntimeState();
   }
 
   return {
     checkedAt,
     checkedSymbols,
+    checkedRuleCount: rules.length,
+    triggeredCount: triggered.length,
+    suppressedByCooldown,
+    suppressed,
+    stateTransitionCount,
     events: triggered,
   };
 });
@@ -3115,6 +3642,8 @@ app.get('/api/alerts/history', async (request, reply) => {
   const fromTs = parsed.data.fromTs ?? null;
   const toTs = parsed.data.toTs ?? null;
   const indicatorAwareOnly = parsed.data.indicatorAwareOnly === true;
+  const lifecycleState = parsed.data.state ?? null;
+  const eventType = parsed.data.type ?? 'triggered';
   const { total, events } = getAlertHistory(
     symbols,
     source,
@@ -3122,6 +3651,8 @@ app.get('/api/alerts/history', async (request, reply) => {
     toTs,
     parsed.data.limit,
     indicatorAwareOnly,
+    lifecycleState,
+    eventType,
   );
 
   return {

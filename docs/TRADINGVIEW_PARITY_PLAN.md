@@ -163,6 +163,11 @@ Progress note (2026-02-28):
   - 우측 패널에 알림센터(최근 이벤트, 상태 필터, 실패 원인) 제공.
   - 백엔드/프론트 양쪽에서 상태 전이 테스트 통과.
 
+Progress note (2026-02-28):
+- M5 P0-2 completed (incremental v2): `apps/api`에 alert lifecycle 상태 모델(`active/triggered/cooldown/error`), 상태 전이 메타데이터/마지막 트리거/오류 메타데이터 persistence, cooldown 중복 억제 결과(`suppressedByCooldown` + 상세 suppressed payload), 에러 이벤트(`type=error`) 기록 및 history 상태/타입 필터가 추가됨.
+- `apps/web` 우측 Alerts 탭에 compact 알림센터(상태 카운트, state/type/symbol 필터, 최근 이벤트, 오류 사유 표시)가 통합되었고 기존 규칙 생성/수동 체크/watchlist auto-check 흐름은 유지됨.
+- M5 P0 status: P0-1, P0-2 complete. Remaining P0 item stays unchanged (`P0-3`).
+
 3) 
 - 기능명: 트레이딩 패널 고급 주문 (지정가/스탑 + 브래킷 TP/SL)
 - 사용자 가치: 단순 시장가 중심에서 벗어나 실제 매매 습관에 가까운 리스크 관리(손절/익절) 연습 가능.

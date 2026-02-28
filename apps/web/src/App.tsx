@@ -81,6 +81,14 @@ import {
   type OpsRecoveryEvent,
   type OpsTelemetrySource,
 } from './lib/apiOperations';
+import {
+  filterAlertCenterEvents,
+  normalizeAlertCenterEventType,
+  normalizeAlertLifecycleState,
+  summarizeAlertRuleStates,
+  type AlertCenterEventType,
+  type AlertLifecycleState,
+} from './lib/alertCenter';
 
 type SymbolItem = {
   symbol: string;
@@ -167,6 +175,11 @@ type AlertRule = {
   indicatorConditions?: AlertIndicatorCondition[];
   createdAt: number;
   lastTriggeredAt: number | null;
+  state: AlertLifecycleState;
+  stateUpdatedAt: number;
+  lastStateTransition: AlertStateTransition;
+  lastTrigger?: AlertLastTriggerMetadata;
+  lastError?: AlertLastErrorMetadata;
 };
 
 type AlertCheckEvent = {
@@ -175,14 +188,49 @@ type AlertCheckEvent = {
   metric: AlertMetric;
   operator: AlertOperator;
   threshold: number;
-  currentValue: number;
+  currentValue?: number;
   triggeredAt: number;
   cooldownSec: number;
   indicatorConditions?: AlertIndicatorCondition[];
+  eventType?: AlertCenterEventType;
+  state?: AlertLifecycleState;
+  transition?: AlertStateTransition;
+  errorMessage?: string;
 };
 
 type AlertHistorySource = 'manual' | 'watchlist';
 type AlertHistorySourceFilter = 'all' | AlertHistorySource;
+type AlertHistoryStateFilter = 'all' | AlertLifecycleState;
+type AlertHistoryTypeFilter = 'all' | AlertCenterEventType;
+
+type AlertStateTransitionReason =
+  | 'ruleCreated'
+  | 'conditionMet'
+  | 'conditionNotMet'
+  | 'cooldownSuppressed'
+  | 'evaluationError';
+
+type AlertStateTransition = {
+  from: AlertLifecycleState | null;
+  to: AlertLifecycleState;
+  transitionedAt: number;
+  reason: AlertStateTransitionReason;
+  message?: string;
+};
+
+type AlertLastTriggerMetadata = {
+  triggeredAt: number;
+  currentValue: number;
+  source: AlertHistorySource;
+  sourceSymbol?: string;
+};
+
+type AlertLastErrorMetadata = {
+  failedAt: number;
+  message: string;
+  source: AlertHistorySource;
+  sourceSymbol?: string;
+};
 
 type AlertHistoryEvent = AlertCheckEvent & {
   source?: AlertHistorySource;
@@ -837,6 +885,28 @@ function formatAlertIndicatorSummary(conditions?: AlertIndicatorCondition[]) {
   return conditions.map(formatAlertIndicatorCondition).join(' · ');
 }
 
+function formatAlertState(state?: AlertLifecycleState | null) {
+  const normalized = normalizeAlertLifecycleState(state);
+  if (normalized === 'active') return 'active';
+  if (normalized === 'triggered') return 'triggered';
+  if (normalized === 'cooldown') return 'cooldown';
+  return 'error';
+}
+
+function formatAlertEventType(eventType?: AlertCenterEventType | null) {
+  const normalized = normalizeAlertCenterEventType(eventType);
+  return normalized === 'error' ? 'error' : 'triggered';
+}
+
+function formatAlertTransitionReason(reason?: AlertStateTransitionReason) {
+  if (reason === 'ruleCreated') return 'rule created';
+  if (reason === 'conditionMet') return 'condition met';
+  if (reason === 'conditionNotMet') return 'condition not met';
+  if (reason === 'cooldownSuppressed') return 'cooldown suppression';
+  if (reason === 'evaluationError') return 'evaluation error';
+  return 'state update';
+}
+
 function formatMarketStatusReason(reason: MarketStatusReason) {
   if (reason === 'WEEKEND') return '주말';
   if (reason === 'OUT_OF_SESSION') return '장외 시간';
@@ -1107,6 +1177,8 @@ function App() {
   const [alertHistoryEvents, setAlertHistoryEvents] = useState<AlertHistoryEvent[]>([]);
   const [alertHistorySymbolFilter, setAlertHistorySymbolFilter] = useState('');
   const [alertHistorySourceFilter, setAlertHistorySourceFilter] = useState<AlertHistorySourceFilter>('all');
+  const [alertHistoryStateFilter, setAlertHistoryStateFilter] = useState<AlertHistoryStateFilter>('all');
+  const [alertHistoryTypeFilter, setAlertHistoryTypeFilter] = useState<AlertHistoryTypeFilter>('all');
   const [alertHistoryIndicatorAwareOnly, setAlertHistoryIndicatorAwareOnly] = useState(false);
   const [alertsHistoryLoading, setAlertsHistoryLoading] = useState(false);
   const [alertsHistoryClearing, setAlertsHistoryClearing] = useState(false);
@@ -3108,6 +3180,14 @@ function App() {
       if (alertHistorySourceFilter !== 'all') {
         params.set('source', alertHistorySourceFilter);
       }
+      if (alertHistoryStateFilter !== 'all') {
+        params.set('state', alertHistoryStateFilter);
+      }
+      if (alertHistoryTypeFilter !== 'all') {
+        params.set('type', alertHistoryTypeFilter);
+      } else {
+        params.set('type', 'all');
+      }
       if (alertHistoryIndicatorAwareOnly) {
         params.set('indicatorAwareOnly', 'true');
       }
@@ -3129,7 +3209,15 @@ function App() {
       }
 
       const data = (await response.json()) as { events?: AlertHistoryEvent[] };
-      setAlertHistoryEvents(data.events ?? []);
+      const normalizedEvents = (data.events ?? []).map((eventItem) => {
+        const eventType = normalizeAlertCenterEventType(eventItem.eventType);
+        return {
+          ...eventItem,
+          eventType,
+          state: normalizeAlertLifecycleState(eventItem.state ?? (eventType === 'error' ? 'error' : 'triggered')),
+        } satisfies AlertHistoryEvent;
+      });
+      setAlertHistoryEvents(normalizedEvents);
       return true;
     } catch (error) {
       const normalized =
@@ -3161,7 +3249,14 @@ function App() {
     } finally {
       setAlertsHistoryLoading(false);
     }
-  }, [alertHistoryIndicatorAwareOnly, alertHistorySourceFilter, alertHistorySymbolFilter, reportOpsError]);
+  }, [
+    alertHistoryIndicatorAwareOnly,
+    alertHistorySourceFilter,
+    alertHistoryStateFilter,
+    alertHistorySymbolFilter,
+    alertHistoryTypeFilter,
+    reportOpsError,
+  ]);
 
   useEffect(() => {
     setAlertMessage(null);
@@ -3511,6 +3606,20 @@ function App() {
     ? `${formatMarketStatusReason(marketStatus.reason)} · ${marketStatus.session.text} · ${marketStatus.timezone}`
     : marketStatusError ?? '시장 상태 확인 중...';
   const alertBadgeCount = alertTriggeredEvents.length;
+  const alertRuleStateSummary = useMemo(() => summarizeAlertRuleStates(alertRules), [alertRules]);
+  const alertCenterEvents = useMemo(
+    () =>
+      filterAlertCenterEvents(alertHistoryEvents, {
+        symbolQuery: alertHistorySymbolFilter,
+        state: alertHistoryStateFilter,
+        type: alertHistoryTypeFilter,
+      }),
+    [alertHistoryEvents, alertHistoryStateFilter, alertHistorySymbolFilter, alertHistoryTypeFilter],
+  );
+  const alertErroredRules = useMemo(
+    () => alertRules.filter((rule) => normalizeAlertLifecycleState(rule.state) === 'error'),
+    [alertRules],
+  );
 
   const markRecentAlertEvents = useCallback((events: AlertCheckEvent[]) => {
     if (!events.length) return;
@@ -3609,6 +3718,9 @@ function App() {
         const data = (await response.json()) as {
           checkedAt: number;
           checkedSymbols: string[];
+          checkedRuleCount?: number;
+          triggeredCount?: number;
+          suppressedByCooldown?: number;
           events: AlertCheckEvent[];
         };
         const events = data.events ?? [];
@@ -3616,7 +3728,11 @@ function App() {
         appendWatchlistAlertEvents(events);
         setAlertLastCheckedAt(data.checkedAt ?? Date.now());
         if (source === 'manual') {
-          setAlertMessage(`관심종목 체크 완료: ${data.checkedSymbols.length}개 심볼, ${events.length}개 트리거`);
+          setAlertMessage(
+            `관심종목 체크 완료: ${
+              data.checkedRuleCount ?? data.checkedSymbols.length
+            }개 규칙, ${data.triggeredCount ?? events.length}개 트리거, 쿨다운 억제 ${data.suppressedByCooldown ?? 0}개`,
+          );
         } else if (events.length > 0) {
           setAlertMessage(`자동 체크 트리거 ${events.length}건`);
         }
@@ -6592,6 +6708,50 @@ function App() {
                     </p>
                   ) : null}
 
+                  <div className="alert-center-state-grid">
+                    <div className="alert-state-card">
+                      <span>active</span>
+                      <strong>{alertRuleStateSummary.active}</strong>
+                    </div>
+                    <div className="alert-state-card">
+                      <span>triggered</span>
+                      <strong>{alertRuleStateSummary.triggered}</strong>
+                    </div>
+                    <div className="alert-state-card">
+                      <span>cooldown</span>
+                      <strong>{alertRuleStateSummary.cooldown}</strong>
+                    </div>
+                    <div className="alert-state-card is-error">
+                      <span>error</span>
+                      <strong>{alertRuleStateSummary.error}</strong>
+                    </div>
+                  </div>
+
+                  {alertErroredRules.length > 0 ? (
+                    <div className="alert-error-center">
+                      <div className="alert-triggered-title">실패 원인</div>
+                      <ul className="alert-list">
+                        {alertErroredRules.slice(0, 5).map((rule) => (
+                          <li key={`error-${rule.id}`}>
+                            <div className="alert-rule-row">
+                              <strong>{rule.symbol}</strong>
+                              <span className="alert-state-tag error">error</span>
+                            </div>
+                            <div className="alert-rule-sub">
+                              <span>{rule.lastError?.message ?? '평가 오류'}</span>
+                              <span>
+                                발생:{' '}
+                                {rule.lastError?.failedAt
+                                  ? new Date(rule.lastError.failedAt).toLocaleString('ko-KR')
+                                  : '-'}
+                              </span>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+
                   <div className="alert-rule-filters">
                     <label>
                       <span>규칙 심볼</span>
@@ -6627,9 +6787,12 @@ function App() {
                             <strong>
                               {formatAlertMetric(rule.metric)} {rule.operator} {formatAlertValue(rule.metric, rule.threshold)}
                             </strong>
-                            <button type="button" onClick={() => handleDeleteAlertRule(rule.id)}>
-                              삭제
-                            </button>
+                            <div className="alert-rule-actions">
+                              <span className={`alert-state-tag ${formatAlertState(rule.state)}`}>{formatAlertState(rule.state)}</span>
+                              <button type="button" onClick={() => handleDeleteAlertRule(rule.id)}>
+                                삭제
+                              </button>
+                            </div>
                           </div>
                           <div className="alert-rule-sub">
                             <span>심볼: {rule.symbol}</span>
@@ -6643,6 +6806,11 @@ function App() {
                                 ? new Date(rule.lastTriggeredAt).toLocaleTimeString('ko-KR')
                                 : '-'}
                             </span>
+                            <span>
+                              상태 전이: {formatAlertTransitionReason(rule.lastStateTransition.reason)} ·{' '}
+                              {new Date(rule.lastStateTransition.transitionedAt).toLocaleTimeString('ko-KR')}
+                            </span>
+                            {rule.lastError?.message ? <span>실패 사유: {rule.lastError.message}</span> : null}
                           </div>
                         </li>
                       ))}
@@ -6660,12 +6828,22 @@ function App() {
                                 {formatAlertMetric(eventItem.metric)} {eventItem.operator}{' '}
                                 {formatAlertValue(eventItem.metric, eventItem.threshold)}
                               </strong>
-                              <span>{eventItem.symbol}</span>
+                              <div className="alert-history-meta">
+                                <span className={`alert-state-tag ${formatAlertState(eventItem.state)}`}>
+                                  {formatAlertState(eventItem.state)}
+                                </span>
+                                <span>{eventItem.symbol}</span>
+                              </div>
                             </div>
                             <div className="alert-rule-sub">
-                              <span>현재값: {formatAlertValue(eventItem.metric, eventItem.currentValue)}</span>
+                              {typeof eventItem.currentValue === 'number' ? (
+                                <span>현재값: {formatAlertValue(eventItem.metric, eventItem.currentValue)}</span>
+                              ) : null}
                               {formatAlertIndicatorSummary(eventItem.indicatorConditions) ? (
                                 <span>지표: {formatAlertIndicatorSummary(eventItem.indicatorConditions)}</span>
+                              ) : null}
+                              {eventItem.transition ? (
+                                <span>전이: {formatAlertTransitionReason(eventItem.transition.reason)}</span>
                               ) : null}
                               <span>트리거: {new Date(eventItem.triggeredAt).toLocaleTimeString('ko-KR')}</span>
                             </div>
@@ -6677,7 +6855,7 @@ function App() {
 
                   <div className="alert-history">
                     <div className="alert-history-head">
-                      <div className="alert-triggered-title">최근 알림 히스토리</div>
+                      <div className="alert-triggered-title">알림센터</div>
                       <div className="alert-history-head-actions">
                         <button
                           type="button"
@@ -6716,6 +6894,30 @@ function App() {
                           <option value="watchlist">watchlist</option>
                         </select>
                       </label>
+                      <label>
+                        <span>상태</span>
+                        <select
+                          value={alertHistoryStateFilter}
+                          onChange={(event) => setAlertHistoryStateFilter(event.target.value as AlertHistoryStateFilter)}
+                        >
+                          <option value="all">all</option>
+                          <option value="active">active</option>
+                          <option value="triggered">triggered</option>
+                          <option value="cooldown">cooldown</option>
+                          <option value="error">error</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>타입</span>
+                        <select
+                          value={alertHistoryTypeFilter}
+                          onChange={(event) => setAlertHistoryTypeFilter(event.target.value as AlertHistoryTypeFilter)}
+                        >
+                          <option value="all">all</option>
+                          <option value="triggered">triggered</option>
+                          <option value="error">error</option>
+                        </select>
+                      </label>
                       <div className="alert-history-toggle">
                         <span>조건</span>
                         <label className="alert-inline-toggle">
@@ -6730,11 +6932,11 @@ function App() {
                     </div>
                     {alertsHistoryLoading ? (
                       <p className="alert-empty">히스토리를 불러오는 중...</p>
-                    ) : alertHistoryEvents.length === 0 ? (
-                      <p className="alert-empty">최근 알림 히스토리가 없습니다.</p>
+                    ) : alertCenterEvents.length === 0 ? (
+                      <p className="alert-empty">필터에 맞는 알림 이벤트가 없습니다.</p>
                     ) : (
                       <ul className="alert-list">
-                        {alertHistoryEvents.map((eventItem, index) => (
+                        {alertCenterEvents.map((eventItem, index) => (
                           <li key={`${eventItem.ruleId}-${eventItem.triggeredAt}-${index}`}>
                             <div className="alert-rule-row">
                               <strong>
@@ -6742,6 +6944,12 @@ function App() {
                                 {formatAlertValue(eventItem.metric, eventItem.threshold)}
                               </strong>
                               <div className="alert-history-meta">
+                                <span className={`alert-source-tag ${formatAlertEventType(eventItem.eventType)}`}>
+                                  {formatAlertEventType(eventItem.eventType)}
+                                </span>
+                                <span className={`alert-state-tag ${formatAlertState(eventItem.state)}`}>
+                                  {formatAlertState(eventItem.state)}
+                                </span>
                                 {eventItem.source ? (
                                   <span className={`alert-source-tag ${eventItem.source}`}>{eventItem.source}</span>
                                 ) : null}
@@ -6749,10 +6957,17 @@ function App() {
                               </div>
                             </div>
                             <div className="alert-rule-sub">
-                              <span>현재값: {formatAlertValue(eventItem.metric, eventItem.currentValue)}</span>
+                              {typeof eventItem.currentValue === 'number' ? (
+                                <span>현재값: {formatAlertValue(eventItem.metric, eventItem.currentValue)}</span>
+                              ) : null}
                               {formatAlertIndicatorSummary(eventItem.indicatorConditions) ? (
                                 <span>지표: {formatAlertIndicatorSummary(eventItem.indicatorConditions)}</span>
                               ) : null}
+                              {eventItem.errorMessage ? <span>실패 사유: {eventItem.errorMessage}</span> : null}
+                              {eventItem.transition ? (
+                                <span>전이: {formatAlertTransitionReason(eventItem.transition.reason)}</span>
+                              ) : null}
+                              {eventItem.sourceSymbol ? <span>요청 심볼: {eventItem.sourceSymbol}</span> : null}
                               <span>시간: {new Date(eventItem.triggeredAt).toLocaleString('ko-KR')}</span>
                             </div>
                           </li>

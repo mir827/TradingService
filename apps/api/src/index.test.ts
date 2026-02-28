@@ -1044,6 +1044,13 @@ describe('api alerts rules', () => {
         threshold: number;
         cooldownSec: number;
         lastTriggeredAt: number | null;
+        state: 'active' | 'triggered' | 'cooldown' | 'error';
+        stateUpdatedAt: number;
+        lastStateTransition: {
+          from: 'active' | 'triggered' | 'cooldown' | 'error' | null;
+          to: 'active' | 'triggered' | 'cooldown' | 'error';
+          reason: string;
+        };
       };
     };
 
@@ -1053,6 +1060,13 @@ describe('api alerts rules', () => {
     expect(created.rule.threshold).toBe(100000);
     expect(created.rule.cooldownSec).toBe(120);
     expect(created.rule.lastTriggeredAt).toBeNull();
+    expect(created.rule.state).toBe('active');
+    expect(typeof created.rule.stateUpdatedAt).toBe('number');
+    expect(created.rule.lastStateTransition).toMatchObject({
+      from: null,
+      to: 'active',
+      reason: 'ruleCreated',
+    });
 
     const listAfter = await app.inject({
       method: 'GET',
@@ -1162,6 +1176,317 @@ describe('api alerts rules', () => {
     expect(secondBody.suppressedByCooldown).toBe(1);
     expect(secondBody.triggered).toHaveLength(1);
     expect(secondBody.triggered[0].metric).toBe('changePercent');
+  });
+
+  it('tracks lifecycle transitions across trigger, cooldown, and active recovery', async () => {
+    const nowSpy = vi.spyOn(Date, 'now');
+    nowSpy.mockReturnValue(1_750_060_000_000);
+
+    const createRule = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'BTCUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 100,
+        cooldownSec: 120,
+      },
+    });
+
+    expect(createRule.statusCode).toBe(201);
+
+    const firstCheck = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check',
+      payload: {
+        symbol: 'BTCUSDT',
+        values: {
+          symbol: 'BTCUSDT',
+          lastPrice: 110,
+          changePercent: 0.2,
+        },
+      },
+    });
+
+    expect(firstCheck.statusCode).toBe(200);
+    const firstBody = firstCheck.json() as {
+      evaluatedAt: number;
+      triggeredCount: number;
+      suppressedByCooldown: number;
+      suppressed: Array<{ state: 'cooldown' }>;
+      triggered: Array<{
+        state?: 'active' | 'triggered' | 'cooldown' | 'error';
+        transition?: { from: string | null; to: string; reason: string };
+      }>;
+    };
+    expect(firstBody.triggeredCount).toBe(1);
+    expect(firstBody.suppressedByCooldown).toBe(0);
+    expect(firstBody.suppressed).toHaveLength(0);
+    expect(firstBody.triggered[0]).toMatchObject({
+      state: 'triggered',
+      transition: {
+        from: 'active',
+        to: 'triggered',
+        reason: 'conditionMet',
+      },
+    });
+
+    const firstList = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/rules?symbol=BTCUSDT',
+    });
+    expect(firstList.statusCode).toBe(200);
+    expect(firstList.json()).toMatchObject({
+      rules: [
+        {
+          state: 'triggered',
+          lastTrigger: {
+            triggeredAt: firstBody.evaluatedAt,
+            currentValue: 110,
+            source: 'manual',
+            sourceSymbol: 'BTCUSDT',
+          },
+          lastStateTransition: {
+            from: 'active',
+            to: 'triggered',
+            reason: 'conditionMet',
+          },
+        },
+      ],
+    });
+
+    nowSpy.mockReturnValue(1_750_060_030_000);
+    const secondCheck = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check',
+      payload: {
+        symbol: 'BTCUSDT',
+        values: {
+          symbol: 'BTCUSDT',
+          lastPrice: 112,
+          changePercent: 0.3,
+        },
+      },
+    });
+
+    expect(secondCheck.statusCode).toBe(200);
+    const secondBody = secondCheck.json() as {
+      triggeredCount: number;
+      suppressedByCooldown: number;
+      suppressed: Array<{ state: 'cooldown'; transition?: { reason: string } }>;
+    };
+    expect(secondBody.triggeredCount).toBe(0);
+    expect(secondBody.suppressedByCooldown).toBe(1);
+    expect(secondBody.suppressed).toHaveLength(1);
+    expect(secondBody.suppressed[0]).toMatchObject({
+      state: 'cooldown',
+      transition: {
+        reason: 'cooldownSuppressed',
+      },
+    });
+
+    const secondList = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/rules?symbol=BTCUSDT',
+    });
+    expect(secondList.statusCode).toBe(200);
+    expect(secondList.json()).toMatchObject({
+      rules: [
+        {
+          state: 'cooldown',
+          lastStateTransition: {
+            to: 'cooldown',
+            reason: 'cooldownSuppressed',
+          },
+        },
+      ],
+    });
+
+    nowSpy.mockReturnValue(1_750_060_045_000);
+    const recoveryCheck = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check',
+      payload: {
+        symbol: 'BTCUSDT',
+        values: {
+          symbol: 'BTCUSDT',
+          lastPrice: 95,
+          changePercent: -0.1,
+        },
+      },
+    });
+
+    expect(recoveryCheck.statusCode).toBe(200);
+    expect(recoveryCheck.json()).toMatchObject({
+      triggeredCount: 0,
+      suppressedByCooldown: 0,
+    });
+
+    const recoveredList = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/rules?symbol=BTCUSDT',
+    });
+    expect(recoveredList.statusCode).toBe(200);
+    expect(recoveredList.json()).toMatchObject({
+      rules: [
+        {
+          state: 'active',
+          lastStateTransition: {
+            from: 'cooldown',
+            to: 'active',
+            reason: 'conditionNotMet',
+          },
+        },
+      ],
+    });
+
+    const lifecycleHistory = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?symbol=BTCUSDT&type=triggered&state=triggered&limit=10',
+    });
+    expect(lifecycleHistory.statusCode).toBe(200);
+    expect(lifecycleHistory.json()).toMatchObject({
+      total: 1,
+      events: [
+        {
+          eventType: 'triggered',
+          state: 'triggered',
+          transition: {
+            to: 'triggered',
+            reason: 'conditionMet',
+          },
+        },
+      ],
+    });
+  });
+
+  it('moves rules to error on evaluation failure and recovers on next successful check', async () => {
+    const createRule = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'BTCUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 150,
+        cooldownSec: 60,
+      },
+    });
+
+    expect(createRule.statusCode).toBe(201);
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const rawUrl =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const url = new URL(rawUrl);
+      if (url.hostname === 'api.binance.com' && url.pathname === '/api/v3/ticker/24hr') {
+        return jsonResponse({ error: 'temporary failure' }, 503);
+      }
+      return jsonResponse({ error: 'unexpected request' }, 404);
+    });
+
+    const failedCheck = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check',
+      payload: {
+        symbol: 'BTCUSDT',
+      },
+    });
+
+    expect(failedCheck.statusCode).toBe(502);
+    expect(failedCheck.json()).toMatchObject({
+      error: 'Failed to evaluate alert rules due to quote fetch failure',
+    });
+
+    const erroredRules = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/rules?symbol=BTCUSDT',
+    });
+    expect(erroredRules.statusCode).toBe(200);
+    expect(erroredRules.json()).toMatchObject({
+      rules: [
+        {
+          state: 'error',
+          lastStateTransition: {
+            to: 'error',
+            reason: 'evaluationError',
+          },
+          lastError: {
+            message: 'Failed to evaluate alert rules due to quote fetch failure',
+            source: 'manual',
+            sourceSymbol: 'BTCUSDT',
+          },
+        },
+      ],
+    });
+
+    const defaultHistory = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?symbol=BTCUSDT&limit=10',
+    });
+    expect(defaultHistory.statusCode).toBe(200);
+    expect(defaultHistory.json()).toMatchObject({
+      total: 0,
+      events: [],
+    });
+
+    const errorHistory = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?symbol=BTCUSDT&type=error&state=error&limit=10',
+    });
+    expect(errorHistory.statusCode).toBe(200);
+    expect(errorHistory.json()).toMatchObject({
+      total: 1,
+      events: [
+        {
+          eventType: 'error',
+          state: 'error',
+          errorMessage: 'Failed to evaluate alert rules due to quote fetch failure',
+          source: 'manual',
+          sourceSymbol: 'BTCUSDT',
+        },
+      ],
+    });
+
+    const recoveredCheck = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check',
+      payload: {
+        symbol: 'BTCUSDT',
+        values: {
+          symbol: 'BTCUSDT',
+          lastPrice: 120,
+          changePercent: 0.5,
+        },
+      },
+    });
+
+    expect(recoveredCheck.statusCode).toBe(200);
+
+    const recoveredRules = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/rules?symbol=BTCUSDT',
+    });
+    expect(recoveredRules.statusCode).toBe(200);
+    expect(recoveredRules.json()).toMatchObject({
+      rules: [
+        {
+          state: 'active',
+          lastStateTransition: {
+            from: 'error',
+            to: 'active',
+            reason: 'conditionNotMet',
+          },
+        },
+      ],
+    });
+    expect((recoveredRules.json() as { rules: Array<{ lastError?: unknown }> }).rules[0].lastError).toBeUndefined();
+    expect(fetchSpy).toHaveBeenCalled();
   });
 
   it('persists alert cooldown and lastTriggeredAt across app recreation', async () => {
@@ -1790,6 +2115,7 @@ describe('api alerts watchlist checks', () => {
     });
 
     expect(createRule.statusCode).toBe(201);
+    const createdRuleId = (createRule.json() as { rule: { id: string } }).rule.id;
 
     const firstCheck = await app.inject({
       method: 'POST',
@@ -1802,9 +2128,11 @@ describe('api alerts watchlist checks', () => {
     expect(firstCheck.statusCode).toBe(200);
     const firstBody = firstCheck.json() as {
       checkedAt: number;
+      suppressedByCooldown: number;
       events: Array<{ ruleId: string; triggeredAt: number }>;
     };
     expect(firstBody.events).toHaveLength(1);
+    expect(firstBody.suppressedByCooldown).toBe(0);
 
     nowSpy.mockReturnValue(1_750_000_030_000);
 
@@ -1819,9 +2147,11 @@ describe('api alerts watchlist checks', () => {
     expect(secondCheck.statusCode).toBe(200);
     const secondBody = secondCheck.json() as {
       checkedAt: number;
+      suppressedByCooldown: number;
       events: Array<{ ruleId: string; triggeredAt: number }>;
     };
     expect(secondBody.events).toHaveLength(0);
+    expect(secondBody.suppressedByCooldown).toBe(1);
 
     const listedRules = await app.inject({
       method: 'GET',
@@ -1831,6 +2161,16 @@ describe('api alerts watchlist checks', () => {
     expect(listedRules.statusCode).toBe(200);
     const rule = (listedRules.json() as { rules: Array<{ lastTriggeredAt: number | null }> }).rules[0];
     expect(rule.lastTriggeredAt).toBe(firstBody.checkedAt);
+
+    const history = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?symbol=SOLUSDT&limit=10',
+    });
+    expect(history.statusCode).toBe(200);
+    expect(history.json()).toMatchObject({
+      total: 1,
+      events: [{ ruleId: createdRuleId }],
+    });
     expect(fetchSpy).toHaveBeenCalled();
   });
 });
@@ -2272,7 +2612,7 @@ describe('api alerts backward compatibility', () => {
     });
 
     expect(listedRules.statusCode).toBe(200);
-    expect((listedRules.json() as { rules: Array<{ id: string; indicatorConditions?: unknown[] }> }).rules).toEqual([
+    expect((listedRules.json() as { rules: Array<{ id: string; indicatorConditions?: unknown[] }> }).rules).toMatchObject([
       {
         id: 'legacy-rule-1',
         symbol: 'BTCUSDT',
@@ -2282,6 +2622,11 @@ describe('api alerts backward compatibility', () => {
         cooldownSec: 0,
         createdAt: 1_750_030_000_000,
         lastTriggeredAt: null,
+        state: 'active',
+        lastStateTransition: {
+          to: 'active',
+          reason: 'ruleCreated',
+        },
       },
     ]);
 

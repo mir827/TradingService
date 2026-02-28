@@ -1345,6 +1345,51 @@ select {
   color: #9fc4ff;
 }
 
+.alert-center-state-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.alert-state-card {
+  border: 1px solid #2b3b4f;
+  border-radius: 8px;
+  background: #132133;
+  padding: 7px 8px;
+  display: grid;
+  gap: 3px;
+}
+
+.alert-state-card span {
+  font-size: 10px;
+  color: #8ea6c5;
+  text-transform: lowercase;
+}
+
+.alert-state-card strong {
+  font-size: 16px;
+  color: #d3e8ff;
+  line-height: 1;
+}
+
+.alert-state-card.is-error {
+  border-color: #65353b;
+  background: #2a1c20;
+}
+
+.alert-state-card.is-error span {
+  color: #efb9c1;
+}
+
+.alert-state-card.is-error strong {
+  color: #ffcfd5;
+}
+
+.alert-error-center {
+  display: grid;
+  gap: 6px;
+}
+
 .workflow-recovery-banner {
   border: 1px solid #6b4634;
   background: #2d2119;
@@ -1410,6 +1455,12 @@ select {
   gap: 8px;
 }
 
+.alert-rule-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .alert-rule-row button {
   border: 1px solid #4a2b2b;
   background: #2f1f1f;
@@ -1473,7 +1524,7 @@ select {
 
 .alert-history-controls {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 120px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.4fr) repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -1536,6 +1587,52 @@ select {
   border-color: #4f6031;
   background: #1e2b17;
   color: #c9ef98;
+}
+
+.alert-source-tag.triggered {
+  border-color: #2f576f;
+  background: #152737;
+  color: #9fd4f5;
+}
+
+.alert-source-tag.error {
+  border-color: #6a353b;
+  background: #2b1a1d;
+  color: #ffb0b8;
+}
+
+.alert-state-tag {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 10px;
+  line-height: 1.4;
+  text-transform: lowercase;
+  white-space: nowrap;
+}
+
+.alert-state-tag.active {
+  border-color: #43566f;
+  background: #192435;
+  color: #afc5dd;
+}
+
+.alert-state-tag.triggered {
+  border-color: #396e58;
+  background: #173127;
+  color: #b8f0d2;
+}
+
+.alert-state-tag.cooldown {
+  border-color: #655535;
+  background: #2a2418;
+  color: #f2da99;
+}
+
+.alert-state-tag.error {
+  border-color: #6a353b;
+  background: #2b1a1d;
+  color: #ffb0b8;
 }
 
 .tv-bottom-panel {
@@ -1996,6 +2093,10 @@ select {
 
   .alert-form-row {
     grid-template-columns: 1fr;
+  }
+
+  .alert-center-state-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .alert-rule-filters {
