@@ -185,7 +185,8 @@ Progress note (2026-02-28):
 - `apps/web` `트레이딩 패널`에 주문유형(시장가/지정가/스탑) 입력, 조건부 가격 필드, 브래킷 TP/SL 토글/입력, 주문 링크/상태 표시가 추가되었고 기존 로딩/에러/복구 UX 흐름은 유지됨.
 - M5 P0 status: complete (P0-1, P0-2, P0-3).
 - M5 progress note (2026-02-28): P1 started, P1-4(드로잉 오브젝트 패널) + P1-5(비교 오버레이 확장) completed.
-- M5 remaining items: P1-6, P2-7, P2-8.
+- M5 progress note (2026-02-28): P1-6(백테스트 현실화 옵션) completed.
+- M5 remaining items: P2-7, P2-8.
 
 ### P1 (분석 생산성/활용도 확장)
 
@@ -229,6 +230,11 @@ Progress note (2026-02-28):
   - 고정 수량/자본 비율 기반 포지션 사이징 선택 가능.
   - 결과 화면에서 gross vs net 성과를 분리 표시.
   - 동일 입력 재실행 시 결정론적 결과 보장 테스트 통과.
+
+Progress note (2026-02-28):
+- M5 P1-6 completed (incremental): `apps/api` 전략 백테스트 입력 스키마가 fee(`bps/%`) + slippage(`tick/%`) + 포지션 사이징(`fixed-percent`/`fixed-qty`)을 지원하도록 확장되었고, 기존 `feeBps + fixed-percent` payload는 그대로 호환됨.
+- 백테스트 엔진은 진입/청산 시 수수료/슬리피지를 일관 적용하며 요약/체결 결과에 gross vs net 지표(총손익/순손익, 비용 합계, 수수료/슬리피지 분리)를 additive 필드로 반환함.
+- `apps/web` 전략 테스터에 fee/slippage/sizing 입력 컨트롤, localStorage 마이그레이션-safe 기본값 처리, gross/net 구분 요약 카드가 반영되었고 동일 입력 재실행 결정론성 테스트가 보강됨.
 
 ### P2 (완성도/편의성 보강)
 

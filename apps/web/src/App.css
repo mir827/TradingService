@@ -2047,7 +2047,8 @@ select {
   color: #8d95a5;
 }
 
-.strategy-form input {
+.strategy-form input,
+.strategy-form select {
   border: 1px solid #2b2f3a;
   background: #1e222d;
   color: #d1d4dc;
@@ -2091,7 +2092,7 @@ select {
 
 .strategy-summary-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 

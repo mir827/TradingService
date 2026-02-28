@@ -325,13 +325,22 @@ type AlertAutoCheckPrefs = {
   intervalSec: AlertAutoCheckIntervalSec;
 };
 
+type StrategyFeeUnit = 'bps' | 'percent';
+type StrategySlippageMode = 'tick' | 'percent';
+type StrategyPositionSizeMode = 'fixed-percent' | 'fixed-qty';
+
 type StrategyTesterFormState = {
   symbol: string;
   interval: string;
   limit: string;
   initialCapital: string;
-  feeBps: string;
+  feeUnit: StrategyFeeUnit;
+  feeValue: string;
+  slippageMode: StrategySlippageMode;
+  slippageValue: string;
+  positionSizeMode: StrategyPositionSizeMode;
   fixedPercent: string;
+  fixedQty: string;
   fastPeriod: string;
   slowPeriod: string;
 };
@@ -339,8 +348,13 @@ type StrategyTesterFormState = {
 type StrategyFormField = keyof StrategyTesterFormState;
 
 type StrategyBacktestSummary = {
+  grossPnl?: number;
   netPnl: number;
+  grossReturnPct?: number;
   returnPct: number;
+  totalFees?: number;
+  totalSlippage?: number;
+  totalCosts?: number;
   maxDrawdownPct: number;
   winRate: number;
   tradeCount: number;
@@ -358,6 +372,12 @@ type StrategyBacktestTrade = {
   qty: number;
   entryPrice: number;
   exitPrice: number;
+  signalEntryPrice?: number;
+  signalExitPrice?: number;
+  grossPnl?: number;
+  netPnl?: number;
+  feePaid?: number;
+  slippageCost?: number;
   pnl: number;
 };
 
@@ -659,6 +679,11 @@ const DEFAULT_WATCHLIST_NAME = 'default';
 const ALERT_EVENT_DEDUP_WINDOW_MS = 10_000;
 const ALERT_EVENT_MAX_ITEMS = 20;
 const STRATEGY_RECENT_TRADES_LIMIT = 8;
+const STRATEGY_MAX_FEE_BPS = 2000;
+const STRATEGY_MAX_FEE_PERCENT = STRATEGY_MAX_FEE_BPS / 100;
+const STRATEGY_MAX_SLIPPAGE_TICK = 1_000_000;
+const STRATEGY_MAX_SLIPPAGE_PERCENT = 10;
+const STRATEGY_MAX_FIXED_QTY = 1_000_000_000;
 const HOVER_TOOLTIP_WIDTH = 232;
 const HOVER_TOOLTIP_HEIGHT = 174;
 const HOVER_TOOLTIP_MARGIN = 14;
@@ -671,8 +696,13 @@ const DEFAULT_STRATEGY_TESTER_FORM: StrategyTesterFormState = {
   interval: '60',
   limit: '500',
   initialCapital: '10000',
-  feeBps: '10',
+  feeUnit: 'bps',
+  feeValue: '10',
+  slippageMode: 'percent',
+  slippageValue: '0',
+  positionSizeMode: 'fixed-percent',
   fixedPercent: '100',
+  fixedQty: '1',
   fastPeriod: '12',
   slowPeriod: '26',
 };
@@ -887,15 +917,25 @@ function getStoredStrategyTesterForm(): StrategyTesterFormState {
     const raw = window.localStorage.getItem(STRATEGY_TESTER_STORAGE_KEY);
     if (!raw) return { ...DEFAULT_STRATEGY_TESTER_FORM };
 
-    const parsed = JSON.parse(raw) as Partial<Record<StrategyFormField, unknown>>;
+    const parsed = JSON.parse(raw) as Partial<Record<string, unknown>>;
+    const storedFeeUnit = parsed.feeUnit === 'percent' ? 'percent' : 'bps';
+    const storedSlippageMode = parsed.slippageMode === 'tick' ? 'tick' : 'percent';
+    const storedPositionSizeMode = parsed.positionSizeMode === 'fixed-qty' ? 'fixed-qty' : 'fixed-percent';
+    const legacyFeeBps = parsed.feeBps;
+    const feeFallback = toStoredStrategyField(legacyFeeBps, DEFAULT_STRATEGY_TESTER_FORM.feeValue);
 
     return {
       symbol: toStoredStrategyField(parsed.symbol, DEFAULT_STRATEGY_TESTER_FORM.symbol).toUpperCase(),
       interval: toStoredStrategyField(parsed.interval, DEFAULT_STRATEGY_TESTER_FORM.interval).toUpperCase(),
       limit: toStoredStrategyField(parsed.limit, DEFAULT_STRATEGY_TESTER_FORM.limit),
       initialCapital: toStoredStrategyField(parsed.initialCapital, DEFAULT_STRATEGY_TESTER_FORM.initialCapital),
-      feeBps: toStoredStrategyField(parsed.feeBps, DEFAULT_STRATEGY_TESTER_FORM.feeBps),
+      feeUnit: storedFeeUnit,
+      feeValue: toStoredStrategyField(parsed.feeValue, feeFallback),
+      slippageMode: storedSlippageMode,
+      slippageValue: toStoredStrategyField(parsed.slippageValue, DEFAULT_STRATEGY_TESTER_FORM.slippageValue),
+      positionSizeMode: storedPositionSizeMode,
       fixedPercent: toStoredStrategyField(parsed.fixedPercent, DEFAULT_STRATEGY_TESTER_FORM.fixedPercent),
+      fixedQty: toStoredStrategyField(parsed.fixedQty, DEFAULT_STRATEGY_TESTER_FORM.fixedQty),
       fastPeriod: toStoredStrategyField(parsed.fastPeriod, DEFAULT_STRATEGY_TESTER_FORM.fastPeriod),
       slowPeriod: toStoredStrategyField(parsed.slowPeriod, DEFAULT_STRATEGY_TESTER_FORM.slowPeriod),
     };
@@ -4378,10 +4418,40 @@ function App() {
 
   const updateStrategyField = useCallback((field: StrategyFormField, value: string) => {
     setStrategyError(null);
-    setStrategyForm((previous) => ({
-      ...previous,
-      [field]: field === 'symbol' || field === 'interval' ? value.toUpperCase() : value,
-    }));
+    setStrategyForm((previous) => {
+      if (field === 'symbol' || field === 'interval') {
+        return {
+          ...previous,
+          [field]: value.toUpperCase(),
+        };
+      }
+
+      if (field === 'feeUnit') {
+        return {
+          ...previous,
+          feeUnit: value === 'percent' ? 'percent' : 'bps',
+        };
+      }
+
+      if (field === 'slippageMode') {
+        return {
+          ...previous,
+          slippageMode: value === 'tick' ? 'tick' : 'percent',
+        };
+      }
+
+      if (field === 'positionSizeMode') {
+        return {
+          ...previous,
+          positionSizeMode: value === 'fixed-qty' ? 'fixed-qty' : 'fixed-percent',
+        };
+      }
+
+      return {
+        ...previous,
+        [field]: value,
+      };
+    });
   }, []);
 
   const applyCurrentChartToStrategy = useCallback(() => {
@@ -4398,8 +4468,13 @@ function App() {
     const interval = strategyForm.interval.trim().toUpperCase();
     const limit = Number.parseInt(strategyForm.limit, 10);
     const initialCapital = Number(strategyForm.initialCapital);
-    const feeBps = Number(strategyForm.feeBps);
+    const feeUnit = strategyForm.feeUnit;
+    const feeValue = Number(strategyForm.feeValue);
+    const slippageMode = strategyForm.slippageMode;
+    const slippageValue = Number(strategyForm.slippageValue);
+    const positionSizeMode = strategyForm.positionSizeMode;
     const fixedPercent = Number(strategyForm.fixedPercent);
+    const fixedQty = Number(strategyForm.fixedQty);
     const fastPeriod = Number.parseInt(strategyForm.fastPeriod, 10);
     const slowPeriod = Number.parseInt(strategyForm.slowPeriod, 10);
     setStrategyRecovery(null);
@@ -4416,12 +4491,42 @@ function App() {
       setStrategyError('초기 자본은 0보다 커야 합니다.');
       return false;
     }
-    if (!Number.isFinite(feeBps) || feeBps < 0 || feeBps > 2000) {
-      setStrategyError('수수료(bps)는 0~2000 범위여야 합니다.');
+    if (!Number.isFinite(feeValue) || feeValue < 0) {
+      setStrategyError('수수료는 0 이상 숫자여야 합니다.');
       return false;
     }
-    if (!Number.isFinite(fixedPercent) || fixedPercent <= 0 || fixedPercent > 100) {
+    if (
+      (feeUnit === 'bps' && feeValue > STRATEGY_MAX_FEE_BPS) ||
+      (feeUnit === 'percent' && feeValue > STRATEGY_MAX_FEE_PERCENT)
+    ) {
+      setStrategyError(
+        feeUnit === 'bps'
+          ? `수수료(bps)는 0~${STRATEGY_MAX_FEE_BPS} 범위여야 합니다.`
+          : `수수료(%)는 0~${STRATEGY_MAX_FEE_PERCENT}% 범위여야 합니다.`,
+      );
+      return false;
+    }
+    if (!Number.isFinite(slippageValue) || slippageValue < 0) {
+      setStrategyError('슬리피지는 0 이상 숫자여야 합니다.');
+      return false;
+    }
+    if (
+      (slippageMode === 'tick' && slippageValue > STRATEGY_MAX_SLIPPAGE_TICK) ||
+      (slippageMode === 'percent' && slippageValue > STRATEGY_MAX_SLIPPAGE_PERCENT)
+    ) {
+      setStrategyError(
+        slippageMode === 'tick'
+          ? `슬리피지(tick)는 0~${STRATEGY_MAX_SLIPPAGE_TICK} 범위여야 합니다.`
+          : `슬리피지(%)는 0~${STRATEGY_MAX_SLIPPAGE_PERCENT}% 범위여야 합니다.`,
+      );
+      return false;
+    }
+    if (positionSizeMode === 'fixed-percent' && (!Number.isFinite(fixedPercent) || fixedPercent <= 0 || fixedPercent > 100)) {
       setStrategyError('포지션 크기(%)는 0 초과 100 이하로 입력해주세요.');
+      return false;
+    }
+    if (positionSizeMode === 'fixed-qty' && (!Number.isFinite(fixedQty) || fixedQty <= 0 || fixedQty > STRATEGY_MAX_FIXED_QTY)) {
+      setStrategyError(`고정 수량은 0 초과 ${STRATEGY_MAX_FIXED_QTY.toLocaleString('en-US')} 이하로 입력해주세요.`);
       return false;
     }
     if (!Number.isInteger(fastPeriod) || fastPeriod < 2 || fastPeriod > 300) {
@@ -4442,6 +4547,21 @@ function App() {
     setStrategyRecovery(null);
 
     try {
+      const paramsPayload = {
+        initialCapital,
+        fee: {
+          unit: feeUnit,
+          value: feeValue,
+        },
+        slippage: {
+          mode: slippageMode,
+          value: slippageValue,
+        },
+        positionSizeMode,
+        ...(positionSizeMode === 'fixed-qty' ? { fixedQty } : { fixedPercent }),
+        ...(feeUnit === 'bps' ? { feeBps: feeValue } : {}),
+      };
+
       const response = await fetch(`${apiBase}/api/strategy/backtest`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4449,12 +4569,7 @@ function App() {
           symbol,
           interval,
           limit,
-          params: {
-            initialCapital,
-            feeBps,
-            positionSizeMode: 'fixed-percent',
-            fixedPercent,
-          },
+          params: paramsPayload,
           strategy: {
             type: 'maCrossover',
             fastPeriod,
@@ -8178,25 +8293,71 @@ function App() {
                     />
                   </label>
                   <label>
-                    <span>수수료 (bps)</span>
+                    <span>수수료 단위</span>
+                    <select
+                      value={strategyForm.feeUnit}
+                      onChange={(event) => updateStrategyField('feeUnit', event.target.value)}
+                    >
+                      <option value="bps">bps</option>
+                      <option value="percent">%</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>수수료 값</span>
                     <input
                       type="number"
                       min={0}
-                      max={2000}
-                      step="0.1"
-                      value={strategyForm.feeBps}
-                      onChange={(event) => updateStrategyField('feeBps', event.target.value)}
+                      max={strategyForm.feeUnit === 'bps' ? STRATEGY_MAX_FEE_BPS : STRATEGY_MAX_FEE_PERCENT}
+                      step={strategyForm.feeUnit === 'bps' ? '0.1' : '0.01'}
+                      value={strategyForm.feeValue}
+                      onChange={(event) => updateStrategyField('feeValue', event.target.value)}
                     />
                   </label>
                   <label>
-                    <span>포지션 크기 (%)</span>
+                    <span>슬리피지 단위</span>
+                    <select
+                      value={strategyForm.slippageMode}
+                      onChange={(event) => updateStrategyField('slippageMode', event.target.value)}
+                    >
+                      <option value="percent">%</option>
+                      <option value="tick">tick</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>슬리피지 값</span>
                     <input
                       type="number"
-                      min={0.1}
-                      max={100}
-                      step="0.1"
-                      value={strategyForm.fixedPercent}
-                      onChange={(event) => updateStrategyField('fixedPercent', event.target.value)}
+                      min={0}
+                      max={strategyForm.slippageMode === 'tick' ? STRATEGY_MAX_SLIPPAGE_TICK : STRATEGY_MAX_SLIPPAGE_PERCENT}
+                      step={strategyForm.slippageMode === 'tick' ? '0.01' : '0.001'}
+                      value={strategyForm.slippageValue}
+                      onChange={(event) => updateStrategyField('slippageValue', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>포지션 사이징</span>
+                    <select
+                      value={strategyForm.positionSizeMode}
+                      onChange={(event) => updateStrategyField('positionSizeMode', event.target.value)}
+                    >
+                      <option value="fixed-percent">자본 비율(%)</option>
+                      <option value="fixed-qty">고정 수량</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>{strategyForm.positionSizeMode === 'fixed-qty' ? '고정 수량' : '포지션 크기 (%)'}</span>
+                    <input
+                      type="number"
+                      min={strategyForm.positionSizeMode === 'fixed-qty' ? 0.000001 : 0.1}
+                      max={strategyForm.positionSizeMode === 'fixed-qty' ? STRATEGY_MAX_FIXED_QTY : 100}
+                      step={strategyForm.positionSizeMode === 'fixed-qty' ? '0.000001' : '0.1'}
+                      value={strategyForm.positionSizeMode === 'fixed-qty' ? strategyForm.fixedQty : strategyForm.fixedPercent}
+                      onChange={(event) =>
+                        updateStrategyField(
+                          strategyForm.positionSizeMode === 'fixed-qty' ? 'fixedQty' : 'fixedPercent',
+                          event.target.value,
+                        )
+                      }
                     />
                   </label>
                   <label>
@@ -8247,15 +8408,44 @@ function App() {
                 <div className="strategy-results">
                   <div className="strategy-summary-grid">
                     <div className="strategy-summary-card">
-                      <span>순손익</span>
+                      <span>순손익 (Net)</span>
                       <strong className={strategyResult.summary.netPnl >= 0 ? 'up' : 'down'}>
                         {formatSignedCurrency(strategyResult.summary.netPnl)}
                       </strong>
                     </div>
                     <div className="strategy-summary-card">
-                      <span>수익률</span>
+                      <span>총손익 (Gross)</span>
+                      <strong
+                        className={
+                          (strategyResult.summary.grossPnl ?? strategyResult.summary.netPnl) >= 0 ? 'up' : 'down'
+                        }
+                      >
+                        {formatSignedCurrency(strategyResult.summary.grossPnl ?? strategyResult.summary.netPnl)}
+                      </strong>
+                    </div>
+                    <div className="strategy-summary-card">
+                      <span>순수익률 (Net)</span>
                       <strong className={strategyResult.summary.returnPct >= 0 ? 'up' : 'down'}>
                         {formatSigned(strategyResult.summary.returnPct, 2)}%
+                      </strong>
+                    </div>
+                    <div className="strategy-summary-card">
+                      <span>총수익률 (Gross)</span>
+                      <strong
+                        className={
+                          (strategyResult.summary.grossReturnPct ?? strategyResult.summary.returnPct) >= 0 ? 'up' : 'down'
+                        }
+                      >
+                        {formatSigned(strategyResult.summary.grossReturnPct ?? strategyResult.summary.returnPct, 2)}%
+                      </strong>
+                    </div>
+                    <div className="strategy-summary-card">
+                      <span>총비용 (Fee+Slippage)</span>
+                      <strong>
+                        {formatPrice(
+                          strategyResult.summary.totalCosts ??
+                            (strategyResult.summary.totalFees ?? 0) + (strategyResult.summary.totalSlippage ?? 0),
+                        )}
                       </strong>
                     </div>
                     <div className="strategy-summary-card">

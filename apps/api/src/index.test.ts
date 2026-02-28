@@ -1645,7 +1645,7 @@ describe('api paper trading workflows', () => {
 });
 
 describe('api strategy backtest', () => {
-  it('rejects invalid backtest payloads', async () => {
+  it('rejects invalid backtest payloads and out-of-range option values', async () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/strategy/backtest',
@@ -1671,10 +1671,63 @@ describe('api strategy backtest', () => {
     expect(response.json()).toMatchObject({
       error: 'Invalid body',
     });
+
+    const optionRangeResponse = await app.inject({
+      method: 'POST',
+      url: '/api/strategy/backtest',
+      payload: {
+        symbol: 'BTCUSDT',
+        interval: '60',
+        limit: 200,
+        params: {
+          initialCapital: 10_000,
+          fee: {
+            unit: 'percent',
+            value: 25,
+          },
+          slippage: {
+            mode: 'percent',
+            value: 20,
+          },
+          positionSizeMode: 'fixed-qty',
+        },
+        strategy: {
+          type: 'maCrossover',
+          fastPeriod: 12,
+          slowPeriod: 26,
+        },
+      },
+    });
+
+    expect(optionRangeResponse.statusCode).toBe(400);
+    const optionRangeBody = optionRangeResponse.json() as {
+      error: string;
+      detail?: {
+        params?: {
+          fee?: {
+            value?: {
+              _errors?: string[];
+            };
+          };
+          slippage?: {
+            value?: {
+              _errors?: string[];
+            };
+          };
+          fixedQty?: {
+            _errors?: string[];
+          };
+        };
+      };
+    };
+    expect(optionRangeBody.error).toBe('Invalid body');
+    expect(optionRangeBody.detail?.params?.fee?.value?._errors?.length ?? 0).toBeGreaterThan(0);
+    expect(optionRangeBody.detail?.params?.slippage?.value?._errors?.length ?? 0).toBeGreaterThan(0);
+    expect(optionRangeBody.detail?.params?.fixedQty?._errors?.length ?? 0).toBeGreaterThan(0);
   });
 
-  it('returns deterministic MA crossover backtest results', async () => {
-    const closes = [100, 100, 100, 110, 120, 115, 90, 95, 105, 110];
+  it('returns deterministic gross/net MA crossover results with new options', async () => {
+    const closes = [100, 100, 100, 110, 120, 125, 130, 128, 135, 140];
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const rawUrl =
         typeof input === 'string'
@@ -1698,9 +1751,16 @@ describe('api strategy backtest', () => {
       limit: 50,
       params: {
         initialCapital: 10_000,
-        feeBps: 10,
-        positionSizeMode: 'fixed-percent' as const,
-        fixedPercent: 50,
+        fee: {
+          unit: 'percent' as const,
+          value: 0.1,
+        },
+        slippage: {
+          mode: 'tick' as const,
+          value: 0.5,
+        },
+        positionSizeMode: 'fixed-qty' as const,
+        fixedQty: 10,
       },
       strategy: {
         type: 'maCrossover' as const,
@@ -1721,8 +1781,13 @@ describe('api strategy backtest', () => {
       symbol: string;
       interval: string;
       summary: {
+        grossPnl: number;
         netPnl: number;
+        grossReturnPct: number;
         returnPct: number;
+        totalFees: number;
+        totalSlippage: number;
+        totalCosts: number;
         maxDrawdownPct: number;
         winRate: number;
         tradeCount: number;
@@ -1736,6 +1801,12 @@ describe('api strategy backtest', () => {
         qty: number;
         entryPrice: number;
         exitPrice: number;
+        signalEntryPrice: number;
+        signalExitPrice: number;
+        grossPnl: number;
+        netPnl: number;
+        feePaid: number;
+        slippageCost: number;
         pnl: number;
       }>;
     };
@@ -1743,18 +1814,29 @@ describe('api strategy backtest', () => {
     expect(firstBody.symbol).toBe('BTCUSDT');
     expect(firstBody.interval).toBe('60');
     expect(firstBody.summary.tradeCount).toBeGreaterThanOrEqual(1);
+    expect(Number.isFinite(firstBody.summary.grossPnl)).toBe(true);
     expect(Number.isFinite(firstBody.summary.netPnl)).toBe(true);
+    expect(Number.isFinite(firstBody.summary.grossReturnPct)).toBe(true);
     expect(Number.isFinite(firstBody.summary.returnPct)).toBe(true);
+    expect(Number.isFinite(firstBody.summary.totalFees)).toBe(true);
+    expect(Number.isFinite(firstBody.summary.totalSlippage)).toBe(true);
+    expect(Number.isFinite(firstBody.summary.totalCosts)).toBe(true);
     expect(Number.isFinite(firstBody.summary.maxDrawdownPct)).toBe(true);
     expect(Number.isFinite(firstBody.summary.winRate)).toBe(true);
     expect(firstBody.equityCurve).toHaveLength(closes.length);
     expect(firstBody.drawdownCurve).toHaveLength(closes.length);
+    expect(firstBody.summary.totalFees).toBeGreaterThan(0);
+    expect(firstBody.summary.totalSlippage).toBeGreaterThan(0);
+    expect(firstBody.summary.totalCosts).toBeCloseTo(firstBody.summary.totalFees + firstBody.summary.totalSlippage, 6);
+    expect(firstBody.summary.grossPnl).toBeGreaterThan(firstBody.summary.netPnl);
 
     if (firstBody.trades.length > 0) {
       expect(firstBody.trades[0]).toMatchObject({
         side: 'LONG',
       });
       expect(firstBody.trades[0].exitTime).toBeGreaterThanOrEqual(firstBody.trades[0].entryTime);
+      expect(firstBody.trades[0].grossPnl).toBeGreaterThanOrEqual(firstBody.trades[0].netPnl);
+      expect(firstBody.trades[0].pnl).toBe(firstBody.trades[0].netPnl);
     }
 
     const secondResponse = await app.inject({
@@ -1766,6 +1848,65 @@ describe('api strategy backtest', () => {
     expect(secondResponse.statusCode).toBe(200);
     expect(secondResponse.json()).toEqual(firstBody);
     expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it('keeps legacy backtest payload compatibility', async () => {
+    const closes = [100, 100, 100, 110, 120, 115, 90, 95, 105, 110];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const rawUrl =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const url = new URL(rawUrl);
+      const symbol = url.searchParams.get('symbol');
+
+      if (url.hostname === 'api.binance.com' && url.pathname === '/api/v3/klines' && symbol === 'BTCUSDT') {
+        return jsonResponse(toBinanceKlines(closes));
+      }
+
+      return jsonResponse({ error: 'unexpected request' }, 404);
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/strategy/backtest',
+      payload: {
+        symbol: 'BTCUSDT',
+        interval: '60',
+        limit: 200,
+        params: {
+          initialCapital: 10_000,
+          feeBps: 10,
+          positionSizeMode: 'fixed-percent',
+          fixedPercent: 50,
+        },
+        strategy: {
+          type: 'maCrossover',
+          fastPeriod: 2,
+          slowPeriod: 3,
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      params: {
+        feeBps: number;
+        feeRate: number;
+        positionSizeMode: 'fixed-percent' | 'fixed-qty';
+        fixedPercent?: number;
+      };
+      summary: {
+        netPnl: number;
+      };
+    };
+    expect(body.params.positionSizeMode).toBe('fixed-percent');
+    expect(body.params.feeBps).toBe(10);
+    expect(body.params.feeRate).toBeCloseTo(0.001, 8);
+    expect(body.params.fixedPercent).toBe(50);
+    expect(Number.isFinite(body.summary.netPnl)).toBe(true);
   });
 });
 

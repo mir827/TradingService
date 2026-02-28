@@ -760,16 +760,140 @@ const alertHistoryQuerySchema = z.object({
     },
   );
 
+const STRATEGY_BACKTEST_DEFAULT_FEE_BPS = 10;
+const STRATEGY_BACKTEST_MAX_FEE_BPS = 2000;
+const STRATEGY_BACKTEST_MAX_FEE_PERCENT = STRATEGY_BACKTEST_MAX_FEE_BPS / 100;
+const STRATEGY_BACKTEST_MAX_SLIPPAGE_TICK = 1_000_000;
+const STRATEGY_BACKTEST_MAX_SLIPPAGE_PERCENT = 10;
+const STRATEGY_BACKTEST_MAX_FIXED_QTY = 1_000_000_000;
+
+const strategyBacktestFeeUnitSchema = z.enum(['bps', 'percent']);
+const strategyBacktestSlippageModeSchema = z.enum(['tick', 'percent']);
+const strategyBacktestPositionSizeModeSchema = z.enum(['fixed-percent', 'fixed-qty']);
+
+const strategyBacktestParamsSchema = z
+  .object({
+    initialCapital: z.coerce.number().finite().positive().max(1_000_000_000_000),
+    feeBps: z.coerce.number().finite().min(0).max(STRATEGY_BACKTEST_MAX_FEE_BPS).optional(),
+    fee: z
+      .object({
+        unit: strategyBacktestFeeUnitSchema,
+        value: z.coerce.number().finite().min(0),
+      })
+      .optional(),
+    slippage: z
+      .object({
+        mode: strategyBacktestSlippageModeSchema,
+        value: z.coerce.number().finite().min(0),
+      })
+      .optional(),
+    positionSizeMode: strategyBacktestPositionSizeModeSchema.default('fixed-percent'),
+    fixedPercent: z.coerce.number().finite().gt(0).max(100).optional(),
+    fixedQty: z.coerce.number().finite().positive().max(STRATEGY_BACKTEST_MAX_FIXED_QTY).optional(),
+  })
+  .superRefine((data, context) => {
+    if (typeof data.feeBps === 'number' && data.fee) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Provide either feeBps or fee, not both',
+        path: ['fee'],
+      });
+    }
+
+    if (data.fee) {
+      const maxValue = data.fee.unit === 'bps' ? STRATEGY_BACKTEST_MAX_FEE_BPS : STRATEGY_BACKTEST_MAX_FEE_PERCENT;
+      if (data.fee.value > maxValue) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            data.fee.unit === 'bps'
+              ? `fee.value must be between 0 and ${STRATEGY_BACKTEST_MAX_FEE_BPS} bps`
+              : `fee.value must be between 0 and ${STRATEGY_BACKTEST_MAX_FEE_PERCENT} percent`,
+          path: ['fee', 'value'],
+        });
+      }
+    }
+
+    if (data.slippage) {
+      const maxValue =
+        data.slippage.mode === 'tick' ? STRATEGY_BACKTEST_MAX_SLIPPAGE_TICK : STRATEGY_BACKTEST_MAX_SLIPPAGE_PERCENT;
+      if (data.slippage.value > maxValue) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            data.slippage.mode === 'tick'
+              ? `slippage.value must be between 0 and ${STRATEGY_BACKTEST_MAX_SLIPPAGE_TICK} ticks`
+              : `slippage.value must be between 0 and ${STRATEGY_BACKTEST_MAX_SLIPPAGE_PERCENT} percent`,
+          path: ['slippage', 'value'],
+        });
+      }
+    }
+
+    if (data.positionSizeMode === 'fixed-percent') {
+      if (typeof data.fixedPercent !== 'number') {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'fixedPercent is required when positionSizeMode is fixed-percent',
+          path: ['fixedPercent'],
+        });
+      }
+    }
+
+    if (data.positionSizeMode === 'fixed-qty') {
+      if (typeof data.fixedQty !== 'number') {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'fixedQty is required when positionSizeMode is fixed-qty',
+          path: ['fixedQty'],
+        });
+      }
+    }
+  });
+
+type StrategyBacktestParamsInput = z.infer<typeof strategyBacktestParamsSchema>;
+
+function normalizeStrategyBacktestParams(params: StrategyBacktestParamsInput) {
+  const feeUnit = params.fee?.unit ?? 'bps';
+  const feeInputValue = params.fee?.value ?? params.feeBps ?? STRATEGY_BACKTEST_DEFAULT_FEE_BPS;
+  const feeBps = feeUnit === 'percent' ? feeInputValue * 100 : feeInputValue;
+  const feePercent = feeUnit === 'percent' ? feeInputValue : feeInputValue / 100;
+  const feeRate = feePercent / 100;
+
+  const slippage = {
+    mode: params.slippage?.mode ?? 'percent',
+    value: params.slippage?.value ?? 0,
+  } as const;
+
+  const positionSizing =
+    params.positionSizeMode === 'fixed-qty'
+      ? ({
+          mode: 'fixed-qty',
+          fixedQty: params.fixedQty as number,
+        } as const)
+      : ({
+          mode: 'fixed-percent',
+          fixedPercent: params.fixedPercent as number,
+        } as const);
+
+  return {
+    initialCapital: params.initialCapital,
+    fee: {
+      unit: feeUnit,
+      value: feeInputValue,
+      bps: feeBps,
+      percent: feePercent,
+      rate: feeRate,
+    },
+    slippage,
+    positionSizing,
+  };
+}
+
 const strategyBacktestBodySchema = z.object({
   symbol: z.string().trim().min(1),
   interval: z.string().trim().min(1),
   limit: z.coerce.number().int().min(50).max(1000).default(500),
-  params: z.object({
-    initialCapital: z.coerce.number().finite().positive().max(1_000_000_000_000),
-    feeBps: z.coerce.number().finite().min(0).max(2000).default(10),
-    positionSizeMode: z.literal('fixed-percent'),
-    fixedPercent: z.coerce.number().finite().gt(0).max(100),
-  }),
+  params: strategyBacktestParamsSchema,
   strategy: z
     .object({
       type: z.literal('maCrossover'),
@@ -4072,13 +4196,14 @@ app.post('/api/strategy/backtest', async (request, reply) => {
     return reply.code(422).send({ error: 'Insufficient candle data for backtest' });
   }
 
+  const normalizedParams = normalizeStrategyBacktestParams(parsed.data.params);
   const result = runMaCrossoverBacktest(
     candles,
     {
-      initialCapital: parsed.data.params.initialCapital,
-      feeBps: parsed.data.params.feeBps,
-      positionSizeMode: parsed.data.params.positionSizeMode,
-      fixedPercent: parsed.data.params.fixedPercent,
+      initialCapital: normalizedParams.initialCapital,
+      feeRate: normalizedParams.fee.rate,
+      slippage: normalizedParams.slippage,
+      positionSizing: normalizedParams.positionSizing,
     },
     {
       fastPeriod: parsed.data.strategy.fastPeriod,
@@ -4090,7 +4215,20 @@ app.post('/api/strategy/backtest', async (request, reply) => {
     symbol,
     interval,
     limit,
-    params: parsed.data.params,
+    params: {
+      initialCapital: normalizedParams.initialCapital,
+      feeBps: normalizedParams.fee.bps,
+      feeRate: normalizedParams.fee.rate,
+      fee: {
+        unit: normalizedParams.fee.unit,
+        value: normalizedParams.fee.value,
+      },
+      slippage: normalizedParams.slippage,
+      positionSizeMode: normalizedParams.positionSizing.mode,
+      ...(normalizedParams.positionSizing.mode === 'fixed-qty'
+        ? { fixedQty: normalizedParams.positionSizing.fixedQty }
+        : { fixedPercent: normalizedParams.positionSizing.fixedPercent }),
+    },
     strategy: {
       type: parsed.data.strategy.type,
       fastPeriod: parsed.data.strategy.fastPeriod,
