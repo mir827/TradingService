@@ -8,6 +8,20 @@ export type TimeValuePoint = {
   value: number;
 };
 
+export type CompareScaleMode = 'normalized' | 'absolute';
+
+export type CompareNormalizationAnchor = {
+  time: number;
+  baseClose: number;
+  compareClose: number;
+  scale: number;
+};
+
+export type CompareOverlayComputation = {
+  points: TimeValuePoint[];
+  anchor: CompareNormalizationAnchor | null;
+};
+
 export type BollingerBandsValues = {
   basis: Array<number | null>;
   upper: Array<number | null>;
@@ -273,7 +287,13 @@ export function toTimeValuePoints(candles: CandleLike[], values: Array<number | 
   return points;
 }
 
-export function normalizeCompareOverlay(baseCandles: CandleLike[], compareCandles: CandleLike[]): TimeValuePoint[] {
+type CompareOverlapPoint = {
+  time: number;
+  baseClose: number;
+  compareClose: number;
+};
+
+function collectCompareOverlap(baseCandles: CandleLike[], compareCandles: CandleLike[]): CompareOverlapPoint[] {
   if (!baseCandles.length || !compareCandles.length) return [];
 
   const baseByTime = new Map<number, number>();
@@ -283,23 +303,65 @@ export function normalizeCompareOverlay(baseCandles: CandleLike[], compareCandle
     }
   }
 
-  const overlap = compareCandles
-    .filter((candle) => baseByTime.has(candle.time) && Number.isFinite(candle.close))
+  return compareCandles
+    .map((candle) => {
+      if (!Number.isFinite(candle.time) || !Number.isFinite(candle.close)) return null;
+      const baseClose = baseByTime.get(candle.time);
+      if (typeof baseClose !== 'number' || !Number.isFinite(baseClose)) return null;
+      return {
+        time: candle.time,
+        baseClose,
+        compareClose: candle.close,
+      };
+    })
+    .filter((candle): candle is CompareOverlapPoint => candle !== null)
     .sort((left, right) => left.time - right.time);
+}
 
-  if (!overlap.length) return [];
-
-  const anchor = overlap[0];
-  const anchorBaseClose = baseByTime.get(anchor.time);
-
-  if (typeof anchorBaseClose !== 'number' || !Number.isFinite(anchorBaseClose) || anchor.close === 0) {
-    return [];
+export function computeCompareOverlay(
+  baseCandles: CandleLike[],
+  compareCandles: CandleLike[],
+  mode: CompareScaleMode = 'normalized',
+): CompareOverlayComputation {
+  const overlap = collectCompareOverlap(baseCandles, compareCandles);
+  if (!overlap.length) {
+    return { points: [], anchor: null };
   }
 
-  const scale = anchorBaseClose / anchor.close;
+  if (mode === 'absolute') {
+    return {
+      points: overlap.map((candle) => ({
+        time: candle.time,
+        value: candle.compareClose,
+      })),
+      anchor: null,
+    };
+  }
 
-  return overlap.map((candle) => ({
-    time: candle.time,
-    value: candle.close * scale,
-  }));
+  const anchor = overlap[0];
+  if (anchor.compareClose === 0) {
+    return { points: [], anchor: null };
+  }
+
+  const scale = anchor.baseClose / anchor.compareClose;
+  if (!Number.isFinite(scale)) {
+    return { points: [], anchor: null };
+  }
+
+  return {
+    points: overlap.map((candle) => ({
+      time: candle.time,
+      value: candle.compareClose * scale,
+    })),
+    anchor: {
+      time: anchor.time,
+      baseClose: anchor.baseClose,
+      compareClose: anchor.compareClose,
+      scale,
+    },
+  };
+}
+
+export function normalizeCompareOverlay(baseCandles: CandleLike[], compareCandles: CandleLike[]): TimeValuePoint[] {
+  return computeCompareOverlay(baseCandles, compareCandles, 'normalized').points;
 }

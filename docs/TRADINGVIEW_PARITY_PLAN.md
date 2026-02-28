@@ -184,7 +184,8 @@ Progress note (2026-02-28):
 - `/api/trading/orders`, `/api/trading/orders/:id/cancel`, `/api/trading/state`가 확장 페이로드/응답 메타데이터(조건가/링크/상태)를 제공하며 기존 market payload 호환성은 유지됨.
 - `apps/web` `트레이딩 패널`에 주문유형(시장가/지정가/스탑) 입력, 조건부 가격 필드, 브래킷 TP/SL 토글/입력, 주문 링크/상태 표시가 추가되었고 기존 로딩/에러/복구 UX 흐름은 유지됨.
 - M5 P0 status: complete (P0-1, P0-2, P0-3).
-- M5 progress note (2026-02-28): P1 started, and P1-4(드로잉 오브젝트 패널: 목록/잠금/숨김) completed in incremental scope.
+- M5 progress note (2026-02-28): P1 started, P1-4(드로잉 오브젝트 패널) + P1-5(비교 오버레이 확장) completed.
+- M5 remaining items: P1-6, P2-7, P2-8.
 
 ### P1 (분석 생산성/활용도 확장)
 
@@ -212,6 +213,11 @@ Progress note (2026-02-28):
   - `% 정규화`와 `절대값` 모드 전환 제공(기준 시점 명확화).
   - 한 종목 fetch 실패 시 다른 오버레이/기본 차트 영향 없음.
   - 범례에서 종목별 값/색상 일관성 유지.
+
+Progress note (2026-02-28):
+- M5 P1-5 completed (incremental): `apps/web` 비교 오버레이를 최대 3개 슬롯(개별 표시 on/off + 제거)으로 확장하고, `% 정규화`/`절대값` 스케일 모드 토글을 추가했으며, 정규화 모드 기준을 첫 공통 캔들(anchor time/base/compare close)로 고정해 결정론적으로 계산하도록 반영함.
+- 비교 심볼 단건 실패 시 해당 슬롯만 경량 오류를 노출하고 나머지 비교 오버레이/기본 차트 렌더는 유지되도록 fetch 결과를 심볼별로 분리 처리함.
+- 범례/상태 영역에 슬롯 색상 고정과 종목별 현재 비교값(또는 상태)을 일관되게 표기함.
 
 6) 
 - 기능명: 백테스트 현실화 옵션 (수수료/슬리피지/포지션 사이징)

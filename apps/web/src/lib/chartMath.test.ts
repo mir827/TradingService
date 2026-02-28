@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   calculateBollingerBands,
+  computeCompareOverlay,
   calculateEMA,
   calculateMACD,
   calculateRSI,
@@ -110,5 +111,70 @@ describe('chart math helpers', () => {
     ];
 
     expect(normalizeCompareOverlay(base, compare)).toEqual([]);
+  });
+
+  it('supports absolute compare scale mode without normalization', () => {
+    const base = [
+      { time: 1, close: 100 },
+      { time: 2, close: 110 },
+      { time: 3, close: 120 },
+    ];
+    const compare = [
+      { time: 1, close: 50 },
+      { time: 2, close: 56 },
+      { time: 3, close: 63 },
+    ];
+
+    expect(computeCompareOverlay(base, compare, 'absolute')).toEqual({
+      points: [
+        { time: 1, value: 50 },
+        { time: 2, value: 56 },
+        { time: 3, value: 63 },
+      ],
+      anchor: null,
+    });
+  });
+
+  it('uses earliest overlap candle as deterministic normalization anchor', () => {
+    const base = [
+      { time: 10, close: 100 },
+      { time: 11, close: 120 },
+      { time: 12, close: 150 },
+    ];
+    const compare = [
+      { time: 12, close: 300 },
+      { time: 10, close: 200 },
+      { time: 11, close: 240 },
+    ];
+
+    expect(computeCompareOverlay(base, compare, 'normalized')).toEqual({
+      points: [
+        { time: 10, value: 100 },
+        { time: 11, value: 120 },
+        { time: 12, value: 150 },
+      ],
+      anchor: {
+        time: 10,
+        baseClose: 100,
+        compareClose: 200,
+        scale: 0.5,
+      },
+    });
+  });
+
+  it('returns empty normalized output when anchor compare close is zero', () => {
+    const base = [
+      { time: 1, close: 100 },
+      { time: 2, close: 105 },
+    ];
+    const compare = [
+      { time: 1, close: 0 },
+      { time: 2, close: 10 },
+    ];
+
+    expect(computeCompareOverlay(base, compare, 'normalized')).toEqual({
+      points: [],
+      anchor: null,
+    });
   });
 });

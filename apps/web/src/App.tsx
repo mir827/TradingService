@@ -28,13 +28,27 @@ import {
 import './App.css';
 import {
   calculateBollingerBands,
+  computeCompareOverlay,
   calculateEMA,
   calculateMACD,
   calculateRSI,
   calculateSMA,
-  normalizeCompareOverlay,
+  type CompareScaleMode,
   toTimeValuePoints,
 } from './lib/chartMath';
+import {
+  COMPARE_OVERLAY_COLORS,
+  FETCH_COMPARE_ERROR,
+  MAX_COMPARE_SYMBOLS,
+  SAME_SYMBOL_COMPARE_ERROR,
+  createEmptyCompareOverlaySlot,
+  createInitialCompareOverlaySlots,
+  finalizeCompareSlotFetch,
+  normalizeCompareScaleMode,
+  startCompareSlotFetch,
+  type CompareOverlaySlot,
+  type CompareSlotFetchResult,
+} from './lib/compareOverlay';
 import {
   BOLLINGER_PERIOD_RANGE,
   BOLLINGER_STD_DEV_RANGE,
@@ -116,6 +130,12 @@ type Candle = {
   low: number;
   close: number;
   volume: number;
+};
+
+type CompareOverlayState = CompareOverlaySlot<Candle>;
+type CompareOverlayConfig = {
+  symbol: string;
+  visible: boolean;
 };
 
 type Quote = {
@@ -579,7 +599,8 @@ type ChartHistorySnapshot = {
   notes: NoteState[];
   enabledIndicators: Record<IndicatorKey, boolean>;
   indicatorSettings: IndicatorSettings;
-  compareSymbol: string;
+  compareOverlays: CompareOverlayConfig[];
+  compareScaleMode: CompareScaleMode;
   chartLayoutMode: ChartLayoutMode;
 };
 
@@ -618,7 +639,11 @@ const indicatorConfigs: IndicatorConfig[] = [
   { key: 'macd', label: 'MACD', color: '#4cc9f0' },
   { key: 'bbands', label: 'Bollinger Bands', color: '#9ad1ff' },
 ];
-const compareOverlayColor = '#85d47b';
+const compareScaleModeOptions: Array<{ key: CompareScaleMode; label: string }> = [
+  { key: 'normalized', label: '% 정규화' },
+  { key: 'absolute', label: '절대값' },
+];
+const DUPLICATE_COMPARE_SYMBOL_ERROR = '이미 비교 목록에 추가된 심볼입니다.';
 const bottomTabs: Array<{ id: BottomTab; label: string }> = [
   { id: 'pine', label: 'Pine Editor' },
   { id: 'strategy', label: '전략 테스터' },
@@ -735,7 +760,8 @@ function cloneChartHistorySnapshot(snapshot: ChartHistorySnapshot): ChartHistory
     notes: snapshot.notes.map((note) => ({ ...note })),
     enabledIndicators: { ...snapshot.enabledIndicators },
     indicatorSettings: normalizeIndicatorSettings(snapshot.indicatorSettings),
-    compareSymbol: snapshot.compareSymbol,
+    compareOverlays: snapshot.compareOverlays.map((overlay) => ({ ...overlay })),
+    compareScaleMode: normalizeCompareScaleMode(snapshot.compareScaleMode),
     chartLayoutMode: snapshot.chartLayoutMode,
   };
 }
@@ -1155,6 +1181,36 @@ function formatIndicatorLegend(config: IndicatorConfig, settings: IndicatorSetti
   return config.label;
 }
 
+function toCompareOverlayConfigs(overlays: CompareOverlayState[]): CompareOverlayConfig[] {
+  return overlays.slice(0, MAX_COMPARE_SYMBOLS).map((overlay) => ({
+    symbol: overlay.symbol.trim(),
+    visible: overlay.visible,
+  }));
+}
+
+function buildCompareOverlayStates(configs: CompareOverlayConfig[]): CompareOverlayState[] {
+  const seenSymbols = new Set<string>();
+
+  return Array.from({ length: MAX_COMPARE_SYMBOLS }, (_, index) => {
+    const source = configs[index];
+    const symbol = typeof source?.symbol === 'string' ? source.symbol.trim() : '';
+    const visible = typeof source?.visible === 'boolean' ? source.visible : true;
+
+    if (symbol && !seenSymbols.has(symbol)) {
+      seenSymbols.add(symbol);
+      return {
+        symbol,
+        visible,
+        candles: [],
+        loading: false,
+        error: null,
+      };
+    }
+
+    return createEmptyCompareOverlaySlot<Candle>();
+  });
+}
+
 function App() {
   const chartAreaRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1168,7 +1224,7 @@ function App() {
   const secondaryVolumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const secondaryCloseSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const indicatorSeriesRefs = useRef<Record<IndicatorSeriesKey, ISeriesApi<'Line'> | null>>(createIndicatorSeriesRefs());
-  const compareSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const compareSeriesRefs = useRef<Array<ISeriesApi<'Line'> | null>>([]);
   const chartRangeSyncStateRef = useRef(createChartRangeSyncState());
   const candleMapRef = useRef<Map<number, Candle>>(new Map());
   const activeToolRef = useRef<ToolKey>('cursor');
@@ -1233,10 +1289,10 @@ function App() {
     () => getStoredIndicatorPrefs().enabledIndicators,
   );
   const [indicatorSettings, setIndicatorSettings] = useState<IndicatorSettings>(() => getStoredIndicatorPrefs().settings);
-  const [compareSymbol, setCompareSymbol] = useState('');
-  const [compareCandles, setCompareCandles] = useState<Candle[]>([]);
-  const [compareLoading, setCompareLoading] = useState(false);
-  const [compareError, setCompareError] = useState<string | null>(null);
+  const [compareOverlays, setCompareOverlays] = useState<CompareOverlayState[]>(() =>
+    createInitialCompareOverlaySlots<Candle>(),
+  );
+  const [compareScaleMode, setCompareScaleMode] = useState<CompareScaleMode>('normalized');
   const [topActionFeedback, setTopActionFeedback] = useState<string | null>(null);
   const [replayMode, setReplayMode] = useState(false);
   const [replayPlaying, setReplayPlaying] = useState(false);
@@ -1305,7 +1361,8 @@ function App() {
   const chartLayoutModeStateRef = useRef<ChartLayoutMode>(chartLayoutMode);
   const enabledIndicatorsRef = useRef<Record<IndicatorKey, boolean>>(enabledIndicators);
   const indicatorSettingsRef = useRef<IndicatorSettings>(indicatorSettings);
-  const compareSymbolStateRef = useRef(compareSymbol);
+  const compareOverlaysStateRef = useRef(compareOverlays);
+  const compareScaleModeStateRef = useRef<CompareScaleMode>(compareScaleMode);
   const hasTradingState = tradingState !== null;
 
   const replayProgress = useMemo(
@@ -1350,8 +1407,12 @@ function App() {
   }, [indicatorSettings]);
 
   useEffect(() => {
-    compareSymbolStateRef.current = compareSymbol;
-  }, [compareSymbol]);
+    compareOverlaysStateRef.current = compareOverlays;
+  }, [compareOverlays]);
+
+  useEffect(() => {
+    compareScaleModeStateRef.current = compareScaleMode;
+  }, [compareScaleMode]);
 
   useEffect(() => {
     chartRangeSyncStateRef.current = createChartRangeSyncState();
@@ -2181,7 +2242,8 @@ function App() {
         notes: snapshotNotes(),
         enabledIndicators: { ...enabledIndicatorsRef.current },
         indicatorSettings: normalizeIndicatorSettings(indicatorSettingsRef.current),
-        compareSymbol: compareSymbolStateRef.current,
+        compareOverlays: toCompareOverlayConfigs(compareOverlaysStateRef.current),
+        compareScaleMode: compareScaleModeStateRef.current,
         chartLayoutMode: chartLayoutModeStateRef.current,
       };
 
@@ -2196,7 +2258,8 @@ function App() {
         notes: overrides?.notes ?? baseSnapshot.notes,
         enabledIndicators: overrides?.enabledIndicators ?? baseSnapshot.enabledIndicators,
         indicatorSettings: overrides?.indicatorSettings ?? baseSnapshot.indicatorSettings,
-        compareSymbol: overrides?.compareSymbol ?? baseSnapshot.compareSymbol,
+        compareOverlays: overrides?.compareOverlays ?? baseSnapshot.compareOverlays,
+        compareScaleMode: overrides?.compareScaleMode ?? baseSnapshot.compareScaleMode,
         chartLayoutMode: overrides?.chartLayoutMode ?? baseSnapshot.chartLayoutMode,
       });
     },
@@ -2245,11 +2308,24 @@ function App() {
       renderNotes(nextSnapshot.notes);
       setEnabledIndicators({ ...nextSnapshot.enabledIndicators });
       setIndicatorSettings(normalizeIndicatorSettings(nextSnapshot.indicatorSettings));
-      setCompareSymbol(nextSnapshot.compareSymbol);
-      setCompareError(null);
-      if (!nextSnapshot.compareSymbol) {
-        setCompareCandles([]);
-      }
+      const previousCompareBySymbol = new Map(
+        compareOverlaysStateRef.current
+          .filter((overlay) => overlay.symbol)
+          .map((overlay) => [overlay.symbol, overlay] as const),
+      );
+      const nextCompareOverlays = buildCompareOverlayStates(nextSnapshot.compareOverlays).map((overlay) => {
+        if (!overlay.symbol) return overlay;
+        const previous = previousCompareBySymbol.get(overlay.symbol);
+        if (!previous) return overlay;
+        return {
+          ...previous,
+          visible: overlay.visible,
+          error: null,
+          loading: false,
+        };
+      });
+      setCompareOverlays(nextCompareOverlays);
+      setCompareScaleMode(normalizeCompareScaleMode(nextSnapshot.compareScaleMode));
       setChartLayoutMode(nextSnapshot.chartLayoutMode);
       setPendingShapeStart(null);
       setSelectedDrawingId(null);
@@ -2547,14 +2623,16 @@ function App() {
       lastValueVisible: false,
       crosshairMarkerVisible: false,
     });
-    const compareSeries = chart.addSeries(LineSeries, {
-      color: compareOverlayColor,
-      lineWidth: 2,
-      lineStyle: 2,
-      priceLineVisible: false,
-      lastValueVisible: false,
-      crosshairMarkerVisible: false,
-    });
+    const compareSeries = COMPARE_OVERLAY_COLORS.map((color) =>
+      chart.addSeries(LineSeries, {
+        color,
+        lineWidth: 2,
+        lineStyle: 2,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      }),
+    );
 
     volumeSeries.priceScale().applyOptions({
       scaleMargins: {
@@ -2855,7 +2933,7 @@ function App() {
       bbUpper: bbUpperSeries,
       bbLower: bbLowerSeries,
     };
-    compareSeriesRef.current = compareSeries;
+    compareSeriesRefs.current = compareSeries;
     setChartReady(true);
 
     const observer = new ResizeObserver(() => {
@@ -2877,7 +2955,7 @@ function App() {
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;
       indicatorSeriesRefs.current = createIndicatorSeriesRefs();
-      compareSeriesRef.current = null;
+      compareSeriesRefs.current = [];
       horizontalLinesRef.current = [];
       verticalLinesRef.current = [];
       trendlinesRef.current = [];
@@ -3100,49 +3178,73 @@ function App() {
     };
   }, [clearHoveredCandle, selectedSymbol, selectedInterval]);
 
+  const compareSymbolSignature = useMemo(
+    () => compareOverlays.map((overlay) => overlay.symbol.trim()).join('|'),
+    [compareOverlays],
+  );
+
   useEffect(() => {
-    if (!compareSymbol) {
-      setCompareCandles([]);
-      setCompareError(null);
-      setCompareLoading(false);
-      return;
-    }
-
-    if (compareSymbol === selectedSymbol) {
-      setCompareCandles([]);
-      setCompareError('비교 심볼은 현재 심볼과 달라야 합니다.');
-      return;
-    }
-
     let canceled = false;
 
     const loadCompareCandles = async () => {
-      setCompareLoading(true);
-      setCompareError(null);
+      setCompareOverlays((prev) => startCompareSlotFetch(prev, selectedSymbol, SAME_SYMBOL_COMPARE_ERROR));
 
-      try {
-        const response = await fetch(
-          `${apiBase}/api/candles?symbol=${encodeURIComponent(compareSymbol)}&interval=${encodeURIComponent(selectedInterval)}&limit=500`,
-        );
+      const compareRequests = compareOverlaysStateRef.current
+        .map((overlay, slotIndex) => ({
+          slotIndex,
+          symbol: overlay.symbol.trim(),
+        }))
+        .filter(({ symbol }) => symbol.length > 0 && symbol !== selectedSymbol);
 
-        if (!response.ok) {
-          throw new Error('compare candle fetch failed');
+      if (!compareRequests.length) return;
+
+      const settled = await Promise.allSettled(
+        compareRequests.map(async ({ slotIndex, symbol }) => {
+          const response = await fetch(
+            `${apiBase}/api/candles?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(selectedInterval)}&limit=500`,
+          );
+
+          if (!response.ok) {
+            throw new Error('compare candle fetch failed');
+          }
+
+          const data = (await response.json()) as { candles: Candle[] };
+          return {
+            slotIndex,
+            symbol,
+            candles: data.candles ?? [],
+          };
+        }),
+      );
+
+      if (canceled) return;
+
+      const results: CompareSlotFetchResult<Candle>[] = settled.map((result, resultIndex) => {
+        const request = compareRequests[resultIndex];
+        if (result.status === 'fulfilled') {
+          return {
+            slotIndex: request.slotIndex,
+            symbol: request.symbol,
+            candles: result.value.candles,
+          };
         }
 
-        const data = (await response.json()) as { candles: Candle[] };
-        if (!canceled) {
-          setCompareCandles(data.candles ?? []);
-        }
-      } catch {
-        if (!canceled) {
-          setCompareCandles([]);
-          setCompareError('비교 심볼 데이터를 불러오지 못했습니다.');
-        }
-      } finally {
-        if (!canceled) {
-          setCompareLoading(false);
-        }
-      }
+        return {
+          slotIndex: request.slotIndex,
+          symbol: request.symbol,
+          error: FETCH_COMPARE_ERROR,
+        };
+      });
+
+      setCompareOverlays((prev) =>
+        finalizeCompareSlotFetch({
+          slots: prev,
+          selectedSymbol,
+          results,
+          sameSymbolError: SAME_SYMBOL_COMPARE_ERROR,
+          fetchError: FETCH_COMPARE_ERROR,
+        }),
+      );
     };
 
     void loadCompareCandles();
@@ -3150,7 +3252,7 @@ function App() {
     return () => {
       canceled = true;
     };
-  }, [compareSymbol, selectedInterval, selectedSymbol]);
+  }, [compareSymbolSignature, selectedInterval, selectedSymbol]);
 
   const quoteTargetSymbols = useMemo(() => {
     const set = new Set<string>();
@@ -3633,27 +3735,62 @@ function App() {
     }
   }, [activeCandles, enabledIndicators, indicatorSettings]);
 
-  const normalizedComparePoints = useMemo(() => {
-    if (!compareSymbol || compareLoading || compareError) return [];
-    return normalizeCompareOverlay(activeCandles, compareCandles);
-  }, [activeCandles, compareCandles, compareError, compareLoading, compareSymbol]);
+  const compareComputedOverlays = useMemo(
+    () =>
+      compareOverlays.map((overlay, slotIndex) => {
+        const symbol = overlay.symbol.trim();
+        if (!symbol || overlay.loading || overlay.error) {
+          return {
+            slotIndex,
+            symbol,
+            points: [],
+            anchor: null,
+            lastValue: null,
+          };
+        }
+
+        const computed = computeCompareOverlay(activeCandles, overlay.candles, compareScaleMode);
+        const lastPoint = computed.points.length > 0 ? computed.points[computed.points.length - 1] : null;
+
+        return {
+          slotIndex,
+          symbol,
+          points: computed.points,
+          anchor: computed.anchor,
+          lastValue: typeof lastPoint?.value === 'number' ? lastPoint.value : null,
+        };
+      }),
+    [activeCandles, compareOverlays, compareScaleMode],
+  );
 
   useEffect(() => {
-    const series = compareSeriesRef.current;
-    if (!series) return;
+    for (let slotIndex = 0; slotIndex < MAX_COMPARE_SYMBOLS; slotIndex += 1) {
+      const series = compareSeriesRefs.current[slotIndex];
+      if (!series) continue;
 
-    if (!compareSymbol || compareLoading || compareError || normalizedComparePoints.length === 0) {
-      series.setData([]);
-      return;
+      const overlay = compareOverlays[slotIndex];
+      const computed = compareComputedOverlays[slotIndex];
+
+      if (
+        !overlay ||
+        !overlay.symbol ||
+        !overlay.visible ||
+        overlay.loading ||
+        overlay.error ||
+        !computed ||
+        computed.points.length === 0
+      ) {
+        series.setData([]);
+        continue;
+      }
+
+      const points: LineData[] = computed.points.map((point) => ({
+        time: point.time as UTCTimestamp,
+        value: point.value,
+      }));
+      series.setData(points);
     }
-
-    const points: LineData[] = normalizedComparePoints.map((point) => ({
-      time: point.time as UTCTimestamp,
-      value: point.value,
-    }));
-
-    series.setData(points);
-  }, [compareError, compareLoading, compareSymbol, normalizedComparePoints]);
+  }, [compareComputedOverlays, compareOverlays]);
 
   const selectedQuote = quotes[selectedSymbol];
   const selectedTradingPosition = useMemo(
@@ -6062,26 +6199,124 @@ function App() {
     );
   }, [captureChartHistorySnapshot, chartLayoutMode, recordHistoryTransition]);
 
-  const updateCompareSymbol = useCallback((nextSymbol: string) => {
-    const normalizedSymbol = nextSymbol.trim();
-    if (normalizedSymbol === compareSymbol) {
-      setCompareError(null);
+  const updateCompareOverlaySymbol = useCallback(
+    (slotIndex: number, nextSymbol: string) => {
+      if (slotIndex < 0 || slotIndex >= MAX_COMPARE_SYMBOLS) return;
+
+      const current = compareOverlays[slotIndex];
+      if (!current) return;
+
+      const normalizedSymbol = nextSymbol.trim();
+
+      if (
+        normalizedSymbol &&
+        compareOverlays.some((overlay, index) => index !== slotIndex && overlay.symbol === normalizedSymbol)
+      ) {
+        setCompareOverlays((prev) =>
+          prev.map((overlay, index) =>
+            index === slotIndex
+              ? {
+                  ...overlay,
+                  candles: [],
+                  loading: false,
+                  error: DUPLICATE_COMPARE_SYMBOL_ERROR,
+                }
+              : overlay,
+          ),
+        );
+        return;
+      }
+
+      if (normalizedSymbol === current.symbol) {
+        return;
+      }
+
+      const beforeSnapshot = captureChartHistorySnapshot();
+      const nextCompareOverlays = compareOverlays.map((overlay, index) => {
+        if (index !== slotIndex) return overlay;
+        if (!normalizedSymbol) return createEmptyCompareOverlaySlot<Candle>();
+        return {
+          symbol: normalizedSymbol,
+          visible: overlay.visible,
+          candles: [],
+          loading: false,
+          error: null,
+        };
+      });
+      setCompareOverlays(nextCompareOverlays);
+      recordHistoryTransition(
+        beforeSnapshot,
+        captureChartHistorySnapshot({
+          compareOverlays: toCompareOverlayConfigs(nextCompareOverlays),
+        }),
+      );
+    },
+    [captureChartHistorySnapshot, compareOverlays, recordHistoryTransition],
+  );
+
+  const updateCompareOverlayVisibility = useCallback(
+    (slotIndex: number, visible: boolean) => {
+      if (slotIndex < 0 || slotIndex >= MAX_COMPARE_SYMBOLS) return;
+
+      const target = compareOverlays[slotIndex];
+      if (!target?.symbol) return;
+      if (target.visible === visible) return;
+
+      const beforeSnapshot = captureChartHistorySnapshot();
+      const nextCompareOverlays = compareOverlays.map((overlay, index) =>
+        index === slotIndex
+          ? {
+              ...overlay,
+              visible,
+            }
+          : overlay,
+      );
+
+      setCompareOverlays(nextCompareOverlays);
+      recordHistoryTransition(
+        beforeSnapshot,
+        captureChartHistorySnapshot({
+          compareOverlays: toCompareOverlayConfigs(nextCompareOverlays),
+        }),
+      );
+    },
+    [captureChartHistorySnapshot, compareOverlays, recordHistoryTransition],
+  );
+
+  const clearCompareOverlay = useCallback(
+    (slotIndex: number) => {
+      updateCompareOverlaySymbol(slotIndex, '');
+    },
+    [updateCompareOverlaySymbol],
+  );
+
+  const clearAllCompareOverlays = useCallback(() => {
+    if (!compareOverlays.some((overlay) => overlay.symbol)) {
       return;
     }
 
     const beforeSnapshot = captureChartHistorySnapshot();
-    setCompareSymbol(normalizedSymbol);
-    if (!normalizedSymbol) {
-      setCompareCandles([]);
-    }
-    setCompareError(null);
+    const nextCompareOverlays = createInitialCompareOverlaySlots<Candle>();
+    setCompareOverlays(nextCompareOverlays);
     recordHistoryTransition(
       beforeSnapshot,
       captureChartHistorySnapshot({
-        compareSymbol: normalizedSymbol,
+        compareOverlays: toCompareOverlayConfigs(nextCompareOverlays),
       }),
     );
-  }, [captureChartHistorySnapshot, compareSymbol, recordHistoryTransition]);
+  }, [captureChartHistorySnapshot, compareOverlays, recordHistoryTransition]);
+
+  const updateCompareScaleMode = useCallback((mode: CompareScaleMode) => {
+    if (mode === compareScaleMode) return;
+    const beforeSnapshot = captureChartHistorySnapshot();
+    setCompareScaleMode(mode);
+    recordHistoryTransition(
+      beforeSnapshot,
+      captureChartHistorySnapshot({
+        compareScaleMode: mode,
+      }),
+    );
+  }, [captureChartHistorySnapshot, compareScaleMode, recordHistoryTransition]);
 
   const handleTopActionClick = useCallback((key: TopActionKey) => {
     if (key === 'indicator') {
@@ -6114,10 +6349,6 @@ function App() {
 
     setTopActionFeedback('리플레이 모드를 시작했습니다.');
   }, [exitReplay, replayMode, startReplay]);
-
-  const clearCompareSymbol = useCallback(() => {
-    updateCompareSymbol('');
-  }, [updateCompareSymbol]);
 
   const selectedCode = selectedSymbolMeta ? getDisplayCode(selectedSymbolMeta) : shortTicker(selectedSymbol);
   const selectedName = selectedSymbolMeta?.name ?? shortTicker(selectedSymbol);
@@ -6333,18 +6564,80 @@ function App() {
     ...config,
     legend: formatIndicatorLegend(config, indicatorSettings),
   }));
-  const compareSymbolMeta =
-    watchlistSymbols.find((item) => item.symbol === compareSymbol) ??
-    searchResults.find((item) => item.symbol === compareSymbol) ??
-    null;
-  const compareCandidates = watchlistSymbols.filter((item) => item.symbol !== selectedSymbol);
-  const compareStatus = compareError
-    ? compareError
-    : compareLoading
-      ? '비교 데이터를 불러오는 중...'
-      : compareSymbol && compareCandles.length > 0 && normalizedComparePoints.length === 0
-        ? '비교 가능한 공통 구간이 없습니다.'
+  const compareCandidates = watchlistSymbols;
+  const hasAnyCompareCandidate = compareCandidates.some((item) => item.symbol !== selectedSymbol);
+  const hasCompareOverlays = compareOverlays.some((overlay) => overlay.symbol);
+  const compareSymbolMetaMap = useMemo(() => {
+    const symbolMap = new Map<string, SymbolItem>();
+    for (const item of watchlistSymbols) {
+      symbolMap.set(item.symbol, item);
+    }
+    for (const item of searchResults) {
+      if (!symbolMap.has(item.symbol)) {
+        symbolMap.set(item.symbol, item);
+      }
+    }
+    return symbolMap;
+  }, [searchResults, watchlistSymbols]);
+  const compareOptionsBySlot = useMemo(
+    () =>
+      compareOverlays.map((overlay, slotIndex) => {
+        const selectedInOtherSlots = new Set(
+          compareOverlays
+            .filter((_, index) => index !== slotIndex)
+            .map((item) => item.symbol)
+            .filter((symbol): symbol is string => symbol.length > 0),
+        );
+
+        return compareCandidates.filter((item) => {
+          if (item.symbol === overlay.symbol) return true;
+          if (item.symbol === selectedSymbol) return false;
+          return !selectedInOtherSlots.has(item.symbol);
+        });
+      }),
+    [compareCandidates, compareOverlays, selectedSymbol],
+  );
+  const compareLegendItems = compareOverlays.flatMap((overlay, slotIndex) => {
+    const symbol = overlay.symbol.trim();
+    if (!symbol) return [];
+
+    const computed = compareComputedOverlays[slotIndex];
+    const symbolMeta = compareSymbolMetaMap.get(symbol) ?? null;
+    const hasValue = !overlay.loading && !overlay.error && computed?.points.length > 0 && computed.lastValue !== null;
+    const currentValueText = hasValue ? formatPrice(computed.lastValue as number) : null;
+    const anchorText =
+      compareScaleMode === 'normalized' && computed?.anchor
+        ? `${formatCandleDateTime(computed.anchor.time)} · 기준 ${formatPrice(computed.anchor.baseClose)} / 비교 ${formatPrice(
+            computed.anchor.compareClose,
+          )}`
         : null;
+
+    return [
+      {
+        slotIndex,
+        symbol,
+        symbolMeta,
+        status: overlay.error
+          ? overlay.error
+          : overlay.loading
+            ? '로딩중'
+            : computed?.points.length === 0
+              ? '공통구간 없음'
+              : currentValueText,
+        currentValueText,
+        anchorText,
+        visible: overlay.visible,
+      },
+    ];
+  });
+  const compareLegendItemBySlot = useMemo(
+    () => new Map(compareLegendItems.map((item) => [item.slotIndex, item])),
+    [compareLegendItems],
+  );
+  const compareScaleGuideText =
+    compareScaleMode === 'normalized'
+      ? '정규화 기준: 첫 공통 캔들의 종가를 기준값으로 고정합니다.'
+      : '절대값 기준: 비교 심볼의 원본 종가를 그대로 표시합니다.';
   const replayStatusText = replayMode
     ? `리플레이 ${replayPlaying ? '재생중' : replayProgress.isAtEnd ? '완료' : '일시정지'} · 스텝 ${replayProgress.completedSteps}/${replayProgress.totalSteps} · 속도 x${replaySpeed}`
     : null;
@@ -6516,7 +6809,7 @@ function App() {
                 <span>Vol {displayCandle ? formatVolume(displayCandle.volume) : '--'}</span>
               </div>
 
-              {activeIndicatorLegends.length > 0 || compareSymbol ? (
+              {activeIndicatorLegends.length > 0 || hasCompareOverlays ? (
                 <div className="chart-legend-row">
                   {activeIndicatorLegends.map((config) => (
                     <span key={config.key} className="chart-legend-item">
@@ -6524,12 +6817,14 @@ function App() {
                       {config.legend}
                     </span>
                   ))}
-                  {compareSymbol ? (
-                    <span className="chart-legend-item">
-                      <span className="legend-dot" style={{ backgroundColor: compareOverlayColor }} />
-                      비교 {compareSymbolMeta ? getDisplayCode(compareSymbolMeta) : shortTicker(compareSymbol)} (정규화)
+                  {compareLegendItems.map((item) => (
+                    <span key={`compare-legend-${item.slotIndex}`} className="chart-legend-item">
+                      <span className="legend-dot" style={{ backgroundColor: COMPARE_OVERLAY_COLORS[item.slotIndex] }} />
+                      비교 {item.symbolMeta ? getDisplayCode(item.symbolMeta) : shortTicker(item.symbol)} ·{' '}
+                      {compareScaleMode === 'normalized' ? '% 정규화' : '절대값'} · {item.status ?? '--'}
+                      {item.visible ? '' : ' (숨김)'}
                     </span>
-                  ) : null}
+                  ))}
                 </div>
               ) : null}
             </div>
@@ -6642,26 +6937,81 @@ function App() {
               {comparisonPanelOpen ? (
                 <div className="chart-control-group">
                   <strong>비교</strong>
-                  <div className="compare-controls">
-                    <select
-                      value={compareSymbol}
-                      onChange={(event) => updateCompareSymbol(event.target.value)}
-                    >
-                      <option value="">비교 심볼 선택</option>
-                      {compareCandidates.map((item) => (
-                        <option key={item.symbol} value={item.symbol}>
-                          {getOptionLabel(item)}
-                        </option>
+                  <div className="compare-scale-controls">
+                    <div className="compare-scale-buttons" role="group" aria-label="비교 스케일 모드">
+                      {compareScaleModeOptions.map((mode) => (
+                        <button
+                          key={mode.key}
+                          type="button"
+                          className={compareScaleMode === mode.key ? 'active' : ''}
+                          onClick={() => updateCompareScaleMode(mode.key)}
+                        >
+                          {mode.label}
+                        </button>
                       ))}
-                    </select>
-                    <button type="button" onClick={clearCompareSymbol} disabled={!compareSymbol}>
-                      비교 해제
+                    </div>
+                    <button type="button" onClick={clearAllCompareOverlays} disabled={!hasCompareOverlays}>
+                      전체 해제
                     </button>
                   </div>
-                  {compareCandidates.length === 0 ? (
+
+                  <div className="compare-slot-list">
+                    {compareOverlays.map((overlay, slotIndex) => {
+                      const slotOptions = compareOptionsBySlot[slotIndex] ?? [];
+                      const legendItem = compareLegendItemBySlot.get(slotIndex);
+                      const slotStatus = overlay.error
+                        ? overlay.error
+                        : overlay.loading
+                          ? '비교 데이터를 불러오는 중...'
+                          : overlay.symbol && legendItem && !legendItem.currentValueText
+                            ? '비교 가능한 공통 구간이 없습니다.'
+                            : legendItem?.currentValueText
+                              ? `현재값: ${legendItem.currentValueText}${compareScaleMode === 'normalized' ? ' (정규화)' : ''}`
+                              : overlay.symbol
+                                ? '비교 데이터 대기중'
+                                : null;
+
+                      return (
+                        <div key={`compare-slot-${slotIndex}`} className="compare-slot-card">
+                          <div className="compare-controls">
+                            <span className="legend-dot" style={{ backgroundColor: COMPARE_OVERLAY_COLORS[slotIndex] }} />
+                            <select
+                              value={overlay.symbol}
+                              onChange={(event) => updateCompareOverlaySymbol(slotIndex, event.target.value)}
+                            >
+                              <option value="">비교 심볼 선택 ({slotIndex + 1}/{MAX_COMPARE_SYMBOLS})</option>
+                              {slotOptions.map((item) => (
+                                <option key={item.symbol} value={item.symbol}>
+                                  {getOptionLabel(item)}
+                                </option>
+                              ))}
+                            </select>
+                            <label className="compare-visibility-toggle">
+                              <input
+                                type="checkbox"
+                                checked={overlay.visible}
+                                disabled={!overlay.symbol}
+                                onChange={(event) => updateCompareOverlayVisibility(slotIndex, event.target.checked)}
+                              />
+                              표시
+                            </label>
+                            <button type="button" onClick={() => clearCompareOverlay(slotIndex)} disabled={!overlay.symbol}>
+                              제거
+                            </button>
+                          </div>
+                          {slotStatus ? <p className="control-feedback">{slotStatus}</p> : null}
+                          {compareScaleMode === 'normalized' && legendItem?.anchorText ? (
+                            <p className="control-feedback">기준: {legendItem.anchorText}</p>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {!hasAnyCompareCandidate ? (
                     <p className="control-feedback">관심종목에 비교 가능한 심볼이 없습니다.</p>
                   ) : null}
-                  {compareStatus ? <p className="control-feedback">{compareStatus}</p> : null}
+                  <p className="control-feedback">{compareScaleGuideText}</p>
                 </div>
               ) : null}
 
