@@ -267,6 +267,68 @@ type StrategyBacktestResult = {
   trades: StrategyBacktestTrade[];
 };
 
+type TradingMode = 'PAPER';
+type TradingOrderSide = 'BUY' | 'SELL';
+type TradingOrderStatus = 'PENDING' | 'FILLED' | 'CANCELED' | 'REJECTED';
+
+type TradingPosition = {
+  symbol: string;
+  qty: number;
+  avgPrice: number;
+  marketPrice: number;
+  unrealizedPnl: number;
+  realizedPnl: number;
+  updatedAt: number;
+};
+
+type TradingOrder = {
+  id: string;
+  symbol: string;
+  side: TradingOrderSide;
+  type: 'MARKET';
+  status: TradingOrderStatus;
+  qty: number;
+  notional: number;
+  fillPrice?: number;
+  filledAt?: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type TradingFill = {
+  id: string;
+  orderId: string;
+  symbol: string;
+  side: TradingOrderSide;
+  qty: number;
+  price: number;
+  notional: number;
+  realizedPnl: number;
+  filledAt: number;
+};
+
+type TradingState = {
+  mode: TradingMode;
+  startingCash: number;
+  cash: number;
+  summary: {
+    equity: number;
+    marketValue: number;
+    realizedPnl: number;
+    unrealizedPnl: number;
+  };
+  positions: TradingPosition[];
+  orders: TradingOrder[];
+  fills: TradingFill[];
+  updatedAt: number;
+};
+
+type TradingOrderFormState = {
+  side: TradingOrderSide;
+  qty: string;
+  notional: string;
+};
+
 type HorizontalLine = {
   id: string;
   price: number;
@@ -439,6 +501,11 @@ const DEFAULT_STRATEGY_TESTER_FORM: StrategyTesterFormState = {
   fixedPercent: '100',
   fastPeriod: '12',
   slowPeriod: '26',
+};
+const DEFAULT_TRADING_ORDER_FORM: TradingOrderFormState = {
+  side: 'BUY',
+  qty: '',
+  notional: '',
 };
 
 const DEFAULT_ENABLED_INDICATORS: Record<IndicatorKey, boolean> = {
@@ -765,6 +832,28 @@ function formatSignedCurrency(value: number) {
   return `${value >= 0 ? '+' : '-'}${formatPrice(Math.abs(value))}`;
 }
 
+function formatQty(value: number) {
+  return value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 8 });
+}
+
+function readApiErrorMessage(payload: unknown) {
+  if (!payload || typeof payload !== 'object') return null;
+
+  const errorValue = (payload as { error?: unknown }).error;
+  if (typeof errorValue === 'string' && errorValue.trim().length > 0) {
+    return errorValue;
+  }
+
+  if (errorValue && typeof errorValue === 'object') {
+    const message = (errorValue as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim().length > 0) {
+      return message;
+    }
+  }
+
+  return null;
+}
+
 function createMiniChartPath(points: StrategyBacktestPoint[]) {
   if (points.length === 0) {
     return null;
@@ -891,6 +980,16 @@ function App() {
   const [strategyResult, setStrategyResult] = useState<StrategyBacktestResult | null>(null);
   const [strategyLoading, setStrategyLoading] = useState(false);
   const [strategyError, setStrategyError] = useState<string | null>(null);
+  const [tradingOrderForm, setTradingOrderForm] = useState<TradingOrderFormState>(() => ({
+    ...DEFAULT_TRADING_ORDER_FORM,
+  }));
+  const [tradingState, setTradingState] = useState<TradingState | null>(null);
+  const [tradingLoading, setTradingLoading] = useState(false);
+  const [tradingRefreshing, setTradingRefreshing] = useState(false);
+  const [tradingSubmitting, setTradingSubmitting] = useState(false);
+  const [tradingError, setTradingError] = useState<string | null>(null);
+  const [tradingFormError, setTradingFormError] = useState<string | null>(null);
+  const [tradingLastUpdatedAt, setTradingLastUpdatedAt] = useState<number | null>(null);
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [indicatorPanelOpen, setIndicatorPanelOpen] = useState(false);
   const [comparisonPanelOpen, setComparisonPanelOpen] = useState(false);
@@ -958,6 +1057,7 @@ function App() {
   const [alertHistoryIndicatorAwareOnly, setAlertHistoryIndicatorAwareOnly] = useState(false);
   const [alertsHistoryLoading, setAlertsHistoryLoading] = useState(false);
   const [alertsHistoryClearing, setAlertsHistoryClearing] = useState(false);
+  const hasTradingState = tradingState !== null;
 
   const replayProgress = useMemo(
     () => getReplayProgress(candles.length, replayStartBars, replayVisibleBars),
@@ -978,6 +1078,10 @@ function App() {
 
   useEffect(() => {
     setAlertRuleSymbolFilter(selectedSymbol);
+  }, [selectedSymbol]);
+
+  useEffect(() => {
+    setTradingFormError(null);
   }, [selectedSymbol]);
 
   useEffect(() => {
@@ -2505,6 +2609,54 @@ function App() {
     };
   }, [watchQuery]);
 
+  const loadTradingState = useCallback(
+    async (options?: { silent?: boolean }) => {
+      const silent = options?.silent === true;
+      if (silent) {
+        setTradingRefreshing(true);
+      } else {
+        setTradingLoading(true);
+      }
+
+      try {
+        const response = await fetch(`${apiBase}/api/trading/state`);
+        if (!response.ok) {
+          let message = '트레이딩 상태를 불러오지 못했습니다.';
+
+          try {
+            const payload = (await response.json()) as unknown;
+            const parsedMessage = readApiErrorMessage(payload);
+            if (parsedMessage) {
+              message = parsedMessage;
+            }
+          } catch (parseError) {
+            void parseError;
+          }
+
+          throw new Error(message);
+        }
+
+        const data = (await response.json()) as TradingState;
+        setTradingState(data);
+        setTradingLastUpdatedAt(data.updatedAt);
+        setTradingError(null);
+      } catch (error) {
+        const message =
+          error instanceof Error && error.message
+            ? error.message
+            : '트레이딩 상태를 불러오지 못했습니다.';
+        setTradingError(message);
+      } finally {
+        if (silent) {
+          setTradingRefreshing(false);
+        } else {
+          setTradingLoading(false);
+        }
+      }
+    },
+    [],
+  );
+
   const loadAlertRules = useCallback(async () => {
     setAlertsLoading(true);
 
@@ -2573,6 +2725,11 @@ function App() {
     if (watchTab !== 'alerts') return;
     void loadAlertHistory();
   }, [loadAlertHistory, watchTab]);
+
+  useEffect(() => {
+    if (bottomTab !== 'trading') return;
+    void loadTradingState({ silent: hasTradingState });
+  }, [bottomTab, hasTradingState, loadTradingState]);
 
   useEffect(() => {
     candleMapRef.current = new Map(activeCandles.map((candle) => [candle.time, candle]));
@@ -2731,6 +2888,31 @@ function App() {
   }, [compareError, compareLoading, compareSymbol, normalizedComparePoints]);
 
   const selectedQuote = quotes[selectedSymbol];
+  const selectedTradingPosition = useMemo(
+    () => tradingState?.positions.find((position) => position.symbol === selectedSymbol) ?? null,
+    [selectedSymbol, tradingState],
+  );
+  const tradingEstimatedNotional = useMemo(() => {
+    const qtyInput = tradingOrderForm.qty.trim();
+    const notionalInput = tradingOrderForm.notional.trim();
+
+    if (qtyInput && selectedQuote) {
+      const qty = Number(qtyInput);
+      if (Number.isFinite(qty) && qty > 0) {
+        return qty * selectedQuote.lastPrice;
+      }
+    }
+
+    if (notionalInput) {
+      const notional = Number(notionalInput);
+      if (Number.isFinite(notional) && notional > 0) {
+        return notional;
+      }
+    }
+
+    return null;
+  }, [selectedQuote, tradingOrderForm.notional, tradingOrderForm.qty]);
+  const tradingUpdatedAt = tradingState?.updatedAt ?? tradingLastUpdatedAt;
   const latestCandle = activeCandles.at(-1) ?? null;
   const displayCandle = hoveredCandle ?? latestCandle;
   const hoveredCandleDiff = hoveredCandle ? hoveredCandle.close - hoveredCandle.open : 0;
@@ -3234,6 +3416,102 @@ function App() {
       setStrategyLoading(false);
     }
   }, [strategyForm]);
+
+  const handleRefreshTradingState = useCallback(() => {
+    void loadTradingState({ silent: hasTradingState });
+  }, [hasTradingState, loadTradingState]);
+
+  const handleSubmitTradingOrder = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+
+      const qtyInput = tradingOrderForm.qty.trim();
+      const notionalInput = tradingOrderForm.notional.trim();
+      const qty = qtyInput.length > 0 ? Number(qtyInput) : null;
+      const notional = notionalInput.length > 0 ? Number(notionalInput) : null;
+
+      if (qty === null && notional === null) {
+        setTradingFormError('수량 또는 금액 중 하나를 입력해주세요.');
+        return;
+      }
+
+      if (qty !== null && (!Number.isFinite(qty) || qty <= 0)) {
+        setTradingFormError('수량은 0보다 큰 숫자여야 합니다.');
+        return;
+      }
+
+      if (notional !== null && (!Number.isFinite(notional) || notional <= 0)) {
+        setTradingFormError('금액은 0보다 큰 숫자여야 합니다.');
+        return;
+      }
+
+      setTradingSubmitting(true);
+      setTradingFormError(null);
+
+      try {
+        const payload: {
+          symbol: string;
+          side: TradingOrderSide;
+          qty?: number;
+          notional?: number;
+        } = {
+          symbol: selectedSymbol,
+          side: tradingOrderForm.side,
+        };
+
+        if (qty !== null) {
+          payload.qty = qty;
+        }
+
+        if (notional !== null) {
+          payload.notional = notional;
+        }
+
+        const response = await fetch(`${apiBase}/api/trading/orders`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+          let message = '주문 전송에 실패했습니다.';
+
+          try {
+            const errorPayload = (await response.json()) as unknown;
+            const parsedMessage = readApiErrorMessage(errorPayload);
+            if (parsedMessage) {
+              message = parsedMessage;
+            }
+          } catch (parseError) {
+            void parseError;
+          }
+
+          throw new Error(message);
+        }
+
+        const data = (await response.json()) as { state?: TradingState };
+        if (data.state) {
+          setTradingState(data.state);
+          setTradingLastUpdatedAt(data.state.updatedAt);
+          setTradingError(null);
+        } else {
+          await loadTradingState({ silent: true });
+        }
+
+        setTradingOrderForm((previous) => ({
+          ...previous,
+          qty: '',
+          notional: '',
+        }));
+      } catch (error) {
+        const message = error instanceof Error && error.message ? error.message : '주문 전송에 실패했습니다.';
+        setTradingFormError(message);
+      } finally {
+        setTradingSubmitting(false);
+      }
+    },
+    [loadTradingState, selectedSymbol, tradingOrderForm],
+  );
 
   const handleCreateAlertRule = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -5759,7 +6037,255 @@ function App() {
           ) : null}
 
           {bottomTab === 'trading' ? (
-            <p className="bottom-placeholder">트레이딩 패널 구현 중 (주문창/포지션/체결내역 패널 예정)</p>
+            <div className="trading-panel">
+              <div className="trading-panel-head">
+                <div className="trading-head-labels">
+                  <strong>Paper Trading</strong>
+                  <span className="trading-mode-chip">{tradingState?.mode ?? 'PAPER'}</span>
+                  <span>{selectedSymbol}</span>
+                  {selectedQuote ? (
+                    <span className={selectedQuote.changePercent >= 0 ? 'up' : 'down'}>
+                      {formatPrice(selectedQuote.lastPrice)} ({formatSigned(selectedQuote.changePercent, 2)}%)
+                    </span>
+                  ) : (
+                    <span className="muted">시세 대기중</span>
+                  )}
+                </div>
+                <div className="trading-head-actions">
+                  {tradingUpdatedAt ? <span>업데이트: {new Date(tradingUpdatedAt).toLocaleString('ko-KR')}</span> : null}
+                  <button type="button" onClick={handleRefreshTradingState} disabled={tradingLoading || tradingRefreshing}>
+                    {tradingLoading || tradingRefreshing ? '새로고침 중...' : '새로고침'}
+                  </button>
+                </div>
+              </div>
+
+              {tradingError ? <p className="trading-error">{tradingError}</p> : null}
+
+              {tradingLoading && !tradingState ? (
+                <p className="trading-empty">트레이딩 상태를 불러오는 중...</p>
+              ) : tradingState ? (
+                <>
+                  <div className="trading-summary-grid">
+                    <div className="trading-summary-card">
+                      <span>현금</span>
+                      <strong>{formatPrice(tradingState.cash)}</strong>
+                    </div>
+                    <div className="trading-summary-card">
+                      <span>평가금액</span>
+                      <strong>{formatPrice(tradingState.summary.equity)}</strong>
+                    </div>
+                    <div className="trading-summary-card">
+                      <span>미실현 손익</span>
+                      <strong className={tradingState.summary.unrealizedPnl >= 0 ? 'up' : 'down'}>
+                        {formatSignedCurrency(tradingState.summary.unrealizedPnl)}
+                      </strong>
+                    </div>
+                    <div className="trading-summary-card">
+                      <span>실현 손익</span>
+                      <strong className={tradingState.summary.realizedPnl >= 0 ? 'up' : 'down'}>
+                        {formatSignedCurrency(tradingState.summary.realizedPnl)}
+                      </strong>
+                    </div>
+                  </div>
+
+                  <form className="trading-order-form" onSubmit={handleSubmitTradingOrder}>
+                    <div className="trading-order-grid">
+                      <label>
+                        <span>심볼</span>
+                        <input type="text" value={selectedSymbol} readOnly />
+                      </label>
+                      <label>
+                        <span>방향</span>
+                        <select
+                          value={tradingOrderForm.side}
+                          onChange={(event) =>
+                            setTradingOrderForm((previous) => ({
+                              ...previous,
+                              side: event.target.value as TradingOrderSide,
+                            }))
+                          }
+                          disabled={tradingSubmitting}
+                        >
+                          <option value="BUY">BUY</option>
+                          <option value="SELL">SELL</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>수량</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.0001"
+                          inputMode="decimal"
+                          value={tradingOrderForm.qty}
+                          onChange={(event) =>
+                            setTradingOrderForm((previous) => ({
+                              ...previous,
+                              qty: event.target.value,
+                            }))
+                          }
+                          placeholder="예: 0.5"
+                          disabled={tradingSubmitting}
+                        />
+                      </label>
+                      <label>
+                        <span>금액 (선택)</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          inputMode="decimal"
+                          value={tradingOrderForm.notional}
+                          onChange={(event) =>
+                            setTradingOrderForm((previous) => ({
+                              ...previous,
+                              notional: event.target.value,
+                            }))
+                          }
+                          placeholder="예: 1000"
+                          disabled={tradingSubmitting}
+                        />
+                      </label>
+                    </div>
+
+                    <div className="trading-order-meta">
+                      <span>
+                        예상 체결금액:{' '}
+                        {tradingEstimatedNotional !== null ? formatPrice(tradingEstimatedNotional) : '--'}
+                      </span>
+                      <span>
+                        현재 포지션:{' '}
+                        {selectedTradingPosition ? formatQty(selectedTradingPosition.qty) : '0'}
+                      </span>
+                    </div>
+
+                    <div className="trading-order-actions">
+                      <button type="submit" disabled={tradingSubmitting}>
+                        {tradingSubmitting ? '주문 전송 중...' : '시장가 주문'}
+                      </button>
+                    </div>
+
+                    {tradingFormError ? <p className="trading-error">{tradingFormError}</p> : null}
+                  </form>
+
+                  <div className="trading-lists-grid">
+                    <section className="trading-list-card">
+                      <div className="trading-list-title">포지션</div>
+                      {tradingState.positions.length === 0 ? (
+                        <p className="trading-empty">보유 포지션이 없습니다.</p>
+                      ) : (
+                        <div className="trading-table-wrap">
+                          <table className="trading-table">
+                            <thead>
+                              <tr>
+                                <th>심볼</th>
+                                <th>수량</th>
+                                <th>평단</th>
+                                <th>현재가</th>
+                                <th>미실현</th>
+                                <th>실현</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {tradingState.positions.map((position) => (
+                                <tr key={position.symbol} className={position.symbol === selectedSymbol ? 'selected' : ''}>
+                                  <td>{position.symbol}</td>
+                                  <td>{formatQty(position.qty)}</td>
+                                  <td>{formatPrice(position.avgPrice)}</td>
+                                  <td>{formatPrice(position.marketPrice)}</td>
+                                  <td className={position.unrealizedPnl >= 0 ? 'up' : 'down'}>
+                                    {formatSignedCurrency(position.unrealizedPnl)}
+                                  </td>
+                                  <td className={position.realizedPnl >= 0 ? 'up' : 'down'}>
+                                    {formatSignedCurrency(position.realizedPnl)}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </section>
+
+                    <section className="trading-list-card">
+                      <div className="trading-list-title">주문 내역</div>
+                      {tradingState.orders.length === 0 ? (
+                        <p className="trading-empty">주문 내역이 없습니다.</p>
+                      ) : (
+                        <div className="trading-table-wrap">
+                          <table className="trading-table">
+                            <thead>
+                              <tr>
+                                <th>시간</th>
+                                <th>심볼</th>
+                                <th>방향</th>
+                                <th>수량</th>
+                                <th>체결가</th>
+                                <th>상태</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {tradingState.orders.slice(0, 30).map((order) => (
+                                <tr key={order.id}>
+                                  <td>{new Date(order.createdAt).toLocaleString('ko-KR')}</td>
+                                  <td>{order.symbol}</td>
+                                  <td className={order.side === 'BUY' ? 'trading-side-buy' : 'trading-side-sell'}>
+                                    {order.side}
+                                  </td>
+                                  <td>{formatQty(order.qty)}</td>
+                                  <td>{typeof order.fillPrice === 'number' ? formatPrice(order.fillPrice) : '--'}</td>
+                                  <td>{order.status}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </section>
+
+                    <section className="trading-list-card">
+                      <div className="trading-list-title">체결 내역</div>
+                      {tradingState.fills.length === 0 ? (
+                        <p className="trading-empty">체결 내역이 없습니다.</p>
+                      ) : (
+                        <div className="trading-table-wrap">
+                          <table className="trading-table">
+                            <thead>
+                              <tr>
+                                <th>시간</th>
+                                <th>심볼</th>
+                                <th>방향</th>
+                                <th>수량</th>
+                                <th>가격</th>
+                                <th>실현</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {tradingState.fills.slice(0, 30).map((fill) => (
+                                <tr key={fill.id}>
+                                  <td>{new Date(fill.filledAt).toLocaleString('ko-KR')}</td>
+                                  <td>{fill.symbol}</td>
+                                  <td className={fill.side === 'BUY' ? 'trading-side-buy' : 'trading-side-sell'}>
+                                    {fill.side}
+                                  </td>
+                                  <td>{formatQty(fill.qty)}</td>
+                                  <td>{formatPrice(fill.price)}</td>
+                                  <td className={fill.realizedPnl >= 0 ? 'up' : 'down'}>
+                                    {formatSignedCurrency(fill.realizedPnl)}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </section>
+                  </div>
+                </>
+              ) : (
+                <p className="trading-empty">트레이딩 상태를 불러오지 못했습니다.</p>
+              )}
+            </div>
           ) : null}
         </div>
       </footer>

@@ -1,4 +1,4 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -127,6 +127,67 @@ type MarketStatusPayload = {
   };
 };
 
+type TradingMode = 'PAPER';
+type TradingOrderSide = 'BUY' | 'SELL';
+type TradingOrderType = 'MARKET';
+type TradingOrderStatus = 'PENDING' | 'FILLED' | 'CANCELED' | 'REJECTED';
+
+type TradingPosition = {
+  symbol: string;
+  qty: number;
+  avgPrice: number;
+  marketPrice: number;
+  unrealizedPnl: number;
+  realizedPnl: number;
+  updatedAt: number;
+};
+
+type TradingOrder = {
+  id: string;
+  symbol: string;
+  side: TradingOrderSide;
+  type: TradingOrderType;
+  status: TradingOrderStatus;
+  qty: number;
+  notional: number;
+  fillPrice?: number;
+  filledAt?: number;
+  canceledAt?: number;
+  rejectReason?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type TradingFill = {
+  id: string;
+  orderId: string;
+  symbol: string;
+  side: TradingOrderSide;
+  qty: number;
+  price: number;
+  notional: number;
+  realizedPnl: number;
+  filledAt: number;
+};
+
+type TradingState = {
+  mode: TradingMode;
+  startingCash: number;
+  cash: number;
+  positions: Map<string, TradingPosition>;
+  orders: TradingOrder[];
+  fills: TradingFill[];
+  updatedAt: number;
+};
+
+type TradingErrorCode =
+  | 'VALIDATION_ERROR'
+  | 'QUOTE_UNAVAILABLE'
+  | 'INSUFFICIENT_CASH'
+  | 'INSUFFICIENT_POSITION'
+  | 'ORDER_NOT_FOUND'
+  | 'ORDER_NOT_CANCELABLE';
+
 export const app = Fastify({ logger: true });
 
 await app.register(cors, {
@@ -166,7 +227,13 @@ const alertHistoryStore: AlertHistoryEvent[] = [];
 const drawingStore = new Map<string, DrawingItem[]>();
 const watchlistStore = new Map<string, SymbolItem[]>();
 const DEFAULT_RUNTIME_STATE_FILE = './outputs/runtime-state.json';
-const RUNTIME_STATE_VERSION = 2;
+const RUNTIME_STATE_VERSION = 3;
+const PAPER_TRADING_MODE: TradingMode = 'PAPER';
+const PAPER_TRADING_DEFAULT_STARTING_CASH = 100_000;
+const PAPER_TRADING_VALUE_PRECISION = 8;
+const PAPER_TRADING_EPSILON = 1e-8;
+const PAPER_TRADING_MAX_ORDERS = 1000;
+const PAPER_TRADING_MAX_FILLS = 2000;
 const ALERT_HISTORY_MAX_EVENTS = 500;
 const ALERT_INDICATOR_INTERVAL = '60';
 const ALERT_INDICATOR_CANDLE_LIMIT = 200;
@@ -176,6 +243,7 @@ const ALERT_MACD_SLOW_DEFAULT_PERIOD = 26;
 const ALERT_MACD_SIGNAL_DEFAULT_PERIOD = 9;
 const ALERT_BOLLINGER_DEFAULT_PERIOD = 20;
 const ALERT_BOLLINGER_DEFAULT_STD_DEV = 2;
+const paperTradingState = createInitialPaperTradingState();
 
 const cryptoIntervalMap: Record<string, string> = {
   '1': '1m',
@@ -479,6 +547,77 @@ const strategyBacktestBodySchema = z.object({
     }),
 });
 
+const tradingOrderSideSchema = z.preprocess((value) => {
+  if (typeof value === 'string') {
+    return value.trim().toUpperCase();
+  }
+  return value;
+}, z.enum(['BUY', 'SELL']));
+
+const tradingOrderCreateBodySchema = z
+  .object({
+    symbol: z.string().trim().min(1),
+    side: tradingOrderSideSchema,
+    qty: z.coerce.number().finite().positive().optional(),
+    notional: z.coerce.number().finite().positive().optional(),
+  })
+  .refine((data) => typeof data.qty === 'number' || typeof data.notional === 'number', {
+    message: 'Either qty or notional is required',
+    path: ['qty'],
+  });
+
+const tradingOrderCancelParamSchema = z.object({
+  id: z.string().trim().min(1),
+});
+
+const persistedTradingPositionSchema = z.object({
+  symbol: z.string().trim().min(1),
+  qty: z.coerce.number().finite().min(0),
+  avgPrice: z.coerce.number().finite().min(0),
+  marketPrice: z.coerce.number().finite().min(0),
+  unrealizedPnl: z.coerce.number().finite(),
+  realizedPnl: z.coerce.number().finite(),
+  updatedAt: z.coerce.number().int().nonnegative(),
+});
+
+const persistedTradingOrderSchema = z.object({
+  id: z.string().trim().min(1),
+  symbol: z.string().trim().min(1),
+  side: z.enum(['BUY', 'SELL']),
+  type: z.literal('MARKET'),
+  status: z.enum(['PENDING', 'FILLED', 'CANCELED', 'REJECTED']),
+  qty: z.coerce.number().finite().positive(),
+  notional: z.coerce.number().finite().nonnegative(),
+  fillPrice: z.coerce.number().finite().positive().optional(),
+  filledAt: z.coerce.number().int().nonnegative().optional(),
+  canceledAt: z.coerce.number().int().nonnegative().optional(),
+  rejectReason: z.string().trim().min(1).optional(),
+  createdAt: z.coerce.number().int().nonnegative(),
+  updatedAt: z.coerce.number().int().nonnegative(),
+});
+
+const persistedTradingFillSchema = z.object({
+  id: z.string().trim().min(1),
+  orderId: z.string().trim().min(1),
+  symbol: z.string().trim().min(1),
+  side: z.enum(['BUY', 'SELL']),
+  qty: z.coerce.number().finite().positive(),
+  price: z.coerce.number().finite().positive(),
+  notional: z.coerce.number().finite().nonnegative(),
+  realizedPnl: z.coerce.number().finite(),
+  filledAt: z.coerce.number().int().nonnegative(),
+});
+
+const persistedTradingStateSchema = z.object({
+  mode: z.literal('PAPER').optional(),
+  startingCash: z.coerce.number().finite().nonnegative().optional(),
+  cash: z.coerce.number().finite().optional(),
+  positions: z.array(z.unknown()).optional(),
+  orders: z.array(z.unknown()).optional(),
+  fills: z.array(z.unknown()).optional(),
+  updatedAt: z.coerce.number().int().nonnegative().optional(),
+});
+
 const persistedAlertRuleSchema = z.object({
   id: z.string().trim().min(1),
   symbol: z.string().trim().min(1),
@@ -523,6 +662,7 @@ const persistedRuntimeStateSchema = z
     alertHistory: z.array(z.unknown()).optional(),
     watchlists: z.array(z.unknown()).optional(),
     drawings: z.array(z.unknown()).optional(),
+    trading: z.unknown().optional(),
   })
   .passthrough();
 
@@ -650,6 +790,458 @@ function trimAlertHistoryOverflow() {
   }
 }
 
+function roundTradingValue(value: number, precision = PAPER_TRADING_VALUE_PRECISION) {
+  if (!Number.isFinite(value)) return 0;
+  return Number(value.toFixed(precision));
+}
+
+function createInitialPaperTradingState(startingCash = PAPER_TRADING_DEFAULT_STARTING_CASH): TradingState {
+  const normalizedStartingCash = roundTradingValue(Math.max(startingCash, 0));
+  const now = Date.now();
+
+  return {
+    mode: PAPER_TRADING_MODE,
+    startingCash: normalizedStartingCash,
+    cash: normalizedStartingCash,
+    positions: new Map(),
+    orders: [],
+    fills: [],
+    updatedAt: now,
+  };
+}
+
+function resetPaperTradingState(startingCash = PAPER_TRADING_DEFAULT_STARTING_CASH) {
+  const next = createInitialPaperTradingState(startingCash);
+  paperTradingState.mode = next.mode;
+  paperTradingState.startingCash = next.startingCash;
+  paperTradingState.cash = next.cash;
+  paperTradingState.positions = next.positions;
+  paperTradingState.orders = next.orders;
+  paperTradingState.fills = next.fills;
+  paperTradingState.updatedAt = next.updatedAt;
+}
+
+function createTradingOrderId() {
+  return `porder_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createTradingFillId() {
+  return `pfill_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function cloneTradingPosition(position: TradingPosition): TradingPosition {
+  return { ...position };
+}
+
+function cloneTradingOrder(order: TradingOrder): TradingOrder {
+  return { ...order };
+}
+
+function cloneTradingFill(fill: TradingFill): TradingFill {
+  return { ...fill };
+}
+
+function trimPaperTradingHistory() {
+  const orderOverflow = paperTradingState.orders.length - PAPER_TRADING_MAX_ORDERS;
+  if (orderOverflow > 0) {
+    paperTradingState.orders.splice(0, orderOverflow);
+  }
+
+  const fillOverflow = paperTradingState.fills.length - PAPER_TRADING_MAX_FILLS;
+  if (fillOverflow > 0) {
+    paperTradingState.fills.splice(0, fillOverflow);
+  }
+}
+
+function normalizeTradingQty(rawQty: number) {
+  const normalized = roundTradingValue(rawQty);
+  if (!Number.isFinite(normalized) || normalized <= PAPER_TRADING_EPSILON) {
+    return null;
+  }
+  return normalized;
+}
+
+function sendTradingError(
+  reply: FastifyReply,
+  statusCode: number,
+  code: TradingErrorCode,
+  message: string,
+  detail?: unknown,
+) {
+  return reply.code(statusCode).send({
+    error: {
+      code,
+      message,
+      ...(detail !== undefined ? { detail } : {}),
+    },
+  });
+}
+
+async function refreshPaperTradingPositionMarks() {
+  const symbols = [...paperTradingState.positions.keys()];
+  if (!symbols.length) return;
+
+  const settled = await Promise.allSettled(
+    symbols.map(async (symbol) => {
+      const quote = await fetchLiveQuote(symbol, { skipCache: true });
+      return { symbol, marketPrice: quote.lastPrice };
+    }),
+  );
+
+  let updated = false;
+
+  for (const result of settled) {
+    if (result.status !== 'fulfilled') {
+      app.log.warn({ error: result.reason }, 'Unable to refresh paper trading mark price');
+      continue;
+    }
+
+    const position = paperTradingState.positions.get(result.value.symbol);
+    if (!position) continue;
+
+    const marketPrice = roundTradingValue(result.value.marketPrice);
+    position.marketPrice = marketPrice;
+    position.unrealizedPnl = roundTradingValue((marketPrice - position.avgPrice) * position.qty);
+    position.updatedAt = Date.now();
+    updated = true;
+  }
+
+  if (updated) {
+    paperTradingState.updatedAt = Date.now();
+  }
+}
+
+function buildPaperTradingStateSnapshot() {
+  const positions = [...paperTradingState.positions.values()]
+    .map(cloneTradingPosition)
+    .sort((a, b) => a.symbol.localeCompare(b.symbol));
+
+  const marketValue = roundTradingValue(
+    positions.reduce((sum, position) => sum + position.qty * position.marketPrice, 0),
+  );
+  const realizedPnl = roundTradingValue(
+    paperTradingState.fills.reduce((sum, fill) => sum + fill.realizedPnl, 0),
+  );
+  const unrealizedPnl = roundTradingValue(
+    positions.reduce((sum, position) => sum + position.unrealizedPnl, 0),
+  );
+  const cash = roundTradingValue(paperTradingState.cash);
+  const equity = roundTradingValue(cash + marketValue);
+
+  return {
+    mode: paperTradingState.mode,
+    startingCash: paperTradingState.startingCash,
+    cash,
+    summary: {
+      equity,
+      marketValue,
+      realizedPnl,
+      unrealizedPnl,
+    },
+    positions,
+    orders: [...paperTradingState.orders].map(cloneTradingOrder).reverse(),
+    fills: [...paperTradingState.fills].map(cloneTradingFill).reverse(),
+    updatedAt: paperTradingState.updatedAt,
+  };
+}
+
+function executePaperMarketOrder(symbol: string, side: TradingOrderSide, qty: number, fillPrice: number, now: number) {
+  const normalizedQty = normalizeTradingQty(qty);
+  if (!normalizedQty) {
+    return {
+      ok: false as const,
+      statusCode: 400,
+      code: 'VALIDATION_ERROR' as TradingErrorCode,
+      message: 'Order quantity must be greater than zero',
+    };
+  }
+
+  const normalizedPrice = roundTradingValue(fillPrice);
+  if (!Number.isFinite(normalizedPrice) || normalizedPrice <= PAPER_TRADING_EPSILON) {
+    return {
+      ok: false as const,
+      statusCode: 502,
+      code: 'QUOTE_UNAVAILABLE' as TradingErrorCode,
+      message: 'Unable to determine market fill price',
+    };
+  }
+
+  const notional = roundTradingValue(normalizedQty * normalizedPrice);
+  const existing = paperTradingState.positions.get(symbol);
+  let realizedPnlDelta = 0;
+
+  if (side === 'BUY') {
+    if (paperTradingState.cash + PAPER_TRADING_EPSILON < notional) {
+      return {
+        ok: false as const,
+        statusCode: 422,
+        code: 'INSUFFICIENT_CASH' as TradingErrorCode,
+        message: 'Insufficient paper cash balance for this order',
+      };
+    }
+
+    const previousQty = existing?.qty ?? 0;
+    const previousCost = previousQty * (existing?.avgPrice ?? 0);
+    const nextQty = roundTradingValue(previousQty + normalizedQty);
+    const nextAvgPrice = nextQty <= PAPER_TRADING_EPSILON ? 0 : roundTradingValue((previousCost + notional) / nextQty);
+    const nextRealizedPnl = existing?.realizedPnl ?? 0;
+
+    paperTradingState.positions.set(symbol, {
+      symbol,
+      qty: nextQty,
+      avgPrice: nextAvgPrice,
+      marketPrice: normalizedPrice,
+      unrealizedPnl: roundTradingValue((normalizedPrice - nextAvgPrice) * nextQty),
+      realizedPnl: roundTradingValue(nextRealizedPnl),
+      updatedAt: now,
+    });
+
+    paperTradingState.cash = roundTradingValue(paperTradingState.cash - notional);
+  } else {
+    if (!existing || existing.qty <= PAPER_TRADING_EPSILON) {
+      return {
+        ok: false as const,
+        statusCode: 422,
+        code: 'INSUFFICIENT_POSITION' as TradingErrorCode,
+        message: 'No position is available to sell',
+      };
+    }
+
+    if (existing.qty + PAPER_TRADING_EPSILON < normalizedQty) {
+      return {
+        ok: false as const,
+        statusCode: 422,
+        code: 'INSUFFICIENT_POSITION' as TradingErrorCode,
+        message: 'Sell quantity exceeds current paper position size',
+      };
+    }
+
+    realizedPnlDelta = roundTradingValue((normalizedPrice - existing.avgPrice) * normalizedQty);
+    const nextQty = roundTradingValue(existing.qty - normalizedQty);
+    const nextRealizedPnl = roundTradingValue(existing.realizedPnl + realizedPnlDelta);
+
+    if (nextQty <= PAPER_TRADING_EPSILON) {
+      paperTradingState.positions.delete(symbol);
+    } else {
+      paperTradingState.positions.set(symbol, {
+        symbol,
+        qty: nextQty,
+        avgPrice: existing.avgPrice,
+        marketPrice: normalizedPrice,
+        unrealizedPnl: roundTradingValue((normalizedPrice - existing.avgPrice) * nextQty),
+        realizedPnl: nextRealizedPnl,
+        updatedAt: now,
+      });
+    }
+
+    paperTradingState.cash = roundTradingValue(paperTradingState.cash + notional);
+  }
+
+  const orderId = createTradingOrderId();
+  const fillId = createTradingFillId();
+
+  const order: TradingOrder = {
+    id: orderId,
+    symbol,
+    side,
+    type: 'MARKET',
+    status: 'FILLED',
+    qty: normalizedQty,
+    notional,
+    fillPrice: normalizedPrice,
+    filledAt: now,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const fill: TradingFill = {
+    id: fillId,
+    orderId,
+    symbol,
+    side,
+    qty: normalizedQty,
+    price: normalizedPrice,
+    notional,
+    realizedPnl: realizedPnlDelta,
+    filledAt: now,
+  };
+
+  paperTradingState.orders.push(order);
+  paperTradingState.fills.push(fill);
+  trimPaperTradingHistory();
+  paperTradingState.updatedAt = now;
+
+  return {
+    ok: true as const,
+    order,
+    fill,
+  };
+}
+
+function cancelPaperTradingOrder(orderId: string, canceledAt: number) {
+  const target = paperTradingState.orders.find((order) => order.id === orderId);
+  if (!target) {
+    return {
+      ok: false as const,
+      statusCode: 404,
+      code: 'ORDER_NOT_FOUND' as TradingErrorCode,
+      message: 'Paper order not found',
+    };
+  }
+
+  if (target.status !== 'PENDING') {
+    return {
+      ok: false as const,
+      statusCode: 409,
+      code: 'ORDER_NOT_CANCELABLE' as TradingErrorCode,
+      message: `Only pending paper orders can be canceled (current status: ${target.status})`,
+    };
+  }
+
+  target.status = 'CANCELED';
+  target.canceledAt = canceledAt;
+  target.updatedAt = canceledAt;
+  paperTradingState.updatedAt = canceledAt;
+
+  return {
+    ok: true as const,
+    order: cloneTradingOrder(target),
+  };
+}
+
+function serializePaperTradingStateForPersistence() {
+  return {
+    mode: paperTradingState.mode,
+    startingCash: paperTradingState.startingCash,
+    cash: paperTradingState.cash,
+    positions: [...paperTradingState.positions.values()].map(cloneTradingPosition),
+    orders: paperTradingState.orders.map(cloneTradingOrder),
+    fills: paperTradingState.fills.map(cloneTradingFill),
+    updatedAt: paperTradingState.updatedAt,
+  };
+}
+
+function restorePaperTradingState(rawTrading: unknown) {
+  resetPaperTradingState();
+
+  if (rawTrading === undefined || rawTrading === null) {
+    return {
+      restored: false,
+      invalid: false,
+      skippedPositions: 0,
+      skippedOrders: 0,
+      skippedFills: 0,
+    };
+  }
+
+  const parsedTrading = persistedTradingStateSchema.safeParse(rawTrading);
+  if (!parsedTrading.success) {
+    return {
+      restored: false,
+      invalid: true,
+      skippedPositions: 0,
+      skippedOrders: 0,
+      skippedFills: 0,
+    };
+  }
+
+  if (typeof parsedTrading.data.startingCash === 'number') {
+    resetPaperTradingState(Math.max(parsedTrading.data.startingCash, 0));
+  }
+
+  if (typeof parsedTrading.data.cash === 'number' && Number.isFinite(parsedTrading.data.cash)) {
+    paperTradingState.cash = roundTradingValue(parsedTrading.data.cash);
+  }
+
+  let skippedPositions = 0;
+  for (const rawPosition of parsedTrading.data.positions ?? []) {
+    const parsedPosition = persistedTradingPositionSchema.safeParse(rawPosition);
+    if (!parsedPosition.success) {
+      skippedPositions += 1;
+      continue;
+    }
+
+    const symbol = normalizeSymbol(parsedPosition.data.symbol);
+    const qty = roundTradingValue(parsedPosition.data.qty);
+    if (qty <= PAPER_TRADING_EPSILON) {
+      continue;
+    }
+
+    paperTradingState.positions.set(symbol, {
+      symbol,
+      qty,
+      avgPrice: roundTradingValue(parsedPosition.data.avgPrice),
+      marketPrice: roundTradingValue(parsedPosition.data.marketPrice),
+      unrealizedPnl: roundTradingValue(parsedPosition.data.unrealizedPnl),
+      realizedPnl: roundTradingValue(parsedPosition.data.realizedPnl),
+      updatedAt: parsedPosition.data.updatedAt,
+    });
+  }
+
+  let skippedOrders = 0;
+  const restoredOrders: TradingOrder[] = [];
+  for (const rawOrder of parsedTrading.data.orders ?? []) {
+    const parsedOrder = persistedTradingOrderSchema.safeParse(rawOrder);
+    if (!parsedOrder.success) {
+      skippedOrders += 1;
+      continue;
+    }
+
+    restoredOrders.push({
+      id: parsedOrder.data.id,
+      symbol: normalizeSymbol(parsedOrder.data.symbol),
+      side: parsedOrder.data.side,
+      type: parsedOrder.data.type,
+      status: parsedOrder.data.status,
+      qty: roundTradingValue(parsedOrder.data.qty),
+      notional: roundTradingValue(parsedOrder.data.notional),
+      ...(typeof parsedOrder.data.fillPrice === 'number'
+        ? { fillPrice: roundTradingValue(parsedOrder.data.fillPrice) }
+        : {}),
+      ...(typeof parsedOrder.data.filledAt === 'number' ? { filledAt: parsedOrder.data.filledAt } : {}),
+      ...(typeof parsedOrder.data.canceledAt === 'number' ? { canceledAt: parsedOrder.data.canceledAt } : {}),
+      ...(parsedOrder.data.rejectReason ? { rejectReason: parsedOrder.data.rejectReason } : {}),
+      createdAt: parsedOrder.data.createdAt,
+      updatedAt: parsedOrder.data.updatedAt,
+    });
+  }
+
+  let skippedFills = 0;
+  const restoredFills: TradingFill[] = [];
+  for (const rawFill of parsedTrading.data.fills ?? []) {
+    const parsedFill = persistedTradingFillSchema.safeParse(rawFill);
+    if (!parsedFill.success) {
+      skippedFills += 1;
+      continue;
+    }
+
+    restoredFills.push({
+      id: parsedFill.data.id,
+      orderId: parsedFill.data.orderId,
+      symbol: normalizeSymbol(parsedFill.data.symbol),
+      side: parsedFill.data.side,
+      qty: roundTradingValue(parsedFill.data.qty),
+      price: roundTradingValue(parsedFill.data.price),
+      notional: roundTradingValue(parsedFill.data.notional),
+      realizedPnl: roundTradingValue(parsedFill.data.realizedPnl),
+      filledAt: parsedFill.data.filledAt,
+    });
+  }
+
+  paperTradingState.orders = restoredOrders;
+  paperTradingState.fills = restoredFills;
+  trimPaperTradingHistory();
+  paperTradingState.updatedAt = parsedTrading.data.updatedAt ?? Date.now();
+
+  return {
+    restored: true,
+    invalid: false,
+    skippedPositions,
+    skippedOrders,
+    skippedFills,
+  };
+}
+
 function createRuntimeStatePayload() {
   return {
     version: RUNTIME_STATE_VERSION,
@@ -673,6 +1265,7 @@ function createRuntimeStatePayload() {
         };
       })
       .filter((entry): entry is { symbol: string; interval: string; drawings: DrawingItem[] } => Boolean(entry)),
+    trading: serializePaperTradingStateForPersistence(),
   };
 }
 
@@ -737,6 +1330,7 @@ async function loadRuntimeStateFromDisk() {
   alertHistoryStore.length = 0;
   watchlistStore.clear();
   drawingStore.clear();
+  resetPaperTradingState();
 
   let skippedAlertRules = 0;
   for (const rawRule of parsedState.data.alertRules ?? []) {
@@ -844,6 +1438,8 @@ async function loadRuntimeStateFromDisk() {
     drawingStore.set(createDrawingStoreKey(symbol, interval), normalizedDrawings);
   }
 
+  const tradingRestore = restorePaperTradingState(parsedState.data.trading);
+
   app.log.info(
     {
       stateFile,
@@ -852,6 +1448,9 @@ async function loadRuntimeStateFromDisk() {
         alertHistoryEvents: alertHistoryStore.length,
         watchlists: watchlistStore.size,
         drawingSets: drawingStore.size,
+        tradingPositions: paperTradingState.positions.size,
+        tradingOrders: paperTradingState.orders.length,
+        tradingFills: paperTradingState.fills.length,
       },
       skipped: {
         alertRules: skippedAlertRules,
@@ -860,6 +1459,10 @@ async function loadRuntimeStateFromDisk() {
         watchlistItems: skippedWatchlistItems,
         drawingCollections: skippedDrawingCollections,
         drawings: skippedDrawings,
+        tradingInvalidPayload: tradingRestore.invalid ? 1 : 0,
+        tradingPositions: tradingRestore.skippedPositions,
+        tradingOrders: tradingRestore.skippedOrders,
+        tradingFills: tradingRestore.skippedFills,
       },
     },
     'Loaded runtime state from disk',
@@ -1531,9 +2134,12 @@ async function fetchKrxQuote(symbol: string): Promise<Quote> {
   };
 }
 
-async function fetchLiveQuote(symbol: string) {
-  const cached = getCachedQuote(symbol);
-  if (cached) return cached;
+async function fetchLiveQuote(symbol: string, options?: { skipCache?: boolean }) {
+  const skipCache = options?.skipCache === true;
+  if (!skipCache) {
+    const cached = getCachedQuote(symbol);
+    if (cached) return cached;
+  }
 
   const quote = isKrxSymbol(symbol)
     ? await fetchKrxQuote(symbol)
@@ -1805,6 +2411,82 @@ app.get('/api/market-status', async (request, reply) => {
   }
 
   return getMarketStatus(parsed.data.market, Date.now());
+});
+
+app.get('/api/trading/state', async () => {
+  await refreshPaperTradingPositionMarks();
+  return buildPaperTradingStateSnapshot();
+});
+
+app.post('/api/trading/orders', async (request, reply) => {
+  const parsed = tradingOrderCreateBodySchema.safeParse(request.body ?? {});
+
+  if (!parsed.success) {
+    return sendTradingError(reply, 400, 'VALIDATION_ERROR', 'Invalid trading order payload', parsed.error.format());
+  }
+
+  const symbol = normalizeSymbol(parsed.data.symbol);
+  const side = parsed.data.side;
+
+  let quote: Quote;
+  try {
+    quote = await fetchLiveQuote(symbol, { skipCache: true });
+  } catch (error) {
+    app.log.error({ error, symbol }, 'Failed to fetch quote for paper order');
+    return sendTradingError(reply, 502, 'QUOTE_UNAVAILABLE', 'Unable to fetch quote for this symbol');
+  }
+
+  const fillPrice = roundTradingValue(quote.lastPrice);
+  if (!Number.isFinite(fillPrice) || fillPrice <= PAPER_TRADING_EPSILON) {
+    return sendTradingError(reply, 502, 'QUOTE_UNAVAILABLE', 'Unable to determine fill price from quote');
+  }
+
+  const requestedQty =
+    typeof parsed.data.qty === 'number'
+      ? parsed.data.qty
+      : typeof parsed.data.notional === 'number'
+        ? parsed.data.notional / fillPrice
+        : NaN;
+  const normalizedQty = normalizeTradingQty(requestedQty);
+
+  if (!normalizedQty) {
+    return sendTradingError(reply, 400, 'VALIDATION_ERROR', 'Resolved order quantity must be greater than zero');
+  }
+
+  const execution = executePaperMarketOrder(symbol, side, normalizedQty, fillPrice, Date.now());
+  if (!execution.ok) {
+    return sendTradingError(reply, execution.statusCode, execution.code, execution.message);
+  }
+
+  await persistRuntimeState();
+
+  return reply.code(201).send({
+    mode: PAPER_TRADING_MODE,
+    order: execution.order,
+    fill: execution.fill,
+    state: buildPaperTradingStateSnapshot(),
+  });
+});
+
+app.post('/api/trading/orders/:id/cancel', async (request, reply) => {
+  const parsed = tradingOrderCancelParamSchema.safeParse(request.params);
+
+  if (!parsed.success) {
+    return sendTradingError(reply, 400, 'VALIDATION_ERROR', 'Invalid order id', parsed.error.format());
+  }
+
+  const canceled = cancelPaperTradingOrder(parsed.data.id, Date.now());
+  if (!canceled.ok) {
+    return sendTradingError(reply, canceled.statusCode, canceled.code, canceled.message);
+  }
+
+  await persistRuntimeState();
+
+  return {
+    mode: PAPER_TRADING_MODE,
+    order: canceled.order,
+    state: buildPaperTradingStateSnapshot(),
+  };
 });
 
 app.get('/api/drawings', async (request, reply) => {

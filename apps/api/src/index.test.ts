@@ -404,6 +404,263 @@ describe('api watchlist persistence', () => {
   });
 });
 
+describe('api paper trading workflows', () => {
+  type TradingStateResponse = {
+    mode: string;
+    cash: number;
+    summary: {
+      equity: number;
+      marketValue: number;
+      realizedPnl: number;
+      unrealizedPnl: number;
+    };
+    positions: Array<{
+      symbol: string;
+      qty: number;
+      avgPrice: number;
+      marketPrice: number;
+      unrealizedPnl: number;
+      realizedPnl: number;
+    }>;
+    orders: Array<{
+      id: string;
+      symbol: string;
+      side: 'BUY' | 'SELL';
+      status: string;
+      qty: number;
+      fillPrice?: number;
+    }>;
+    fills: Array<{
+      orderId: string;
+      symbol: string;
+      side: 'BUY' | 'SELL';
+      qty: number;
+      price: number;
+      realizedPnl: number;
+    }>;
+  };
+
+  function mockPaperQuoteFeed(prices: number[], symbol = 'BTCUSDT') {
+    let index = 0;
+
+    return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const rawUrl =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const url = new URL(rawUrl);
+
+      if (url.hostname === 'api.binance.com' && url.pathname === '/api/v3/ticker/24hr') {
+        const requestedSymbol = url.searchParams.get('symbol');
+        if (requestedSymbol !== symbol) {
+          return jsonResponse({ error: 'unexpected symbol' }, 404);
+        }
+
+        const pickedPrice = prices[Math.min(index, prices.length - 1)];
+        index += 1;
+        const priceText = pickedPrice.toFixed(4);
+
+        return jsonResponse({
+          symbol,
+          lastPrice: priceText,
+          priceChangePercent: '0',
+          highPrice: priceText,
+          lowPrice: priceText,
+          volume: '1000',
+        });
+      }
+
+      return jsonResponse({ error: 'unexpected request' }, 404);
+    });
+  }
+
+  it('supports buy then sell flow with persisted paper state', async () => {
+    const fetchSpy = mockPaperQuoteFeed([100, 120]);
+
+    const buyResponse = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'btcusdt',
+        side: 'buy',
+        qty: 1,
+      },
+    });
+
+    expect(buyResponse.statusCode).toBe(201);
+    expect(
+      (buyResponse.json() as {
+        order: { symbol: string; side: string; status: string; fillPrice: number };
+      }).order,
+    ).toMatchObject({
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      status: 'FILLED',
+      fillPrice: 100,
+    });
+
+    const sellResponse = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'BTCUSDT',
+        side: 'SELL',
+        qty: 1,
+      },
+    });
+
+    expect(sellResponse.statusCode).toBe(201);
+    expect(
+      (sellResponse.json() as {
+        fill: { symbol: string; side: string; price: number; realizedPnl: number };
+      }).fill,
+    ).toMatchObject({
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      price: 120,
+      realizedPnl: 20,
+    });
+
+    const stateResponse = await app.inject({
+      method: 'GET',
+      url: '/api/trading/state',
+    });
+
+    expect(stateResponse.statusCode).toBe(200);
+    const state = stateResponse.json() as TradingStateResponse;
+    expect(state.mode).toBe('PAPER');
+    expect(state.positions).toHaveLength(0);
+    expect(state.orders).toHaveLength(2);
+    expect(state.fills).toHaveLength(2);
+    expect(state.cash).toBeCloseTo(100_020, 8);
+    expect(state.summary.realizedPnl).toBeCloseTo(20, 8);
+    expect(state.summary.unrealizedPnl).toBeCloseTo(0, 8);
+
+    await restartAppInstance();
+
+    const afterRestart = await app.inject({
+      method: 'GET',
+      url: '/api/trading/state',
+    });
+
+    expect(afterRestart.statusCode).toBe(200);
+    const restored = afterRestart.json() as TradingStateResponse;
+    expect(restored.cash).toBeCloseTo(100_020, 8);
+    expect(restored.orders).toHaveLength(2);
+    expect(restored.fills).toHaveLength(2);
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it('updates average position price for consecutive buys', async () => {
+    mockPaperQuoteFeed([100, 130, 130]);
+
+    const firstBuy = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        qty: 1,
+      },
+    });
+    expect(firstBuy.statusCode).toBe(201);
+
+    const secondBuy = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        qty: 2,
+      },
+    });
+    expect(secondBuy.statusCode).toBe(201);
+
+    const stateResponse = await app.inject({
+      method: 'GET',
+      url: '/api/trading/state',
+    });
+
+    expect(stateResponse.statusCode).toBe(200);
+    const state = stateResponse.json() as TradingStateResponse;
+    expect(state.positions).toHaveLength(1);
+    expect(state.positions[0]).toMatchObject({
+      symbol: 'BTCUSDT',
+      qty: 3,
+      avgPrice: 120,
+      marketPrice: 130,
+      unrealizedPnl: 30,
+      realizedPnl: 0,
+    });
+  });
+
+  it('returns realized and unrealized pnl values in trading state', async () => {
+    mockPaperQuoteFeed([100, 120, 110]);
+
+    const buyResponse = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        qty: 2,
+      },
+    });
+    expect(buyResponse.statusCode).toBe(201);
+
+    const sellResponse = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'BTCUSDT',
+        side: 'SELL',
+        qty: 1,
+      },
+    });
+    expect(sellResponse.statusCode).toBe(201);
+
+    const stateResponse = await app.inject({
+      method: 'GET',
+      url: '/api/trading/state',
+    });
+    expect(stateResponse.statusCode).toBe(200);
+
+    const state = stateResponse.json() as TradingStateResponse;
+    expect(state.summary.realizedPnl).toBeCloseTo(20, 8);
+    expect(state.summary.unrealizedPnl).toBeCloseTo(10, 8);
+    expect(state.positions).toHaveLength(1);
+    expect(state.positions[0]).toMatchObject({
+      symbol: 'BTCUSDT',
+      qty: 1,
+      avgPrice: 100,
+      marketPrice: 110,
+      realizedPnl: 20,
+      unrealizedPnl: 10,
+    });
+  });
+
+  it('rejects invalid order payloads with stable error shape', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid trading order payload',
+      },
+    });
+  });
+});
+
 describe('api strategy backtest', () => {
   it('rejects invalid backtest payloads', async () => {
     const response = await app.inject({

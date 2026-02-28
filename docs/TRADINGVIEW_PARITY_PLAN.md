@@ -118,8 +118,8 @@ Deliverables:
 
 Progress note (2026-02-28):
 - M4-1 completed: MA crossover strategy tester runtime is now available via `POST /api/strategy/backtest` with deterministic metrics/trade history/equity-drawdown curves, API validation tests + math utility tests, and a functional `전략 테스터` panel in `apps/web` (inputs, run/loading/error states, summary cards, mini charts, recent trades, localStorage input persistence).
+- M4-2 completed: paper-trading workflows are now available via `GET /api/trading/state`, `POST /api/trading/orders`, and `POST /api/trading/orders/:id/cancel` with runtime-state persistence, deterministic market fills from latest quote, and a functional `트레이딩 패널` UI (order entry, positions, order/fill history, refresh/loading/error states, in-flight submit locking).
 - Remaining M4 items:
-  - M4-2: Trading panel workflows (order entry, position/order list, fill history).
   - M4-3: Unified chart layout persistence + migration versioning.
   - M4-4: Operational hardening (error telemetry and recovery UX).
 

@@ -1606,6 +1606,226 @@ select {
   font-size: 12px;
 }
 
+.trading-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.trading-panel-head {
+  border: 1px solid #2b2f3a;
+  border-radius: 8px;
+  background: #101521;
+  padding: 9px 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.trading-head-labels {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.trading-mode-chip {
+  border: 1px solid #34566f;
+  background: #112434;
+  color: #9ad5ff;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  letter-spacing: 0.2px;
+}
+
+.trading-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #8d95a5;
+}
+
+.trading-head-actions button {
+  border: 1px solid #2d4766;
+  background: #182638;
+  color: #b7d8ff;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.trading-head-actions button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.trading-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.trading-summary-card {
+  border: 1px solid #2b2f3a;
+  border-radius: 8px;
+  background: #101521;
+  padding: 8px 10px;
+  display: grid;
+  gap: 4px;
+}
+
+.trading-summary-card span {
+  font-size: 11px;
+  color: #8d95a5;
+}
+
+.trading-summary-card strong {
+  font-size: 14px;
+}
+
+.trading-order-form {
+  border: 1px solid #2b2f3a;
+  border-radius: 8px;
+  background: #111826;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.trading-order-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.trading-order-grid label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.trading-order-grid label span {
+  font-size: 11px;
+  color: #8d95a5;
+}
+
+.trading-order-grid input,
+.trading-order-grid select {
+  border: 1px solid #2b2f3a;
+  background: #1e222d;
+  color: #d1d4dc;
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 6px 8px;
+  width: 100%;
+}
+
+.trading-order-grid input[readonly] {
+  color: #9da5b6;
+  background: #1a1f2b;
+}
+
+.trading-order-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 11px;
+  color: #8d95a5;
+}
+
+.trading-order-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.trading-order-actions button {
+  border: 1px solid #2b2f3a;
+  background: #1e222d;
+  color: #d1d4dc;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.trading-order-actions button:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.trading-lists-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.trading-list-card {
+  border: 1px solid #2b2f3a;
+  border-radius: 8px;
+  background: #101521;
+  padding: 8px 10px;
+  display: grid;
+  gap: 8px;
+  min-height: 200px;
+}
+
+.trading-list-title {
+  font-size: 11px;
+  color: #8d95a5;
+}
+
+.trading-table-wrap {
+  overflow: auto;
+}
+
+.trading-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.trading-table th,
+.trading-table td {
+  border-bottom: 1px solid #1f2636;
+  padding: 6px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.trading-table th {
+  color: #8d95a5;
+  font-weight: 500;
+}
+
+.trading-table tr.selected td {
+  background: #16263c;
+}
+
+.trading-side-buy {
+  color: #26a69a;
+}
+
+.trading-side-sell {
+  color: #ef5350;
+}
+
+.trading-error {
+  margin: 0;
+  color: #ff9fa6;
+  font-size: 12px;
+}
+
+.trading-empty {
+  margin: 0;
+  color: #8992a3;
+  font-size: 12px;
+}
+
 @media (max-width: 1380px) {
   .tv-topbar {
     grid-template-columns: 140px minmax(0, 1fr) 230px;
@@ -1657,6 +1877,18 @@ select {
   .strategy-chart-grid {
     grid-template-columns: 1fr;
   }
+
+  .trading-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .trading-order-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .trading-lists-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 960px) {
@@ -1679,6 +1911,20 @@ select {
 
   .strategy-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .trading-panel-head {
+    display: grid;
+    gap: 8px;
+    align-items: stretch;
+  }
+
+  .trading-head-actions {
+    justify-content: space-between;
+  }
+
+  .trading-order-grid {
+    grid-template-columns: 1fr;
   }
 }
 
