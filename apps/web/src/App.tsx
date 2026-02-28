@@ -979,16 +979,23 @@ function formatOptionalTimestamp(value: number | null) {
 }
 
 type VenuePreferenceValue = '' | KrVenue;
+const DEFAULT_KR_VENUE: KrVenue = 'KRX';
 
 function normalizeSymbolItemVenue(item: SymbolItem): SymbolItem {
   const rest = { ...item };
   delete rest.venue;
-  const normalizedVenue = normalizeVenueForSymbol(item, item.venue);
+  const normalizedVenue =
+    normalizeVenueForSymbol(item, item.venue) ?? normalizeVenueForSymbol(item, DEFAULT_KR_VENUE);
   return normalizedVenue ? { ...rest, venue: normalizedVenue } : rest;
 }
 
-function toVenuePreferenceValue(venue?: string | null): VenuePreferenceValue {
-  return normalizeVenuePreference(venue) ?? '';
+function toVenuePreferenceValue(
+  venue?: string | null,
+  options?: { fallbackToDefaultKrVenue?: boolean },
+): VenuePreferenceValue {
+  const normalized = normalizeVenuePreference(venue);
+  if (normalized) return normalized;
+  return options?.fallbackToDefaultKrVenue ? DEFAULT_KR_VENUE : '';
 }
 
 function formatAlertMetric(metric: AlertMetric) {
@@ -1301,7 +1308,7 @@ function App() {
   const [watchSortKey, setWatchSortKey] = useState<WatchSortKey>(() => getStoredWatchPrefs().watchSortKey ?? 'symbol');
   const [watchSortDir, setWatchSortDir] = useState<WatchSortDir>(() => getStoredWatchPrefs().watchSortDir ?? 'asc');
   const [watchMarketFilter, setWatchMarketFilter] = useState<WatchMarketFilter>(() => getStoredWatchPrefs().watchMarketFilter ?? 'ALL');
-  const [watchlistAddVenuePreference, setWatchlistAddVenuePreference] = useState<VenuePreferenceValue>('');
+  const [watchlistAddVenuePreference, setWatchlistAddVenuePreference] = useState<VenuePreferenceValue>(DEFAULT_KR_VENUE);
   const [searchResults, setSearchResults] = useState<SymbolItem[]>([]);
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
   const [searching, setSearching] = useState(false);
@@ -3938,7 +3945,13 @@ function App() {
   const selectedMarket = selectedSymbolMeta?.market ?? 'CRYPTO';
   const selectedSymbolVenueSupported =
     normalizeVenueForSymbol({ symbol: selectedSymbol, market: selectedMarket }, 'KRX') === 'KRX';
-  const selectedSymbolDefaultVenue = useMemo(() => toVenuePreferenceValue(selectedSymbolMeta?.venue), [selectedSymbolMeta?.venue]);
+  const selectedSymbolDefaultVenue = useMemo(
+    () =>
+      selectedSymbolVenueSupported
+        ? toVenuePreferenceValue(selectedSymbolMeta?.venue, { fallbackToDefaultKrVenue: true })
+        : '',
+    [selectedSymbolMeta?.venue, selectedSymbolVenueSupported],
+  );
   const selectedVenueCheckedAt = useMemo(() => normalizeVenueCheckedAt(marketStatus), [marketStatus]);
   const selectedKrxNxtComparison = useMemo(
     () => normalizeKrxNxtComparisonInfo(selectedMarket, selectedQuote, selectedVenueCheckedAt),
@@ -7506,7 +7519,9 @@ function App() {
                       const hasLastPrice = typeof item.lastPrice === 'number';
                       const hasChangePercent = typeof item.changePercent === 'number';
                       const venueSupported = normalizeVenueForSymbol(item, 'KRX') === 'KRX';
-                      const watchVenueValue = toVenuePreferenceValue(item.venue);
+                      const watchVenueValue = venueSupported
+                        ? toVenuePreferenceValue(item.venue, { fallbackToDefaultKrVenue: true })
+                        : '';
 
                       return (
                         <li
