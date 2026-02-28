@@ -299,3 +299,28 @@ DoD:
 - KOSPI/KOSDAQ 심볼에서 NXT 정보가 있을 때 UI/응답에 일관되게 노출
 - NXT 미가용 상황에서도 오류 전파 없이 정상 렌더/응답
 - lint/build/test + 핵심 스모크(quote/status/detail panel) 통과
+
+## M7 - Pine Editor 실구현
+Deliverables:
+- 하단 `Pine Editor` 탭의 placeholder 제거 및 실제 편집 워크스페이스 제공
+- 로컬 스크립트 라이브러리(생성/저장/복제/삭제) + active script 복원
+- 버전드 localStorage 스키마 + 손상 payload 복구/마이그레이션 경로 확보
+- 저장/로드 실패 시 비차단 UX + 경량 오류 상태 노출
+
+Phased plan:
+- M7-1: Editor workspace MVP
+- M7-2: Script library/versioning
+- M7-3: Strategy tester bridge
+- M7-4: Validation & safety guardrails
+
+Progress note (2026-02-28):
+- M7-1 완료: `apps/web` 하단 `Pine Editor` 패널을 textarea 기반 MVP 워크스페이스로 교체했고, 스크립트 이름 입력 + `New/Save/Save As/Delete` 컨트롤 + 저장 스크립트 목록 + 상태/오류 메시지 영역을 추가함.
+- `apps/web/src/lib/pineStorage.ts`에 버전드 스토리지 스키마(`tradingservice.pine.workspace.v1`)와 정규화/복구 유틸을 도입해 빈/손상 payload fallback, active script 복원 규칙, save/update/delete 상태 정합성을 보장함.
+- `apps/web/src/lib/pineStorage.test.ts` 단위 테스트로 빈/손상 payload fallback, save/update/delete 동작, active script restoration 규칙을 고정함.
+- M7 status: in progress (M7-1 complete, M7-2~M7-4 pending).
+
+DoD:
+- Pine 편집기 탭에서 스크립트 CRUD/선택/편집 흐름이 모두 동작
+- localStorage payload 손상/버전 불일치 시 기본값으로 안전 복구
+- 저장소 실패가 UI를 block하지 않고 상태 영역에 경량 오류를 노출
+- 기존 `전략 테스터`, `트레이딩 패널` 동작 회귀 없음
