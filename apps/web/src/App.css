@@ -2244,7 +2244,7 @@ select {
   background: #101521;
   padding: 9px;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 8px;
   min-height: 0;
 }
@@ -2262,6 +2262,25 @@ select {
   color: #d1d4dc;
   font-size: 12px;
   font-weight: 600;
+}
+
+.pine-library-search {
+  display: grid;
+  gap: 4px;
+}
+
+.pine-library-search span {
+  font-size: 10px;
+  color: #7f8798;
+}
+
+.pine-library-search input {
+  border: 1px solid #2b2f3a;
+  background: #1e222d;
+  color: #d1d4dc;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
 }
 
 .pine-library-list {

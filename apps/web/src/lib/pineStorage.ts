@@ -1,6 +1,7 @@
 export const PINE_WORKSPACE_STORAGE_KEY = 'tradingservice.pine.workspace.v1';
 export const PINE_WORKSPACE_SCHEMA_VERSION = 1;
 export const DEFAULT_PINE_SCRIPT_NAME = 'New Script';
+export const DEFAULT_PINE_SCRIPT_REVISION = 1;
 export const DEFAULT_PINE_SCRIPT_SOURCE =
   '//@version=5\n' +
   'indicator("New Script", overlay=true)\n' +
@@ -20,6 +21,7 @@ export type PineScript = {
   source: string;
   createdAt: number;
   updatedAt: number;
+  revision: number;
 };
 
 export type PineWorkspaceState = {
@@ -102,6 +104,21 @@ function normalizeScriptSource(source: unknown): string {
   return DEFAULT_PINE_SCRIPT_SOURCE;
 }
 
+function normalizeRevision(value: unknown, fallback = DEFAULT_PINE_SCRIPT_REVISION): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= DEFAULT_PINE_SCRIPT_REVISION) {
+    return Math.floor(value);
+  }
+
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed >= DEFAULT_PINE_SCRIPT_REVISION) {
+      return Math.floor(parsed);
+    }
+  }
+
+  return fallback;
+}
+
 function toStableFallbackScriptId(baseId: string, usedIds: Set<string>, fallbackIndex: number): string {
   const normalizedBase = baseId.trim() || `script-${fallbackIndex + 1}`;
   if (!usedIds.has(normalizedBase)) return normalizedBase;
@@ -132,6 +149,7 @@ function normalizeScripts(value: unknown, now: number): PineScript[] {
       content?: unknown;
       createdAt?: unknown;
       updatedAt?: unknown;
+      revision?: unknown;
     };
 
     const rawId = typeof parsed.id === 'string' ? parsed.id.trim() : '';
@@ -143,6 +161,7 @@ function normalizeScripts(value: unknown, now: number): PineScript[] {
     const source = normalizeScriptSource(parsed.source ?? parsed.content);
     const createdAt = normalizeTimestamp(parsed.createdAt, now);
     const updatedAt = Math.max(createdAt, normalizeTimestamp(parsed.updatedAt, createdAt));
+    const revision = normalizeRevision(parsed.revision);
 
     scripts.push({
       id,
@@ -150,6 +169,7 @@ function normalizeScripts(value: unknown, now: number): PineScript[] {
       source,
       createdAt,
       updatedAt,
+      revision,
     });
   });
 
@@ -173,6 +193,23 @@ function toPayload(state: PineWorkspaceState): PineWorkspacePayloadV1 {
     scripts: state.scripts.map((script) => ({ ...script })),
     activeScriptId: state.activeScriptId,
   };
+}
+
+function resolveRetainedActiveScriptId(
+  scripts: PineScript[],
+  previousActiveScriptId: string | null,
+  preferredActiveScriptId: string | null = null,
+): string | null {
+  return normalizeActiveScriptId(preferredActiveScriptId ?? previousActiveScriptId, scripts);
+}
+
+function createUniquePineScriptId(now: number, scripts: readonly PineScript[]): string {
+  const usedIds = new Set(scripts.map((script) => script.id));
+  let nextId = createPineScriptId(now);
+  while (usedIds.has(nextId)) {
+    nextId = createPineScriptId(now);
+  }
+  return nextId;
 }
 
 export function createPineScriptId(now = Date.now()): string {
@@ -259,12 +296,14 @@ export function upsertPineScript(workspace: PineWorkspaceState, script: PineScri
   const existing = normalizedWorkspace.scripts.find((item) => item.id === normalizedId);
   const createdAt = normalizeTimestamp(script.createdAt, existing?.createdAt ?? now);
   const updatedAt = Math.max(createdAt, normalizeTimestamp(script.updatedAt, now));
+  const revision = existing ? existing.revision + 1 : DEFAULT_PINE_SCRIPT_REVISION;
   const nextScript: PineScript = {
     id: normalizedId,
     name: normalizeScriptName(script.name, existing?.name ?? DEFAULT_PINE_SCRIPT_NAME),
     source: normalizeScriptSource(script.source),
     createdAt,
     updatedAt,
+    revision,
   };
 
   const remaining = normalizedWorkspace.scripts.filter((item) => item.id !== normalizedId);
@@ -278,14 +317,50 @@ export function upsertPineScript(workspace: PineWorkspaceState, script: PineScri
   );
 }
 
-export function deletePineScript(workspace: PineWorkspaceState, scriptId: string, now = Date.now()): PineWorkspaceState {
+type RenamePineScriptOptions = {
+  now?: number;
+  sourceOverride?: string;
+};
+
+export function renamePineScript(
+  workspace: PineWorkspaceState,
+  scriptId: string,
+  desiredName: string,
+  options: RenamePineScriptOptions = {},
+): PineWorkspaceState {
+  const now = options.now ?? Date.now();
   const normalizedWorkspace = normalizePineWorkspace(workspace, now);
   const normalizedId = scriptId.trim();
   if (!normalizedId) return normalizedWorkspace;
 
-  const scripts = normalizedWorkspace.scripts.filter((script) => script.id !== normalizedId);
-  const activeScriptId =
-    normalizedWorkspace.activeScriptId === normalizedId ? (scripts.length > 0 ? scripts[0].id : null) : normalizedWorkspace.activeScriptId;
+  const targetScript = normalizedWorkspace.scripts.find((script) => script.id === normalizedId);
+  if (!targetScript) return normalizedWorkspace;
+
+  const nameReservedByOthers = normalizedWorkspace.scripts.filter((script) => script.id !== normalizedId);
+  const nextName = createUniquePineScriptName(desiredName, nameReservedByOthers);
+  const nextSource =
+    options.sourceOverride === undefined ? targetScript.source : normalizeScriptSource(options.sourceOverride);
+  const sourceChanged = nextSource !== targetScript.source;
+  const nameChanged = nextName !== targetScript.name;
+
+  if (!sourceChanged && !nameChanged) {
+    return normalizedWorkspace;
+  }
+
+  const updatedAt = Math.max(targetScript.createdAt, now);
+  const revision = sourceChanged ? targetScript.revision + 1 : targetScript.revision;
+  const scripts = normalizedWorkspace.scripts.map((script) =>
+    script.id === normalizedId
+      ? {
+          ...script,
+          name: nextName,
+          source: nextSource,
+          updatedAt,
+          revision,
+        }
+      : script,
+  );
+  const activeScriptId = resolveRetainedActiveScriptId(scripts, normalizedWorkspace.activeScriptId);
 
   return normalizePineWorkspace(
     {
@@ -295,6 +370,91 @@ export function deletePineScript(workspace: PineWorkspaceState, scriptId: string
     },
     now,
   );
+}
+
+type DuplicatePineScriptOptions = {
+  now?: number;
+  nameBase?: string;
+  sourceOverride?: string;
+};
+
+export function duplicatePineScript(
+  workspace: PineWorkspaceState,
+  scriptId: string,
+  options: DuplicatePineScriptOptions = {},
+): PineWorkspaceState {
+  const now = options.now ?? Date.now();
+  const normalizedWorkspace = normalizePineWorkspace(workspace, now);
+  const normalizedId = scriptId.trim();
+  if (!normalizedId) return normalizedWorkspace;
+
+  const sourceScript = normalizedWorkspace.scripts.find((script) => script.id === normalizedId);
+  if (!sourceScript) return normalizedWorkspace;
+  const sourceIndex = normalizedWorkspace.scripts.findIndex((script) => script.id === normalizedId);
+  if (sourceIndex < 0) return normalizedWorkspace;
+
+  const duplicateId = createUniquePineScriptId(now, normalizedWorkspace.scripts);
+  const duplicateNameBase = `${normalizeScriptName(options.nameBase, sourceScript.name)} Copy`;
+  const duplicateScript: PineScript = {
+    id: duplicateId,
+    name: createUniquePineScriptName(duplicateNameBase, normalizedWorkspace.scripts),
+    source: options.sourceOverride === undefined ? sourceScript.source : normalizeScriptSource(options.sourceOverride),
+    createdAt: now,
+    updatedAt: now,
+    revision: DEFAULT_PINE_SCRIPT_REVISION,
+  };
+  const scripts = [
+    ...normalizedWorkspace.scripts.slice(0, sourceIndex),
+    duplicateScript,
+    ...normalizedWorkspace.scripts.slice(sourceIndex),
+  ];
+  const activeScriptId = resolveRetainedActiveScriptId(scripts, normalizedWorkspace.activeScriptId, duplicateScript.id);
+
+  return normalizePineWorkspace(
+    {
+      version: PINE_WORKSPACE_SCHEMA_VERSION,
+      scripts,
+      activeScriptId,
+    },
+    now,
+  );
+}
+
+export function deletePineScript(workspace: PineWorkspaceState, scriptId: string, now = Date.now()): PineWorkspaceState {
+  const normalizedWorkspace = normalizePineWorkspace(workspace, now);
+  const normalizedId = scriptId.trim();
+  if (!normalizedId) return normalizedWorkspace;
+  const removedIndex = normalizedWorkspace.scripts.findIndex((script) => script.id === normalizedId);
+  if (removedIndex < 0) return normalizedWorkspace;
+
+  const scripts = normalizedWorkspace.scripts.filter((script) => script.id !== normalizedId);
+  const preferredActiveScriptId =
+    normalizedWorkspace.activeScriptId === normalizedId
+      ? scripts[Math.min(removedIndex, Math.max(0, scripts.length - 1))]?.id ?? null
+      : normalizedWorkspace.activeScriptId;
+  const activeScriptId = resolveRetainedActiveScriptId(
+    scripts,
+    normalizedWorkspace.activeScriptId,
+    preferredActiveScriptId,
+  );
+
+  return normalizePineWorkspace(
+    {
+      version: PINE_WORKSPACE_SCHEMA_VERSION,
+      scripts,
+      activeScriptId,
+    },
+    now,
+  );
+}
+
+export function filterPineScriptsByName(scripts: readonly PineScript[], query: string): PineScript[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return [...scripts];
+  }
+
+  return scripts.filter((script) => script.name.toLowerCase().includes(normalizedQuery));
 }
 
 export function readPineWorkspace(storage?: StorageLike | null): PineWorkspaceReadResult {

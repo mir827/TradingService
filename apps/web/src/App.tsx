@@ -95,7 +95,10 @@ import {
   DEFAULT_PINE_SCRIPT_SOURCE,
   createPineScriptId,
   createUniquePineScriptName,
+  duplicatePineScript,
   deletePineScript,
+  filterPineScriptsByName,
+  renamePineScript,
   readPineWorkspace,
   setActivePineScript,
   upsertPineScript,
@@ -1383,6 +1386,7 @@ function App() {
   const [pineEditorScriptId, setPineEditorScriptId] = useState<string | null>(() => pineBootstrap.activeScriptId);
   const [pineEditorName, setPineEditorName] = useState(() => pineBootstrap.scriptName);
   const [pineEditorSource, setPineEditorSource] = useState(() => pineBootstrap.scriptSource);
+  const [pineLibraryQuery, setPineLibraryQuery] = useState('');
   const [pineStatusMessage, setPineStatusMessage] = useState<PineStatusMessage | null>(() => pineBootstrap.status);
   const [strategyForm, setStrategyForm] = useState<StrategyTesterFormState>(() => getStoredStrategyTesterForm());
   const [strategyResult, setStrategyResult] = useState<StrategyBacktestResult | null>(null);
@@ -4291,6 +4295,10 @@ function App() {
     () => (pineEditorScriptId ? pineWorkspace.scripts.find((script) => script.id === pineEditorScriptId) ?? null : null),
     [pineEditorScriptId, pineWorkspace.scripts],
   );
+  const pineLibraryScripts = useMemo(
+    () => filterPineScriptsByName(pineWorkspace.scripts, pineLibraryQuery),
+    [pineLibraryQuery, pineWorkspace.scripts],
+  );
   const pineActiveScriptName = pineActiveScript?.name ?? '';
   const pineEditorDirty = useMemo(() => {
     if (!pineActiveScript) return true;
@@ -4695,6 +4703,80 @@ function App() {
     [persistPineWorkspaceState, pineWorkspace],
   );
 
+  const handleRenamePineScript = useCallback(() => {
+    if (!pineEditorScriptId) {
+      setPineStatusMessage({
+        tone: 'error',
+        text: '이름을 변경할 저장 스크립트를 먼저 선택해주세요.',
+      });
+      return;
+    }
+
+    const trimmedName = pineEditorName.trim();
+    if (!trimmedName) {
+      setPineStatusMessage({
+        tone: 'error',
+        text: '스크립트 이름을 입력해주세요.',
+      });
+      return;
+    }
+
+    const now = Date.now();
+    const nextWorkspace = renamePineScript(pineWorkspace, pineEditorScriptId, trimmedName, {
+      now,
+      sourceOverride: pineEditorSource,
+    });
+    const persisted = persistPineWorkspaceState(nextWorkspace, `스크립트 이름 변경: ${trimmedName}`);
+    const nextActiveScript =
+      persisted.activeScriptId !== null
+        ? persisted.scripts.find((script) => script.id === persisted.activeScriptId) ?? null
+        : null;
+    if (!nextActiveScript) return;
+
+    setPineEditorScriptId(nextActiveScript.id);
+    setPineEditorName(nextActiveScript.name);
+    setPineEditorSource(nextActiveScript.source);
+  }, [persistPineWorkspaceState, pineEditorName, pineEditorScriptId, pineEditorSource, pineWorkspace]);
+
+  const handleDuplicatePineScript = useCallback(() => {
+    const sourceScriptId = pineEditorScriptId ?? pineWorkspace.activeScriptId;
+    if (!sourceScriptId) {
+      setPineStatusMessage({
+        tone: 'error',
+        text: '복제할 스크립트를 먼저 선택해주세요.',
+      });
+      return;
+    }
+
+    const sourceScript = pineWorkspace.scripts.find((script) => script.id === sourceScriptId);
+    if (!sourceScript) {
+      setPineStatusMessage({
+        tone: 'error',
+        text: '복제할 스크립트를 찾지 못했습니다.',
+      });
+      return;
+    }
+
+    const now = Date.now();
+    const sourceName = sourceScriptId === pineEditorScriptId ? pineEditorName : sourceScript.name;
+    const sourceCode = sourceScriptId === pineEditorScriptId ? pineEditorSource : sourceScript.source;
+    const nextWorkspace = duplicatePineScript(pineWorkspace, sourceScriptId, {
+      now,
+      nameBase: sourceName,
+      sourceOverride: sourceCode,
+    });
+    const persisted = persistPineWorkspaceState(nextWorkspace, '스크립트를 복제했습니다.');
+    const nextActiveScript =
+      persisted.activeScriptId !== null
+        ? persisted.scripts.find((script) => script.id === persisted.activeScriptId) ?? null
+        : null;
+    if (!nextActiveScript) return;
+
+    setPineEditorScriptId(nextActiveScript.id);
+    setPineEditorName(nextActiveScript.name);
+    setPineEditorSource(nextActiveScript.source);
+  }, [persistPineWorkspaceState, pineEditorName, pineEditorScriptId, pineEditorSource, pineWorkspace]);
+
   const handleCreateNewPineScript = useCallback(() => {
     const nextName = createUniquePineScriptName('New Script', pineWorkspace.scripts);
     setPineEditorScriptId(null);
@@ -4731,6 +4813,7 @@ function App() {
         source: pineEditorSource,
         createdAt: existingScript && !isSaveAs ? existingScript.createdAt : now,
         updatedAt: now,
+        revision: existingScript && !isSaveAs ? existingScript.revision : 1,
       };
 
       const nextWorkspace = upsertPineScript(pineWorkspace, nextScript, now);
@@ -8719,6 +8802,12 @@ function App() {
                     <button type="button" onClick={handleCreateNewPineScript}>
                       New
                     </button>
+                    <button type="button" onClick={handleRenamePineScript} disabled={!pineEditorScriptId}>
+                      Rename
+                    </button>
+                    <button type="button" onClick={handleDuplicatePineScript} disabled={pineWorkspace.scripts.length === 0}>
+                      Duplicate
+                    </button>
                     <button type="button" onClick={() => handleSavePineScript('save')}>
                       Save
                     </button>
@@ -8743,7 +8832,9 @@ function App() {
                     {pineStatusMessage?.text ?? (pineEditorDirty ? '저장되지 않은 변경사항이 있습니다.' : '저장 상태 최신입니다.')}
                   </span>
                   <span className="pine-editor-status-meta">
-                    {pineActiveScript ? `마지막 저장: ${formatOptionalTimestamp(pineActiveScript.updatedAt)}` : '저장되지 않은 새 스크립트'}
+                    {pineActiveScript
+                      ? `rev ${pineActiveScript.revision} · 마지막 저장: ${formatOptionalTimestamp(pineActiveScript.updatedAt)}`
+                      : '저장되지 않은 새 스크립트'}
                   </span>
                 </div>
               </div>
@@ -8751,26 +8842,46 @@ function App() {
               <aside className="pine-library-panel">
                 <div className="pine-library-head">
                   <strong>스크립트 라이브러리</strong>
-                  <span>{pineWorkspace.scripts.length}개</span>
+                  <span>
+                    {pineLibraryQuery.trim().length > 0
+                      ? `${pineLibraryScripts.length}/${pineWorkspace.scripts.length}개`
+                      : `${pineWorkspace.scripts.length}개`}
+                  </span>
                 </div>
 
                 {pineWorkspace.scripts.length === 0 ? (
                   <p className="pine-library-empty">저장된 스크립트가 없습니다.</p>
                 ) : (
-                  <ul className="pine-library-list">
-                    {pineWorkspace.scripts.map((script) => (
-                      <li key={script.id}>
-                        <button
-                          type="button"
-                          className={script.id === pineEditorScriptId ? 'active' : ''}
-                          onClick={() => handleOpenPineScript(script.id)}
-                        >
-                          <strong>{script.name}</strong>
-                          <span>{formatOptionalTimestamp(script.updatedAt)}</span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+                  <>
+                    <label className="pine-library-search">
+                      <span>검색</span>
+                      <input
+                        type="text"
+                        value={pineLibraryQuery}
+                        onChange={(event) => setPineLibraryQuery(event.target.value)}
+                        placeholder="스크립트 이름으로 필터"
+                      />
+                    </label>
+                    {pineLibraryScripts.length === 0 ? (
+                      <p className="pine-library-empty">검색 결과가 없습니다.</p>
+                    ) : (
+                      <ul className="pine-library-list">
+                        {pineLibraryScripts.map((script) => (
+                          <li key={script.id}>
+                            <button
+                              type="button"
+                              className={script.id === pineEditorScriptId ? 'active' : ''}
+                              onClick={() => handleOpenPineScript(script.id)}
+                            >
+                              <strong>{renderMatchedText(script.name, pineLibraryQuery)}</strong>
+                              <span>rev {script.revision}</span>
+                              <span>{formatOptionalTimestamp(script.updatedAt)}</span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </>
                 )}
               </aside>
             </div>

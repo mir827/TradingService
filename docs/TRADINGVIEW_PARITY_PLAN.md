@@ -317,7 +317,8 @@ Progress note (2026-02-28):
 - M7-1 완료: `apps/web` 하단 `Pine Editor` 패널을 textarea 기반 MVP 워크스페이스로 교체했고, 스크립트 이름 입력 + `New/Save/Save As/Delete` 컨트롤 + 저장 스크립트 목록 + 상태/오류 메시지 영역을 추가함.
 - `apps/web/src/lib/pineStorage.ts`에 버전드 스토리지 스키마(`tradingservice.pine.workspace.v1`)와 정규화/복구 유틸을 도입해 빈/손상 payload fallback, active script 복원 규칙, save/update/delete 상태 정합성을 보장함.
 - `apps/web/src/lib/pineStorage.test.ts` 단위 테스트로 빈/손상 payload fallback, save/update/delete 동작, active script restoration 규칙을 고정함.
-- M7 status: in progress (M7-1 complete, M7-2~M7-4 pending).
+- M7-2 완료: 스크립트 라이브러리에 `Rename/Duplicate` 액션, 이름 검색 필터, `updatedAt/revision` 메타 표시를 추가했고, 저장 시 스크립트별 revision 증가 규칙을 도입함. 기존 `tradingservice.pine.workspace.v1` payload는 revision 누락 시 자동 마이그레이션(기본값 1)으로 호환성을 유지하며, rename/duplicate/delete 이후 active script 선택 규칙을 결정론적으로 고정함.
+- M7 status: in progress (M7-1, M7-2 complete; M7-3~M7-4 pending).
 
 DoD:
 - Pine 편집기 탭에서 스크립트 CRUD/선택/편집 흐름이 모두 동작

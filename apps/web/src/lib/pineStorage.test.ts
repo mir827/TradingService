@@ -3,10 +3,13 @@ import {
   PINE_WORKSPACE_SCHEMA_VERSION,
   PINE_WORKSPACE_STORAGE_KEY,
   createUniquePineScriptName,
+  duplicatePineScript,
   deletePineScript,
+  filterPineScriptsByName,
   getDefaultPineWorkspaceState,
   normalizePineWorkspace,
   readPineWorkspace,
+  renamePineScript,
   setActivePineScript,
   upsertPineScript,
   writePineWorkspace,
@@ -45,6 +48,49 @@ describe('pine workspace persistence', () => {
     expect(corruptResult.error).toBeTruthy();
   });
 
+  it('migrates legacy script entries that do not include revision metadata', () => {
+    const now = 1_700_000_000_000;
+    const storage = new MemoryStorage();
+    storage.setItem(
+      PINE_WORKSPACE_STORAGE_KEY,
+      JSON.stringify({
+        version: PINE_WORKSPACE_SCHEMA_VERSION,
+        scripts: [{ id: 'legacy', name: 'Legacy', content: 'plot(close)', createdAt: now, updatedAt: now + 1_000 }],
+        activeScriptId: 'legacy',
+      }),
+    );
+
+    const result = readPineWorkspace(storage);
+    expect(result.error).toBeNull();
+    expect(result.state).toEqual({
+      scripts: [
+        {
+          id: 'legacy',
+          name: 'Legacy',
+          source: 'plot(close)',
+          createdAt: now,
+          updatedAt: now + 1_000,
+          revision: 1,
+        },
+      ],
+      activeScriptId: 'legacy',
+    });
+    expect(readPayload(storage)).toEqual({
+      version: PINE_WORKSPACE_SCHEMA_VERSION,
+      scripts: [
+        {
+          id: 'legacy',
+          name: 'Legacy',
+          source: 'plot(close)',
+          createdAt: now,
+          updatedAt: now + 1_000,
+          revision: 1,
+        },
+      ],
+      activeScriptId: 'legacy',
+    });
+  });
+
   it('supports save/update/delete behavior with deterministic active-script updates', () => {
     const baseNow = 1_700_000_000_000;
     let workspace: PineWorkspaceState = getDefaultPineWorkspaceState();
@@ -57,12 +103,14 @@ describe('pine workspace persistence', () => {
         source: 'plot(close)',
         createdAt: baseNow,
         updatedAt: baseNow,
+        revision: 1,
       },
       baseNow,
     );
 
     expect(workspace.activeScriptId).toBe('script-a');
     expect(workspace.scripts).toHaveLength(1);
+    expect(workspace.scripts[0].revision).toBe(1);
 
     workspace = upsertPineScript(
       workspace,
@@ -72,6 +120,7 @@ describe('pine workspace persistence', () => {
         source: 'plot(open)',
         createdAt: baseNow,
         updatedAt: baseNow + 1000,
+        revision: 1,
       },
       baseNow + 1000,
     );
@@ -79,6 +128,7 @@ describe('pine workspace persistence', () => {
     expect(workspace.scripts[0].source).toBe('plot(open)');
     expect(workspace.scripts[0].updatedAt).toBe(baseNow + 1000);
     expect(workspace.scripts[0].createdAt).toBe(baseNow);
+    expect(workspace.scripts[0].revision).toBe(2);
 
     workspace = upsertPineScript(
       workspace,
@@ -88,12 +138,14 @@ describe('pine workspace persistence', () => {
         source: 'plot(volume)',
         createdAt: baseNow + 2000,
         updatedAt: baseNow + 2000,
+        revision: 99,
       },
       baseNow + 2000,
     );
 
     expect(workspace.activeScriptId).toBe('script-b');
     expect(workspace.scripts.map((script) => script.id)).toEqual(['script-b', 'script-a']);
+    expect(workspace.scripts[0].revision).toBe(1);
 
     workspace = deletePineScript(workspace, 'script-b', baseNow + 3000);
     expect(workspace.scripts.map((script) => script.id)).toEqual(['script-a']);
@@ -111,6 +163,7 @@ describe('pine workspace persistence', () => {
           source: 'plot(open)',
           createdAt: baseNow,
           updatedAt: baseNow + 1000,
+          revision: 2,
         },
       ],
       activeScriptId: 'script-a',
@@ -122,8 +175,8 @@ describe('pine workspace persistence', () => {
     const payload = {
       version: 1,
       scripts: [
-        { id: 'first', name: 'First', source: 'a', createdAt: now, updatedAt: now },
-        { id: 'second', name: 'Second', source: 'b', createdAt: now + 1, updatedAt: now + 1 },
+        { id: 'first', name: 'First', source: 'a', createdAt: now, updatedAt: now, revision: 1 },
+        { id: 'second', name: 'Second', source: 'b', createdAt: now + 1, updatedAt: now + 1, revision: 1 },
       ],
       activeScriptId: 'second',
     };
@@ -142,8 +195,8 @@ describe('pine workspace persistence', () => {
     const workspace = normalizePineWorkspace({
       version: 1,
       scripts: [
-        { id: 'one', name: 'Alpha', source: 'plot(close)', createdAt: 1, updatedAt: 1 },
-        { id: 'two', name: 'Alpha (2)', source: 'plot(open)', createdAt: 2, updatedAt: 2 },
+        { id: 'one', name: 'Alpha', source: 'plot(close)', createdAt: 1, updatedAt: 1, revision: 1 },
+        { id: 'two', name: 'Alpha (2)', source: 'plot(open)', createdAt: 2, updatedAt: 2, revision: 1 },
       ],
       activeScriptId: 'one',
     });
@@ -151,5 +204,53 @@ describe('pine workspace persistence', () => {
     expect(createUniquePineScriptName('Alpha', workspace.scripts)).toBe('Alpha (3)');
     expect(setActivePineScript(workspace, 'two').activeScriptId).toBe('two');
     expect(setActivePineScript(workspace, 'missing').activeScriptId).toBe('one');
+  });
+
+  it('keeps active selection deterministic across rename/duplicate/delete helpers', () => {
+    const now = 1_700_000_500_000;
+    let workspace = normalizePineWorkspace(
+      {
+        version: 1,
+        scripts: [
+          { id: 'one', name: 'One', source: 'plot(close)', createdAt: now, updatedAt: now, revision: 1 },
+          { id: 'two', name: 'Two', source: 'plot(open)', createdAt: now + 1, updatedAt: now + 1, revision: 1 },
+          { id: 'three', name: 'Three', source: 'plot(high)', createdAt: now + 2, updatedAt: now + 2, revision: 1 },
+        ],
+        activeScriptId: 'two',
+      },
+      now,
+    );
+
+    workspace = renamePineScript(workspace, 'one', 'One Renamed', { now: now + 10 });
+    expect(workspace.activeScriptId).toBe('two');
+    expect(workspace.scripts.find((script) => script.id === 'one')?.name).toBe('One Renamed');
+
+    workspace = duplicatePineScript(workspace, 'two', { now: now + 20 });
+    expect(workspace.activeScriptId).toBeTruthy();
+    const duplicateScriptId = workspace.activeScriptId ?? '';
+    const duplicate = workspace.scripts.find((script) => script.id === duplicateScriptId);
+    expect(duplicate?.name).toBe('Two Copy');
+    expect(duplicate?.revision).toBe(1);
+
+    workspace = deletePineScript(workspace, duplicateScriptId, now + 30);
+    expect(workspace.activeScriptId).toBe('two');
+
+    workspace = deletePineScript(workspace, 'two', now + 40);
+    expect(workspace.activeScriptId).toBe('three');
+  });
+
+  it('filters scripts by name case-insensitively', () => {
+    const workspace = normalizePineWorkspace({
+      version: 1,
+      scripts: [
+        { id: 'one', name: 'Alpha Trend', source: 'a', createdAt: 1, updatedAt: 1, revision: 1 },
+        { id: 'two', name: 'Beta Mean Reversion', source: 'b', createdAt: 2, updatedAt: 2, revision: 1 },
+        { id: 'three', name: 'Alpha Breakout', source: 'c', createdAt: 3, updatedAt: 3, revision: 1 },
+      ],
+      activeScriptId: 'one',
+    });
+
+    expect(filterPineScriptsByName(workspace.scripts, 'alpha').map((script) => script.id)).toEqual(['one', 'three']);
+    expect(filterPineScriptsByName(workspace.scripts, '  ')).toHaveLength(3);
   });
 });
