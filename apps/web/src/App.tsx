@@ -58,8 +58,11 @@ import {
   formatSigned,
   getDisplayCode,
   getOptionLabel,
+  normalizeVenueForSymbol,
+  normalizeVenuePreference,
   marketExchangeText,
   shortTicker,
+  type KrVenue,
   type MarketType,
 } from './lib/symbol';
 import {
@@ -103,6 +106,7 @@ type SymbolItem = {
   name: string;
   market: MarketType;
   exchange?: string;
+  venue?: KrVenue;
 };
 
 type Candle = {
@@ -162,6 +166,7 @@ type AlertIndicatorCondition =
 type AlertRule = {
   id: string;
   symbol: string;
+  venue?: KrVenue;
   metric: AlertMetric;
   operator: AlertOperator;
   threshold: number;
@@ -179,6 +184,7 @@ type AlertRule = {
 type AlertCheckEvent = {
   ruleId: string;
   symbol: string;
+  venue?: KrVenue;
   metric: AlertMetric;
   operator: AlertOperator;
   threshold: number;
@@ -906,6 +912,19 @@ function formatOptionalTimestamp(value: number | null) {
   return new Date(value).toLocaleString('ko-KR');
 }
 
+type VenuePreferenceValue = '' | KrVenue;
+
+function normalizeSymbolItemVenue(item: SymbolItem): SymbolItem {
+  const rest = { ...item };
+  delete rest.venue;
+  const normalizedVenue = normalizeVenueForSymbol(item, item.venue);
+  return normalizedVenue ? { ...rest, venue: normalizedVenue } : rest;
+}
+
+function toVenuePreferenceValue(venue?: string | null): VenuePreferenceValue {
+  return normalizeVenuePreference(venue) ?? '';
+}
+
 function formatAlertMetric(metric: AlertMetric) {
   return metric === 'price' ? '가격' : '변동률';
 }
@@ -1186,6 +1205,7 @@ function App() {
   const [watchSortKey, setWatchSortKey] = useState<WatchSortKey>(() => getStoredWatchPrefs().watchSortKey ?? 'symbol');
   const [watchSortDir, setWatchSortDir] = useState<WatchSortDir>(() => getStoredWatchPrefs().watchSortDir ?? 'asc');
   const [watchMarketFilter, setWatchMarketFilter] = useState<WatchMarketFilter>(() => getStoredWatchPrefs().watchMarketFilter ?? 'ALL');
+  const [watchlistAddVenuePreference, setWatchlistAddVenuePreference] = useState<VenuePreferenceValue>('');
   const [searchResults, setSearchResults] = useState<SymbolItem[]>([]);
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
   const [searching, setSearching] = useState(false);
@@ -1253,6 +1273,7 @@ function App() {
   );
   const [alertMetric, setAlertMetric] = useState<AlertMetric>('price');
   const [alertOperator, setAlertOperator] = useState<AlertOperator>('>=');
+  const [alertVenuePreference, setAlertVenuePreference] = useState<VenuePreferenceValue>('');
   const [alertThresholdInput, setAlertThresholdInput] = useState('');
   const [alertCooldownInput, setAlertCooldownInput] = useState('60');
   const [alertIndicatorEnabled, setAlertIndicatorEnabled] = useState(false);
@@ -1950,12 +1971,13 @@ function App() {
   );
 
   const persistWatchlist = useCallback(async (items: SymbolItem[]) => {
+    const normalizedItems = items.map(normalizeSymbolItemVenue);
     const response = await fetch(`${apiBase}/api/watchlist`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: DEFAULT_WATCHLIST_NAME,
-        items,
+        items: normalizedItems,
       }),
     });
 
@@ -1964,7 +1986,7 @@ function App() {
     }
 
     const data = (await response.json()) as { items?: SymbolItem[] };
-    return data.items ?? items;
+    return (data.items ?? normalizedItems).map(normalizeSymbolItemVenue);
   }, []);
 
   const loadDrawings = useCallback(
@@ -2347,14 +2369,15 @@ function App() {
 
     const applyWatchlist = (nextSymbols: SymbolItem[]) => {
       if (canceled) return;
+      const normalizedSymbols = nextSymbols.map(normalizeSymbolItemVenue);
 
-      setWatchlistSymbols(nextSymbols);
+      setWatchlistSymbols(normalizedSymbols);
       setSelectedSymbol((prev) => {
-        if (nextSymbols.some((item) => item.symbol === prev)) {
+        if (normalizedSymbols.some((item) => item.symbol === prev)) {
           return prev;
         }
 
-        return nextSymbols[0]?.symbol ?? prev;
+        return normalizedSymbols[0]?.symbol ?? prev;
       });
     };
 
@@ -2365,7 +2388,7 @@ function App() {
       }
 
       const data = (await response.json()) as { symbols?: SymbolItem[] };
-      return data.symbols ?? [];
+      return (data.symbols ?? []).map(normalizeSymbolItemVenue);
     };
 
     const loadWatchlist = async () => {
@@ -2379,7 +2402,7 @@ function App() {
         }
 
         const watchlistData = (await watchlistResponse.json()) as { items?: SymbolItem[] };
-        const items = watchlistData.items ?? [];
+        const items = (watchlistData.items ?? []).map(normalizeSymbolItemVenue);
 
         if (items.length > 0) {
           applyWatchlist(items);
@@ -3203,7 +3226,7 @@ function App() {
         const data = (await response.json()) as { items: SymbolItem[] };
 
         if (!canceled) {
-          setSearchResults(data.items ?? []);
+          setSearchResults((data.items ?? []).map(normalizeSymbolItemVenue));
           setActiveSearchIndex(0);
         }
       } catch {
@@ -3325,7 +3348,14 @@ function App() {
       }
 
       const data = (await response.json()) as { rules: AlertRule[] };
-      setAlertRules(data.rules ?? []);
+      const normalizedRules = (data.rules ?? []).map((rule) => {
+        const venue = normalizeVenuePreference(rule.venue);
+        return {
+          ...rule,
+          ...(venue ? { venue } : {}),
+        } satisfies AlertRule;
+      });
+      setAlertRules(normalizedRules);
       setAlertsRecovery(null);
       return true;
     } catch (error) {
@@ -3405,8 +3435,10 @@ function App() {
       const data = (await response.json()) as { events?: AlertHistoryEvent[] };
       const normalizedEvents = (data.events ?? []).map((eventItem) => {
         const eventType = normalizeAlertCenterEventType(eventItem.eventType);
+        const venue = normalizeVenuePreference(eventItem.venue);
         return {
           ...eventItem,
+          ...(venue ? { venue } : {}),
           eventType,
           state: normalizeAlertLifecycleState(eventItem.state ?? (eventType === 'error' ? 'error' : 'triggered')),
         } satisfies AlertHistoryEvent;
@@ -3692,20 +3724,44 @@ function App() {
 
     return { left, top };
   }, [hoveredPoint]);
-  const watchlistAlertSymbols = useMemo(
-    () =>
-      [...new Set(watchlistSymbols.map((item) => item.symbol.trim().toUpperCase()).filter((symbol) => symbol.length > 0))].slice(
-        0,
-        40,
-      ),
-    [watchlistSymbols],
-  );
+  const watchlistAlertItems = useMemo(() => {
+    const bySymbol = new Map<string, { symbol: string; venue?: KrVenue }>();
+
+    for (const item of watchlistSymbols) {
+      const symbol = item.symbol.trim().toUpperCase();
+      if (!symbol) continue;
+
+      const venue = normalizeVenueForSymbol(item, item.venue);
+      const existing = bySymbol.get(symbol);
+
+      if (!existing) {
+        bySymbol.set(symbol, venue ? { symbol, venue } : { symbol });
+        continue;
+      }
+
+      if (!existing.venue && venue) {
+        bySymbol.set(symbol, { symbol, venue });
+      }
+    }
+
+    return [...bySymbol.values()].slice(0, 40);
+  }, [watchlistSymbols]);
+  const watchlistAlertSymbols = useMemo(() => watchlistAlertItems.map((item) => item.symbol), [watchlistAlertItems]);
+  const watchlistAlertVenues = useMemo(() => {
+    const entries = watchlistAlertItems
+      .filter((item): item is { symbol: string; venue: KrVenue } => Boolean(item.venue))
+      .map((item) => [item.symbol, item.venue] as const);
+    return entries.length ? Object.fromEntries(entries) : null;
+  }, [watchlistAlertItems]);
 
   const selectedSymbolMeta = useMemo(
     () => watchlistSymbols.find((item) => item.symbol === selectedSymbol) ?? searchResults.find((item) => item.symbol === selectedSymbol),
     [searchResults, selectedSymbol, watchlistSymbols],
   );
   const selectedMarket = selectedSymbolMeta?.market ?? 'CRYPTO';
+  const selectedSymbolVenueSupported =
+    normalizeVenueForSymbol({ symbol: selectedSymbol, market: selectedMarket }, 'KRX') === 'KRX';
+  const selectedSymbolDefaultVenue = useMemo(() => toVenuePreferenceValue(selectedSymbolMeta?.venue), [selectedSymbolMeta?.venue]);
   const selectedVenueCheckedAt = useMemo(() => normalizeVenueCheckedAt(marketStatus), [marketStatus]);
   const selectedKrxNxtComparison = useMemo(
     () => normalizeKrxNxtComparisonInfo(selectedMarket, selectedQuote, selectedVenueCheckedAt),
@@ -3715,6 +3771,10 @@ function App() {
     () => normalizeVenueSessionBadges(selectedMarket, marketStatus),
     [selectedMarket, marketStatus],
   );
+
+  useEffect(() => {
+    setAlertVenuePreference(selectedSymbolDefaultVenue);
+  }, [selectedSymbol, selectedSymbolDefaultVenue]);
 
   useEffect(() => {
     let canceled = false;
@@ -3914,6 +3974,7 @@ function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             symbols: watchlistAlertSymbols,
+            ...(watchlistAlertVenues ? { venues: watchlistAlertVenues } : {}),
             ...(alertRuleIndicatorAwareOnly ? { indicatorAwareOnly: true } : {}),
           }),
         });
@@ -4005,6 +4066,7 @@ function App() {
       loadAlertRules,
       reportOpsError,
       watchlistAlertSymbols,
+      watchlistAlertVenues,
     ],
   );
 
@@ -4043,7 +4105,9 @@ function App() {
   const handlePickSymbol = useCallback(
     async (item: SymbolItem) => {
       const symbol = item.symbol.toUpperCase();
-      const nextItem = symbol === item.symbol ? item : { ...item, symbol };
+      const baseItem = normalizeSymbolItemVenue(symbol === item.symbol ? item : { ...item, symbol });
+      const pickedVenue = normalizeVenueForSymbol(baseItem, watchlistAddVenuePreference);
+      const nextItem = pickedVenue ? { ...baseItem, venue: pickedVenue } : baseItem;
       const alreadyAdded = watchlistSymbols.some((saved) => saved.symbol === nextItem.symbol);
       const nextWatchlist = alreadyAdded ? watchlistSymbols : [nextItem, ...watchlistSymbols].slice(0, 40);
 
@@ -4059,6 +4123,45 @@ function App() {
       if (alreadyAdded) {
         return;
       }
+
+      try {
+        const persistedItems = await persistWatchlist(nextWatchlist);
+        setWatchlistSymbols(persistedItems);
+      } catch {
+        setError((prev) => prev ?? '관심종목 저장에 실패했습니다.');
+      }
+    },
+    [persistWatchlist, watchlistAddVenuePreference, watchlistSymbols],
+  );
+
+  const handleUpdateWatchSymbolVenue = useCallback(
+    async (symbolToUpdate: string, nextVenueValue: VenuePreferenceValue) => {
+      let changed = false;
+      const nextWatchlist = watchlistSymbols.map((item) => {
+        if (item.symbol !== symbolToUpdate) {
+          return item;
+        }
+
+        const normalizedVenue = normalizeVenueForSymbol(item, nextVenueValue);
+        if (normalizedVenue === item.venue) {
+          return item;
+        }
+
+        changed = true;
+        if (normalizedVenue) {
+          return { ...item, venue: normalizedVenue };
+        }
+
+        const rest = { ...item };
+        delete rest.venue;
+        return rest;
+      });
+
+      if (!changed) {
+        return;
+      }
+
+      setWatchlistSymbols(nextWatchlist);
 
       try {
         const persistedItems = await persistWatchlist(nextWatchlist);
@@ -4473,6 +4576,9 @@ function App() {
   const handleCreateAlertRule = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setAlertsRecovery(null);
+    const normalizedAlertVenue = selectedSymbolVenueSupported
+      ? normalizeVenueForSymbol({ symbol: selectedSymbol, market: selectedMarket }, alertVenuePreference)
+      : undefined;
 
     const threshold = Number(alertThresholdInput);
     if (!Number.isFinite(threshold)) {
@@ -4534,6 +4640,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           symbol: selectedSymbol,
+          ...(normalizedAlertVenue ? { venue: normalizedAlertVenue } : {}),
           metric: alertMetric,
           operator: alertOperator,
           threshold,
@@ -4616,11 +4723,19 @@ function App() {
     try {
       const body: {
         symbol: string;
+        venue?: KrVenue;
         values?: { symbol: string; lastPrice: number; changePercent: number };
         indicatorAwareOnly?: boolean;
       } = {
         symbol: selectedSymbol,
       };
+
+      const normalizedAlertVenue = selectedSymbolVenueSupported
+        ? normalizeVenueForSymbol({ symbol: selectedSymbol, market: selectedMarket }, alertVenuePreference)
+        : undefined;
+      if (normalizedAlertVenue) {
+        body.venue = normalizedAlertVenue;
+      }
 
       if (alertRuleIndicatorAwareOnly) {
         body.indicatorAwareOnly = true;
@@ -6882,6 +6997,17 @@ function App() {
                       placeholder="종목 코드/종목명 검색 (예: 005930, 삼성전자, BTC)"
                       autoComplete="off"
                     />
+                    <label className="watch-venue-pref">
+                      <span>KR Venue</span>
+                      <select
+                        value={watchlistAddVenuePreference}
+                        onChange={(event) => setWatchlistAddVenuePreference(toVenuePreferenceValue(event.target.value))}
+                      >
+                        <option value="">기본(전체)</option>
+                        <option value="KRX">KRX</option>
+                        <option value="NXT">NXT</option>
+                      </select>
+                    </label>
                   </div>
                   <div className="watch-filters">
                     {(['ALL', 'KOSPI', 'KOSDAQ', 'CRYPTO'] as const).map((market) => (
@@ -6914,6 +7040,8 @@ function App() {
                     {filteredWatchlist.map((item) => {
                       const hasLastPrice = typeof item.lastPrice === 'number';
                       const hasChangePercent = typeof item.changePercent === 'number';
+                      const venueSupported = normalizeVenueForSymbol(item, 'KRX') === 'KRX';
+                      const watchVenueValue = toVenuePreferenceValue(item.venue);
 
                       return (
                         <li
@@ -6925,6 +7053,7 @@ function App() {
                             <strong>{getDisplayCode(item)}</strong>
                             <small>
                               {item.name} · {item.market}
+                              {item.venue ? <span className="watch-venue-tag">{item.venue}</span> : null}
                             </small>
                           </div>
                           <div className="watch-value">
@@ -6938,6 +7067,27 @@ function App() {
                                 : '--'}
                             </small>
                           </div>
+                          {venueSupported ? (
+                            <label
+                              className="watch-venue-control"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                              }}
+                            >
+                              <span>Venue</span>
+                              <select
+                                value={watchVenueValue}
+                                onChange={(event) => {
+                                  event.stopPropagation();
+                                  void handleUpdateWatchSymbolVenue(item.symbol, toVenuePreferenceValue(event.target.value));
+                                }}
+                              >
+                                <option value="">기본</option>
+                                <option value="KRX">KRX</option>
+                                <option value="NXT">NXT</option>
+                              </select>
+                            </label>
+                          ) : null}
                           <button
                             type="button"
                             className="watch-remove"
@@ -7175,6 +7325,24 @@ function App() {
                       </label>
                     </div>
 
+                    {selectedSymbolVenueSupported ? (
+                      <div className="alert-venue-row">
+                        <label className="alert-venue-select">
+                          <span>KR Venue (선택)</span>
+                          <select
+                            value={alertVenuePreference}
+                            onChange={(event) =>
+                              setAlertVenuePreference(toVenuePreferenceValue(event.target.value))
+                            }
+                          >
+                            <option value="">기본(전체)</option>
+                            <option value="KRX">KRX</option>
+                            <option value="NXT">NXT</option>
+                          </select>
+                        </label>
+                      </div>
+                    ) : null}
+
                     <div className="alert-indicator-controls">
                       <label className="alert-inline-toggle">
                         <input
@@ -7348,7 +7516,10 @@ function App() {
                         {alertErroredRules.slice(0, 5).map((rule) => (
                           <li key={`error-${rule.id}`}>
                             <div className="alert-rule-row">
-                              <strong>{rule.symbol}</strong>
+                              <strong>
+                                {rule.symbol}
+                                {rule.venue ? <span className="alert-venue-tag">{rule.venue}</span> : null}
+                              </strong>
                               <span className="alert-state-tag error">error</span>
                             </div>
                             <div className="alert-rule-sub">
@@ -7410,6 +7581,7 @@ function App() {
                           </div>
                           <div className="alert-rule-sub">
                             <span>심볼: {rule.symbol}</span>
+                            {rule.venue ? <span>Venue: {rule.venue}</span> : null}
                             <span>쿨다운: {rule.cooldownSec}s</span>
                             {formatAlertIndicatorSummary(rule.indicatorConditions) ? (
                               <span>지표: {formatAlertIndicatorSummary(rule.indicatorConditions)}</span>
@@ -7446,6 +7618,7 @@ function App() {
                                 <span className={`alert-state-tag ${formatAlertState(eventItem.state)}`}>
                                   {formatAlertState(eventItem.state)}
                                 </span>
+                                {eventItem.venue ? <span className="alert-venue-tag">{eventItem.venue}</span> : null}
                                 <span>{eventItem.symbol}</span>
                               </div>
                             </div>
@@ -7567,6 +7740,7 @@ function App() {
                                 {eventItem.source ? (
                                   <span className={`alert-source-tag ${eventItem.source}`}>{eventItem.source}</span>
                                 ) : null}
+                                {eventItem.venue ? <span className="alert-venue-tag">{eventItem.venue}</span> : null}
                                 <span>{eventItem.symbol}</span>
                               </div>
                             </div>

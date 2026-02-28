@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { formatSigned, getDisplayCode, getOptionLabel, marketExchangeText, shortTicker } from './symbol';
+import {
+  formatSigned,
+  getDisplayCode,
+  getOptionLabel,
+  isKrMarket,
+  isKrSymbol,
+  marketExchangeText,
+  normalizeVenueForSymbol,
+  normalizeVenuePreference,
+  shortTicker,
+} from './symbol';
 
 describe('symbol helpers', () => {
   it('shortTicker removes KRX suffix', () => {
@@ -34,5 +44,28 @@ describe('symbol helpers', () => {
     expect(formatSigned(1.239, 2)).toBe('+1.24');
     expect(formatSigned(-1.239, 2)).toBe('-1.24');
     expect(formatSigned(0, 2)).toBe('0.00');
+  });
+
+  it('normalizes optional KRX/NXT venue strings', () => {
+    expect(normalizeVenuePreference('krx')).toBe('KRX');
+    expect(normalizeVenuePreference(' NXT ')).toBe('NXT');
+    expect(normalizeVenuePreference('')).toBeUndefined();
+    expect(normalizeVenuePreference('NASDAQ')).toBeUndefined();
+  });
+
+  it('applies venue preference only for KR symbols', () => {
+    expect(normalizeVenueForSymbol({ symbol: '005930.KS', market: 'KOSPI' }, 'nxt')).toBe('NXT');
+    expect(normalizeVenueForSymbol({ symbol: '247540.KQ', market: 'KOSDAQ' }, 'KRX')).toBe('KRX');
+    expect(normalizeVenueForSymbol({ symbol: 'BTCUSDT', market: 'CRYPTO' }, 'NXT')).toBeUndefined();
+    expect(normalizeVenueForSymbol({ symbol: 'BTCUSDT', market: 'KOSPI' }, 'KRX')).toBeUndefined();
+  });
+
+  it('detects KR market and KR symbol helpers', () => {
+    expect(isKrMarket('KOSPI')).toBe(true);
+    expect(isKrMarket('KOSDAQ')).toBe(true);
+    expect(isKrMarket('CRYPTO')).toBe(false);
+    expect(isKrSymbol('005930.KS')).toBe(true);
+    expect(isKrSymbol('247540.KQ')).toBe(true);
+    expect(isKrSymbol('BTCUSDT')).toBe(false);
   });
 });

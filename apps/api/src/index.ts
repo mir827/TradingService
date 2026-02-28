@@ -21,6 +21,7 @@ import {
 import { runMaCrossoverBacktest } from './strategyBacktest.js';
 
 type MarketType = 'CRYPTO' | 'KOSPI' | 'KOSDAQ';
+type KrVenue = 'KRX' | 'NXT';
 
 type SymbolItem = {
   symbol: string;
@@ -28,6 +29,7 @@ type SymbolItem = {
   name: string;
   market: MarketType;
   exchange?: string;
+  venue?: KrVenue;
 };
 
 type Candle = {
@@ -92,6 +94,7 @@ type AlertLastTriggerMetadata = {
   currentValue: number;
   source: AlertHistoryEventSource;
   sourceSymbol?: string;
+  venue?: KrVenue;
 };
 
 type AlertLastErrorMetadata = {
@@ -99,6 +102,7 @@ type AlertLastErrorMetadata = {
   message: string;
   source: AlertHistoryEventSource;
   sourceSymbol?: string;
+  venue?: KrVenue;
 };
 
 type AlertIndicatorCondition =
@@ -132,6 +136,7 @@ type AlertIndicatorCondition =
 type AlertRule = {
   id: string;
   symbol: string;
+  venue?: KrVenue;
   metric: AlertMetric;
   operator: AlertOperator;
   threshold: number;
@@ -149,6 +154,7 @@ type AlertRule = {
 type AlertCheckEvent = {
   ruleId: string;
   symbol: string;
+  venue?: KrVenue;
   metric: AlertMetric;
   operator: AlertOperator;
   threshold: number;
@@ -170,6 +176,7 @@ type AlertHistoryEvent = AlertCheckEvent & {
 type AlertCooldownSuppression = {
   ruleId: string;
   symbol: string;
+  venue?: KrVenue;
   metric: AlertMetric;
   suppressedAt: number;
   cooldownSec: number;
@@ -459,16 +466,26 @@ const searchQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });
 
+const krVenueSchema = z.preprocess((value) => {
+  if (typeof value === 'string') {
+    return value.trim().toUpperCase();
+  }
+
+  return value;
+}, z.enum(['KRX', 'NXT']));
+
 const symbolItemSchema = z.object({
   symbol: z.string().trim().min(1),
   code: z.string().trim().min(1).optional(),
   name: z.string().trim().min(1),
   market: z.enum(['CRYPTO', 'KOSPI', 'KOSDAQ']),
   exchange: z.string().trim().min(1).optional(),
+  venue: krVenueSchema.optional(),
 });
 
 const watchlistQuerySchema = z.object({
   name: z.string().trim().min(1).default('default'),
+  venue: krVenueSchema.optional(),
 });
 
 const watchlistPutBodySchema = z.object({
@@ -567,6 +584,7 @@ const alertRuleQuerySchema = z.object({
   symbol: z.string().optional(),
   symbols: alertQuerySymbolsSchema,
   indicatorAwareOnly: alertQueryIndicatorAwareOnlySchema,
+  venue: krVenueSchema.optional(),
 });
 
 const drawingsQuerySchema = z.object({
@@ -687,6 +705,7 @@ const alertIndicatorConditionSchema: z.ZodType<AlertIndicatorCondition> = z.disc
 
 const alertRuleCreateSchema = z.object({
   symbol: z.string().min(1),
+  venue: krVenueSchema.optional(),
   metric: z.enum(['price', 'changePercent']),
   operator: z.enum(['>=', '<=', '>', '<']),
   threshold: z.number().finite(),
@@ -701,6 +720,7 @@ const alertRuleDeleteParamSchema = z.object({
 const alertCheckBodySchema = z.object({
   symbol: z.string().optional(),
   symbols: z.array(z.string().trim().min(1)).min(1).max(40).optional(),
+  venue: krVenueSchema.optional(),
   source: z.enum(['manual', 'watchlist']).optional(),
   indicatorAwareOnly: z.boolean().optional(),
   values: z
@@ -714,6 +734,8 @@ const alertCheckBodySchema = z.object({
 
 const alertCheckWatchlistBodySchema = z.object({
   symbols: z.array(z.string().trim().min(1)).min(1).max(40),
+  venues: z.record(z.string().trim().min(1), krVenueSchema).optional(),
+  venue: krVenueSchema.optional(),
   source: z.enum(['manual', 'watchlist']).optional(),
   indicatorAwareOnly: z.boolean().optional(),
 });
@@ -721,6 +743,7 @@ const alertCheckWatchlistBodySchema = z.object({
 const alertHistoryQuerySchema = z.object({
   symbol: z.string().optional(),
   symbols: alertQuerySymbolsSchema,
+  venue: krVenueSchema.optional(),
   fromTs: z.coerce.number().int().nonnegative().optional(),
   toTs: z.coerce.number().int().nonnegative().optional(),
   source: z.enum(['manual', 'watchlist']).optional(),
@@ -959,6 +982,7 @@ const persistedAlertLastTriggerSchema = z.object({
   currentValue: z.coerce.number().finite(),
   source: z.enum(['manual', 'watchlist']),
   sourceSymbol: z.string().trim().min(1).optional(),
+  venue: krVenueSchema.optional(),
 });
 
 const persistedAlertLastErrorSchema = z.object({
@@ -966,11 +990,13 @@ const persistedAlertLastErrorSchema = z.object({
   message: z.string().trim().min(1).max(300),
   source: z.enum(['manual', 'watchlist']),
   sourceSymbol: z.string().trim().min(1).optional(),
+  venue: krVenueSchema.optional(),
 });
 
 const persistedAlertRuleSchema = z.object({
   id: z.string().trim().min(1),
   symbol: z.string().trim().min(1),
+  venue: krVenueSchema.optional(),
   metric: z.enum(['price', 'changePercent']),
   operator: z.enum(['>=', '<=', '>', '<']),
   threshold: z.coerce.number().finite(),
@@ -988,6 +1014,7 @@ const persistedAlertRuleSchema = z.object({
 const persistedAlertHistoryEventSchema = z.object({
   ruleId: z.string().trim().min(1),
   symbol: z.string().trim().min(1),
+  venue: krVenueSchema.optional(),
   metric: z.enum(['price', 'changePercent']),
   operator: z.enum(['>=', '<=', '>', '<']),
   threshold: z.coerce.number().finite(),
@@ -1062,8 +1089,51 @@ function shortTicker(symbol: string) {
   return symbol.replace(/\.K[QS]$/i, '');
 }
 
+function isKrMarket(market: MarketType) {
+  return market === 'KOSPI' || market === 'KOSDAQ';
+}
+
 function isKrxSymbol(symbol: string) {
   return /\.K[QS]$/i.test(symbol);
+}
+
+function normalizeKrVenue(venue?: KrVenue | string | null): KrVenue | undefined {
+  if (venue === 'KRX' || venue === 'NXT') {
+    return venue;
+  }
+
+  if (typeof venue === 'string') {
+    const normalized = venue.trim().toUpperCase();
+    if (normalized === 'KRX' || normalized === 'NXT') {
+      return normalized;
+    }
+  }
+
+  return undefined;
+}
+
+function resolveVenueForSymbol(symbol: string, venue?: KrVenue | string | null) {
+  if (!isKrxSymbol(symbol)) {
+    return undefined;
+  }
+
+  return normalizeKrVenue(venue);
+}
+
+function resolveVenueForMarket(market: MarketType, venue?: KrVenue | string | null) {
+  if (!isKrMarket(market)) {
+    return undefined;
+  }
+
+  return normalizeKrVenue(venue);
+}
+
+function isVenueFilterMatch(symbol: string, venue: KrVenue | undefined, requestedVenue: KrVenue | null) {
+  if (!requestedVenue || !isKrxSymbol(symbol)) {
+    return true;
+  }
+
+  return !venue || venue === requestedVenue;
 }
 
 function getCachedQuote(symbol: string) {
@@ -1116,15 +1186,18 @@ function resolveRuntimeStateFilePath() {
 }
 
 function normalizeSymbolItem(item: SymbolItem): SymbolItem {
+  const symbol = normalizeSymbol(item.symbol);
   const code = item.code?.trim();
   const exchange = item.exchange?.trim();
+  const venue = resolveVenueForMarket(item.market, item.venue);
 
   return {
-    symbol: normalizeSymbol(item.symbol),
+    symbol,
     ...(code ? { code } : {}),
     name: item.name.trim(),
     market: item.market,
     ...(exchange ? { exchange } : {}),
+    ...(venue ? { venue } : {}),
   };
 }
 
@@ -1141,8 +1214,13 @@ function getOrCreateWatchlist(name: string) {
   return watchlistStore.get(name) ?? [];
 }
 
-function getWatchlistItems(name: string) {
-  return getOrCreateWatchlist(name).map(cloneSymbolItem);
+function getWatchlistItems(name: string, venue: KrVenue | null = null) {
+  const items = getOrCreateWatchlist(name).map(cloneSymbolItem);
+  if (!venue) {
+    return items;
+  }
+
+  return items.filter((item) => isVenueFilterMatch(item.symbol, item.venue, venue));
 }
 
 function setWatchlistItems(name: string, items: SymbolItem[]) {
@@ -2284,6 +2362,7 @@ function createRuntimeStatePayload() {
     alertHistory: alertHistoryStore.map((eventItem) => ({
       ruleId: eventItem.ruleId,
       symbol: eventItem.symbol,
+      ...(eventItem.venue ? { venue: eventItem.venue } : {}),
       metric: eventItem.metric,
       operator: eventItem.operator,
       threshold: eventItem.threshold,
@@ -2405,9 +2484,21 @@ async function loadRuntimeStateFromDisk() {
       continue;
     }
 
+    const normalizedRuleSymbol = normalizeSymbol(parsedRule.data.symbol);
+    const normalizedRuleVenue = resolveVenueForSymbol(normalizedRuleSymbol, parsedRule.data.venue);
+    const normalizedLastTriggerVenue = resolveVenueForSymbol(
+      normalizedRuleSymbol,
+      parsedRule.data.lastTrigger?.venue,
+    );
+    const normalizedLastErrorVenue = resolveVenueForSymbol(
+      normalizedRuleSymbol,
+      parsedRule.data.lastError?.venue,
+    );
+
     const normalizedRule: AlertRule = {
       id: parsedRule.data.id.trim(),
-      symbol: normalizeSymbol(parsedRule.data.symbol),
+      symbol: normalizedRuleSymbol,
+      ...(normalizedRuleVenue ? { venue: normalizedRuleVenue } : {}),
       metric: parsedRule.data.metric,
       operator: parsedRule.data.operator,
       threshold: parsedRule.data.threshold,
@@ -2429,6 +2520,7 @@ async function loadRuntimeStateFromDisk() {
               ...(parsedRule.data.lastTrigger.sourceSymbol
                 ? { sourceSymbol: normalizeSymbol(parsedRule.data.lastTrigger.sourceSymbol) }
                 : {}),
+              ...(normalizedLastTriggerVenue ? { venue: normalizedLastTriggerVenue } : {}),
             },
           }
         : {}),
@@ -2441,6 +2533,7 @@ async function loadRuntimeStateFromDisk() {
               ...(parsedRule.data.lastError.sourceSymbol
                 ? { sourceSymbol: normalizeSymbol(parsedRule.data.lastError.sourceSymbol) }
                 : {}),
+              ...(normalizedLastErrorVenue ? { venue: normalizedLastErrorVenue } : {}),
             },
           }
         : {}),
@@ -2491,9 +2584,13 @@ async function loadRuntimeStateFromDisk() {
       continue;
     }
 
+    const normalizedEventSymbol = normalizeSymbol(parsedEvent.data.symbol);
+    const normalizedEventVenue = resolveVenueForSymbol(normalizedEventSymbol, parsedEvent.data.venue);
+
     const normalizedEvent: AlertHistoryEvent = {
       ruleId: parsedEvent.data.ruleId.trim(),
-      symbol: normalizeSymbol(parsedEvent.data.symbol),
+      symbol: normalizedEventSymbol,
+      ...(normalizedEventVenue ? { venue: normalizedEventVenue } : {}),
       metric: parsedEvent.data.metric,
       operator: parsedEvent.data.operator,
       threshold: parsedEvent.data.threshold,
@@ -2801,22 +2898,26 @@ function cloneAlertStateTransition(transition?: AlertStateTransition) {
 
 function cloneAlertLastTrigger(lastTrigger?: AlertLastTriggerMetadata) {
   if (!lastTrigger) return undefined;
+  const venue = normalizeKrVenue(lastTrigger.venue);
   return {
     triggeredAt: lastTrigger.triggeredAt,
     currentValue: lastTrigger.currentValue,
     source: lastTrigger.source,
     ...(lastTrigger.sourceSymbol ? { sourceSymbol: normalizeSymbol(lastTrigger.sourceSymbol) } : {}),
+    ...(venue ? { venue } : {}),
   } satisfies AlertLastTriggerMetadata;
 }
 
 function cloneAlertLastError(lastError?: AlertLastErrorMetadata) {
   if (!lastError) return undefined;
   const message = lastError.message.trim();
+  const venue = normalizeKrVenue(lastError.venue);
   return {
     failedAt: lastError.failedAt,
     message,
     source: lastError.source,
     ...(lastError.sourceSymbol ? { sourceSymbol: normalizeSymbol(lastError.sourceSymbol) } : {}),
+    ...(venue ? { venue } : {}),
   } satisfies AlertLastErrorMetadata;
 }
 
@@ -3016,6 +3117,7 @@ function serializeAlertRule(rule: AlertRule) {
   return {
     id: rule.id,
     symbol: rule.symbol,
+    ...(rule.venue ? { venue: rule.venue } : {}),
     metric: rule.metric,
     operator: rule.operator,
     threshold: rule.threshold,
@@ -3058,6 +3160,7 @@ function appendAlertHistoryEvents(
     alertHistoryStore.push({
       ruleId: eventItem.ruleId,
       symbol: eventItem.symbol,
+      ...(eventItem.venue ? { venue: eventItem.venue } : {}),
       metric: eventItem.metric,
       operator: eventItem.operator,
       threshold: eventItem.threshold,
@@ -3082,6 +3185,7 @@ function appendAlertHistoryEvents(
 function getAlertHistory(
   symbols: Set<string> | null,
   source: AlertHistoryEventSource | null,
+  venue: KrVenue | null,
   fromTs: number | null,
   toTs: number | null,
   limit: number,
@@ -3095,6 +3199,10 @@ function getAlertHistory(
     }
 
     if (source && eventItem.source !== source) {
+      return false;
+    }
+
+    if (!isVenueFilterMatch(eventItem.symbol, eventItem.venue, venue)) {
       return false;
     }
 
@@ -3133,6 +3241,7 @@ function getAlertHistory(
     events: filtered.slice(start).reverse().map((eventItem) => ({
       ruleId: eventItem.ruleId,
       symbol: eventItem.symbol,
+      ...(eventItem.venue ? { venue: eventItem.venue } : {}),
       metric: eventItem.metric,
       operator: eventItem.operator,
       threshold: eventItem.threshold,
@@ -3205,6 +3314,7 @@ function evaluateAlertRules(
       suppressed.push({
         ruleId: rule.id,
         symbol: rule.symbol,
+        ...(rule.venue ? { venue: rule.venue } : {}),
         metric: rule.metric,
         suppressedAt: evaluatedAt,
         cooldownSec: rule.cooldownSec,
@@ -3221,6 +3331,7 @@ function evaluateAlertRules(
       currentValue,
       source,
       ...(normalizedSourceSymbol ? { sourceSymbol: normalizedSourceSymbol } : {}),
+      ...(rule.venue ? { venue: rule.venue } : {}),
     };
     const transition = transitionAlertRuleState(rule, 'triggered', evaluatedAt, 'conditionMet');
     if (transition) {
@@ -3229,6 +3340,7 @@ function evaluateAlertRules(
     triggered.push({
       ruleId: rule.id,
       symbol: rule.symbol,
+      ...(rule.venue ? { venue: rule.venue } : {}),
       metric: rule.metric,
       operator: rule.operator,
       threshold: rule.threshold,
@@ -3271,6 +3383,7 @@ function markAlertRulesAsError(
       previousError?.message === normalizedMessage &&
       previousError.source === source &&
       previousError.sourceSymbol === normalizedSourceSymbol &&
+      previousError.venue === rule.venue &&
       failedAt - previousError.failedAt < ALERT_ERROR_EVENT_DEDUP_WINDOW_MS;
 
     const transition = transitionAlertRuleState(rule, 'error', failedAt, 'evaluationError', normalizedMessage);
@@ -3287,12 +3400,14 @@ function markAlertRulesAsError(
       message: normalizedMessage,
       source,
       ...(normalizedSourceSymbol ? { sourceSymbol: normalizedSourceSymbol } : {}),
+      ...(rule.venue ? { venue: rule.venue } : {}),
     };
     changedRuleCount += 1;
 
     errorEvents.push({
       ruleId: rule.id,
       symbol: rule.symbol,
+      ...(rule.venue ? { venue: rule.venue } : {}),
       metric: rule.metric,
       operator: rule.operator,
       threshold: rule.threshold,
@@ -3322,9 +3437,16 @@ function filterAlertRulesByScope(
   rules: AlertRule[],
   scopedSymbols: Set<string> | null,
   indicatorAwareOnly: boolean,
+  venue: KrVenue | null = null,
+  symbolVenues?: Map<string, KrVenue>,
 ) {
   return rules.filter((rule) => {
     if (scopedSymbols && !scopedSymbols.has(rule.symbol)) {
+      return false;
+    }
+
+    const venueFilter = symbolVenues?.get(rule.symbol) ?? venue;
+    if (!isVenueFilterMatch(rule.symbol, rule.venue, venueFilter ?? null)) {
       return false;
     }
 
@@ -3816,10 +3938,11 @@ app.get('/api/watchlist', async (request, reply) => {
   }
 
   const name = normalizeWatchlistName(parsed.data.name);
+  const venue = parsed.data.venue ?? null;
 
   return {
     name,
-    items: getWatchlistItems(name),
+    items: getWatchlistItems(name, venue),
   };
 });
 
@@ -4191,7 +4314,8 @@ app.get('/api/alerts/rules', async (request, reply) => {
 
   const scopedSymbols = collectScopedSymbols(parsed.data.symbol, parsed.data.symbols);
   const indicatorAwareOnly = parsed.data.indicatorAwareOnly === true;
-  const rules = filterAlertRulesByScope([...alertRuleStore.values()], scopedSymbols, indicatorAwareOnly)
+  const venue = parsed.data.venue ?? null;
+  const rules = filterAlertRulesByScope([...alertRuleStore.values()], scopedSymbols, indicatorAwareOnly, venue)
     .sort((a, b) => b.createdAt - a.createdAt)
     .map(serializeAlertRule);
 
@@ -4207,9 +4331,12 @@ app.post('/api/alerts/rules', async (request, reply) => {
 
   const now = Date.now();
   const initialTransition = createInitialAlertStateTransition(now);
+  const normalizedSymbol = normalizeSymbol(parsed.data.symbol);
+  const normalizedVenue = resolveVenueForSymbol(normalizedSymbol, parsed.data.venue);
   const rule: AlertRule = {
     id: createAlertRuleId(),
-    symbol: normalizeSymbol(parsed.data.symbol),
+    symbol: normalizedSymbol,
+    ...(normalizedVenue ? { venue: normalizedVenue } : {}),
     metric: parsed.data.metric,
     operator: parsed.data.operator,
     threshold: parsed.data.threshold,
@@ -4256,10 +4383,12 @@ app.post('/api/alerts/check', async (request, reply) => {
 
   const source = parsed.data.source ?? 'manual';
   const scopedSymbols = collectScopedSymbols(parsed.data.symbol, parsed.data.symbols);
+  const venue = parsed.data.venue ?? null;
   const rules = filterAlertRulesByScope(
     [...alertRuleStore.values()],
     scopedSymbols,
     parsed.data.indicatorAwareOnly === true,
+    venue,
   );
 
   if (!rules.length) {
@@ -4365,10 +4494,22 @@ app.post('/api/alerts/check-watchlist', async (request, reply) => {
   const source = parsed.data.source ?? 'watchlist';
   const checkedSymbols = [...new Set(parsed.data.symbols.map((symbol) => normalizeSymbol(symbol)))];
   const checkedSet = new Set(checkedSymbols);
+  const venue = parsed.data.venue ?? null;
+  const symbolVenues = new Map<string, KrVenue>();
+  for (const [rawSymbol, rawVenue] of Object.entries(parsed.data.venues ?? {})) {
+    const normalizedSymbol = normalizeSymbol(rawSymbol);
+    if (!checkedSet.has(normalizedSymbol)) continue;
+    const normalizedVenue = resolveVenueForSymbol(normalizedSymbol, rawVenue);
+    if (normalizedVenue) {
+      symbolVenues.set(normalizedSymbol, normalizedVenue);
+    }
+  }
   const rules = filterAlertRulesByScope(
     [...alertRuleStore.values()],
     checkedSet,
     parsed.data.indicatorAwareOnly === true,
+    venue,
+    symbolVenues,
   );
 
   if (!rules.length) {
@@ -4458,6 +4599,7 @@ app.get('/api/alerts/history', async (request, reply) => {
   const symbols = collectScopedSymbols(parsed.data.symbol, parsed.data.symbols);
   const symbol = parsed.data.symbol ? normalizeSymbol(parsed.data.symbol) : null;
   const source = parsed.data.source ?? null;
+  const venue = parsed.data.venue ?? null;
   const fromTs = parsed.data.fromTs ?? null;
   const toTs = parsed.data.toTs ?? null;
   const indicatorAwareOnly = parsed.data.indicatorAwareOnly === true;
@@ -4466,6 +4608,7 @@ app.get('/api/alerts/history', async (request, reply) => {
   const { total, events } = getAlertHistory(
     symbols,
     source,
+    venue,
     fromTs,
     toTs,
     parsed.data.limit,

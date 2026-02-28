@@ -753,6 +753,79 @@ describe('api watchlist persistence', () => {
     expect(loadResponse.json()).toEqual(saved);
   });
 
+  it('accepts optional KR venue metadata and ignores it for non-KR symbols', async () => {
+    const saveResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/watchlist',
+      payload: {
+        items: [
+          {
+            symbol: 'BTCUSDT',
+            name: 'Bitcoin / USDT',
+            market: 'CRYPTO',
+            exchange: 'BINANCE',
+            venue: 'NXT',
+          },
+          {
+            symbol: '005930.KS',
+            code: '005930',
+            name: '삼성전자',
+            market: 'KOSPI',
+            exchange: 'KRX',
+            venue: 'nxt',
+          },
+        ],
+      },
+    });
+
+    expect(saveResponse.statusCode).toBe(200);
+    expect(saveResponse.json()).toEqual({
+      name: 'default',
+      items: [
+        {
+          symbol: 'BTCUSDT',
+          name: 'Bitcoin / USDT',
+          market: 'CRYPTO',
+          exchange: 'BINANCE',
+        },
+        {
+          symbol: '005930.KS',
+          code: '005930',
+          name: '삼성전자',
+          market: 'KOSPI',
+          exchange: 'KRX',
+          venue: 'NXT',
+        },
+      ],
+    });
+
+    const nxtFiltered = await app.inject({
+      method: 'GET',
+      url: '/api/watchlist?name=default&venue=NXT',
+    });
+
+    expect(nxtFiltered.statusCode).toBe(200);
+    expect(
+      (nxtFiltered.json() as { items: Array<{ symbol: string; venue?: string }> }).items.map((item) => ({
+        symbol: item.symbol,
+        ...(item.venue ? { venue: item.venue } : {}),
+      })),
+    ).toEqual([{ symbol: 'BTCUSDT' }, { symbol: '005930.KS', venue: 'NXT' }]);
+
+    const krxFiltered = await app.inject({
+      method: 'GET',
+      url: '/api/watchlist?name=default&venue=KRX',
+    });
+
+    expect(krxFiltered.statusCode).toBe(200);
+    expect(
+      (krxFiltered.json() as { items: Array<{ symbol: string; venue?: string }> }).items.map((item) => ({
+        symbol: item.symbol,
+        ...(item.venue ? { venue: item.venue } : {}),
+      })),
+    ).toEqual([{ symbol: 'BTCUSDT' }]);
+  });
+
   it('persists watchlist across app recreation', async () => {
     const saveResponse = await app.inject({
       method: 'PUT',
@@ -1636,6 +1709,132 @@ describe('api alerts rules', () => {
 
     expect(listAfterDelete.statusCode).toBe(200);
     expect((listAfterDelete.json() as { rules: unknown[] }).rules).toHaveLength(0);
+  });
+
+  it('stores KR venue preference and carries venue through check/history payloads', async () => {
+    const create = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: '005930.ks',
+        venue: 'NXT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 70000,
+        cooldownSec: 0,
+      },
+    });
+
+    expect(create.statusCode).toBe(201);
+    const created = create.json() as {
+      rule: {
+        id: string;
+        symbol: string;
+        venue?: 'KRX' | 'NXT';
+      };
+    };
+    expect(created.rule.symbol).toBe('005930.KS');
+    expect(created.rule.venue).toBe('NXT');
+
+    const listWithNxt = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/rules?symbol=005930.KS&venue=NXT',
+    });
+    expect(listWithNxt.statusCode).toBe(200);
+    expect((listWithNxt.json() as { rules: Array<{ venue?: string }> }).rules).toHaveLength(1);
+
+    const listWithKrx = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/rules?symbol=005930.KS&venue=KRX',
+    });
+    expect(listWithKrx.statusCode).toBe(200);
+    expect((listWithKrx.json() as { rules: unknown[] }).rules).toHaveLength(0);
+
+    const check = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check',
+      payload: {
+        symbol: '005930.KS',
+        venue: 'NXT',
+        values: {
+          symbol: '005930.KS',
+          lastPrice: 71000,
+          changePercent: 1.2,
+        },
+      },
+    });
+
+    expect(check.statusCode).toBe(200);
+    expect(check.json()).toMatchObject({
+      checkedRuleCount: 1,
+      triggeredCount: 1,
+      triggered: [{ symbol: '005930.KS', venue: 'NXT' }],
+    });
+
+    const history = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?symbol=005930.KS&venue=NXT&limit=10',
+    });
+
+    expect(history.statusCode).toBe(200);
+    expect(history.json()).toMatchObject({
+      total: 1,
+      events: [{ symbol: '005930.KS', venue: 'NXT' }],
+    });
+  });
+
+  it('ignores venue safely for non-KR symbols', async () => {
+    const create = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'BTCUSDT',
+        venue: 'NXT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 100,
+      },
+    });
+
+    expect(create.statusCode).toBe(201);
+    const created = create.json() as {
+      rule: {
+        symbol: string;
+        venue?: string;
+      };
+    };
+    expect(created.rule.symbol).toBe('BTCUSDT');
+    expect(created.rule.venue).toBeUndefined();
+
+    const list = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/rules?symbol=BTCUSDT&venue=KRX',
+    });
+    expect(list.statusCode).toBe(200);
+    expect((list.json() as { rules: unknown[] }).rules).toHaveLength(1);
+
+    const check = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check',
+      payload: {
+        symbol: 'BTCUSDT',
+        venue: 'NXT',
+        values: {
+          symbol: 'BTCUSDT',
+          lastPrice: 120,
+          changePercent: 0.4,
+        },
+      },
+    });
+    expect(check.statusCode).toBe(200);
+    expect(check.json()).toMatchObject({
+      checkedRuleCount: 1,
+      triggeredCount: 1,
+      triggered: [{ symbol: 'BTCUSDT' }],
+    });
+    expect(
+      (check.json() as { triggered: Array<{ venue?: string }> }).triggered[0].venue,
+    ).toBeUndefined();
   });
 
   it('evaluates alerts and applies cooldown suppression', async () => {
@@ -2587,6 +2786,61 @@ describe('api alerts watchlist checks', () => {
     expect(body.events).toHaveLength(2);
     expect(body.events.map((event) => event.symbol).sort()).toEqual(['BTCUSDT', 'ETHUSDT']);
     expect(body.events.map((event) => event.metric).sort()).toEqual(['changePercent', 'price']);
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it('accepts optional watchlist venue hints without breaking non-KR checks', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const rawUrl =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const url = new URL(rawUrl);
+      const symbol = url.searchParams.get('symbol');
+
+      if (url.hostname !== 'api.binance.com' || url.pathname !== '/api/v3/ticker/24hr' || symbol !== 'BTCUSDT') {
+        return jsonResponse({ error: 'unexpected request' }, 404);
+      }
+
+      return jsonResponse({
+        lastPrice: '51000',
+        priceChangePercent: '1.2',
+        highPrice: '52000',
+        lowPrice: '50000',
+        volume: '100',
+      });
+    });
+
+    const createRule = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'BTCUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 50000,
+      },
+    });
+    expect(createRule.statusCode).toBe(201);
+
+    const check = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check-watchlist',
+      payload: {
+        symbols: ['BTCUSDT'],
+        venues: { BTCUSDT: 'NXT' },
+      },
+    });
+
+    expect(check.statusCode).toBe(200);
+    expect(check.json()).toMatchObject({
+      checkedSymbols: ['BTCUSDT'],
+      checkedRuleCount: 1,
+      triggeredCount: 1,
+      events: [{ symbol: 'BTCUSDT' }],
+    });
     expect(fetchSpy).toHaveBeenCalled();
   });
 

@@ -1,4 +1,5 @@
 export type MarketType = 'CRYPTO' | 'KOSPI' | 'KOSDAQ';
+export type KrVenue = 'KRX' | 'NXT';
 
 export type SymbolLike = {
   symbol: string;
@@ -6,6 +7,37 @@ export type SymbolLike = {
   name: string;
   market: MarketType;
 };
+
+export function isKrMarket(market: MarketType) {
+  return market === 'KOSPI' || market === 'KOSDAQ';
+}
+
+export function isKrSymbol(symbol: string) {
+  return /\.K[QS]$/i.test(symbol);
+}
+
+export function normalizeVenuePreference(venue?: string | null): KrVenue | undefined {
+  if (venue === 'KRX' || venue === 'NXT') {
+    return venue;
+  }
+
+  if (typeof venue === 'string') {
+    const normalized = venue.trim().toUpperCase();
+    if (normalized === 'KRX' || normalized === 'NXT') {
+      return normalized;
+    }
+  }
+
+  return undefined;
+}
+
+export function normalizeVenueForSymbol(input: Pick<SymbolLike, 'symbol' | 'market'>, venue?: string | null) {
+  if (!isKrMarket(input.market) || !isKrSymbol(input.symbol)) {
+    return undefined;
+  }
+
+  return normalizeVenuePreference(venue);
+}
 
 export function shortTicker(symbol: string) {
   return symbol.replace(/\.K[QS]$/i, '');
