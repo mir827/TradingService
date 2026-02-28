@@ -6,6 +6,34 @@ describe('nxt detail helpers', () => {
     expect(normalizeNxtDetailInfo('CRYPTO')).toBeNull();
   });
 
+  it('no-ops for non-KR markets even when NXT payload is provided', () => {
+    expect(
+      normalizeNxtDetailInfo('CRYPTO', {
+        nxt: {
+          supported: true,
+          available: true,
+          status: 'available',
+          price: 60500,
+          changePercent: 1.8,
+        },
+      }),
+    ).toBeNull();
+
+    expect(
+      normalizeKrxNxtComparisonInfo('CRYPTO', {
+        lastPrice: 60500,
+        changePercent: 1.8,
+        nxt: {
+          supported: true,
+          available: true,
+          status: 'available',
+          price: 60520,
+          changePercent: 1.9,
+        },
+      }),
+    ).toBeNull();
+  });
+
   it('normalizes unavailable fallback metadata for KR markets', () => {
     expect(normalizeNxtDetailInfo('KOSPI')).toEqual({
       supported: false,
@@ -38,6 +66,26 @@ describe('nxt detail helpers', () => {
       price: 12345,
       changePercent: 1.28,
       updatedAt: 1_762_281_200_000,
+    });
+  });
+
+  it('keeps unavailable NXT schema stable when detail fields are missing', () => {
+    expect(
+      normalizeNxtDetailInfo('KOSPI', {
+        nxt: {
+          supported: true,
+          available: false,
+          status: 'unavailable',
+        },
+      }),
+    ).toEqual({
+      supported: true,
+      supportLabel: '지원',
+      status: 'unavailable',
+      reason: 'NXT 시세 미제공',
+      price: null,
+      changePercent: null,
+      updatedAt: null,
     });
   });
 

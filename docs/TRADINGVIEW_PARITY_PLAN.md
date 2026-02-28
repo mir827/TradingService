@@ -265,7 +265,9 @@ Progress note (2026-02-28):
 - M6-1 완료: `/api/quote`와 `/api/market-status`에 KOSPI/KOSDAQ용 NXT optional 메타 필드를 추가했고, 기존 KRX/CRYPTO 응답 호환성을 유지함.
 - M6-2 완료: `apps/web` 상세 패널에 KRX/NXT 비교 카드(가격/등락/업데이트 시각)와 venue 세션 배지(KRX/NXT)를 추가했고, venue 메타 누락 시에도 기본 배지/표시값으로 안전하게 폴백되도록 반영함.
 - M6-3 완료: `apps/api`의 watchlist/alerts 경로에 optional `venue (KRX|NXT)` 힌트/필터를 추가하고, KR 심볼에만 venue를 저장/전파하도록 정규화했으며, alert check/history payload와 `apps/web`의 watchlist/alerts UI(선택 셀렉터 + venue 배지)에 연계함.
-- 남은 작업: M6-4(운영 검증/회귀 강화).
+- M6-4 완료: `apps/api`/`apps/web` 회귀 테스트를 확장해 KRX-only(venue 생략) 호환 동작, NXT unavailable reason 메타데이터 안정성, venue별 watchlist/alerts 메타 persistence 호환성, 시장 상태 venue 세션 필드(OPEN/CLOSED/phase fallback) 케이스를 고정함.
+- 운영 검증 유틸 추가: `apps/api/scripts/kr-regression-smoke.ts`에서 외부 의존 최소화(mock fetch + `app.inject`) 방식으로 `/api/quote`, `/api/market-status`, `/api/watchlist`, `/api/alerts/rules`, `/api/alerts/check`를 결정론적으로 검증함.
+- M6 status: complete.
 
 DoD:
 - 기존 KRX-only 플로우가 깨지지 않고, NXT 필드가 optional/backward-compatible 하게 동작

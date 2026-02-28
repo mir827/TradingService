@@ -58,6 +58,7 @@ describe('symbol helpers', () => {
     expect(normalizeVenueForSymbol({ symbol: '247540.KQ', market: 'KOSDAQ' }, 'KRX')).toBe('KRX');
     expect(normalizeVenueForSymbol({ symbol: 'BTCUSDT', market: 'CRYPTO' }, 'NXT')).toBeUndefined();
     expect(normalizeVenueForSymbol({ symbol: 'BTCUSDT', market: 'KOSPI' }, 'KRX')).toBeUndefined();
+    expect(normalizeVenueForSymbol({ symbol: 'ETHUSDT', market: 'CRYPTO' }, ' KRX ')).toBeUndefined();
   });
 
   it('detects KR market and KR symbol helpers', () => {

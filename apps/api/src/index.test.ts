@@ -238,6 +238,107 @@ describe('api market status', () => {
     });
   });
 
+  it('keeps venue session metadata stable across open/post-market phases', async () => {
+    const nowSpy = vi.spyOn(Date, 'now');
+    const inSession = new Date('2025-02-24T10:20:00+09:00').getTime();
+    nowSpy.mockReturnValue(inSession);
+
+    const openResponse = await app.inject({
+      method: 'GET',
+      url: '/api/market-status?market=KOSPI',
+    });
+
+    expect(openResponse.statusCode).toBe(200);
+    const openBody = openResponse.json() as {
+      checkedAt: number;
+      venues?: {
+        krx?: {
+          phase: string;
+          timezone: string;
+          checkedAt: number;
+          session: {
+            open: string;
+            close: string;
+            text: string;
+          };
+        };
+        nxt?: {
+          phase: string;
+          unavailableReason?: string;
+          timezone: string;
+          checkedAt: number;
+          session: {
+            open: string;
+            close: string;
+            text: string;
+          };
+        };
+      };
+    };
+    expect(openBody.checkedAt).toBe(inSession);
+    expect(openBody.venues?.krx).toMatchObject({
+      phase: 'OPEN',
+      checkedAt: inSession,
+      timezone: 'Asia/Seoul',
+      session: {
+        open: '09:00',
+        close: '15:30',
+        text: '09:00-15:30 KST',
+      },
+    });
+    expect(openBody.venues?.nxt).toMatchObject({
+      phase: 'UNAVAILABLE',
+      unavailableReason: 'NXT_STATUS_NOT_INTEGRATED',
+      checkedAt: inSession,
+      timezone: 'Asia/Seoul',
+      session: {
+        open: '09:00',
+        close: '15:30',
+        text: '09:00-15:30 KST',
+      },
+    });
+
+    const postMarket = new Date('2025-02-24T16:10:00+09:00').getTime();
+    nowSpy.mockReturnValue(postMarket);
+
+    const postMarketResponse = await app.inject({
+      method: 'GET',
+      url: '/api/market-status?market=KOSPI',
+    });
+
+    expect(postMarketResponse.statusCode).toBe(200);
+    const postMarketBody = postMarketResponse.json() as {
+      status: string;
+      reason: string;
+      checkedAt: number;
+      venues?: {
+        krx?: {
+          phase: string;
+          checkedAt: number;
+          session: {
+            open: string;
+            close: string;
+            text: string;
+          };
+        };
+      };
+    };
+    expect(postMarketBody).toMatchObject({
+      status: 'CLOSED',
+      reason: 'OUT_OF_SESSION',
+      checkedAt: postMarket,
+    });
+    expect(postMarketBody.venues?.krx).toMatchObject({
+      phase: 'POST_MARKET',
+      checkedAt: postMarket,
+      session: {
+        open: '09:00',
+        close: '15:30',
+        text: '09:00-15:30 KST',
+      },
+    });
+  });
+
   it('returns KOSDAQ closed on weekend', async () => {
     const weekend = new Date('2025-02-23T11:00:00+09:00').getTime();
     vi.spyOn(Date, 'now').mockReturnValue(weekend);
@@ -394,6 +495,8 @@ describe('api quote', () => {
       status: 'unavailable',
       reason: 'NXT_FEED_NOT_CONFIGURED',
     });
+    expect((body as { error?: unknown }).error).toBeUndefined();
+    expect(typeof body.nxt?.reason).toBe('string');
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -753,7 +856,7 @@ describe('api watchlist persistence', () => {
     expect(loadResponse.json()).toEqual(saved);
   });
 
-  it('accepts optional KR venue metadata and ignores it for non-KR symbols', async () => {
+  it('accepts optional KR venue metadata, keeps omitted KR venue compatibility, and persists data', async () => {
     const saveResponse = await app.inject({
       method: 'PUT',
       url: '/api/watchlist',
@@ -774,12 +877,23 @@ describe('api watchlist persistence', () => {
             exchange: 'KRX',
             venue: 'nxt',
           },
+          {
+            symbol: '000660.ks',
+            code: '000660',
+            name: 'SK하이닉스',
+            market: 'KOSPI',
+            exchange: 'KRX',
+          },
         ],
       },
     });
 
     expect(saveResponse.statusCode).toBe(200);
-    expect(saveResponse.json()).toEqual({
+    const saved = saveResponse.json() as {
+      name: string;
+      items: Array<{ symbol: string; venue?: string }>;
+    };
+    expect(saved).toEqual({
       name: 'default',
       items: [
         {
@@ -796,6 +910,13 @@ describe('api watchlist persistence', () => {
           exchange: 'KRX',
           venue: 'NXT',
         },
+        {
+          symbol: '000660.KS',
+          code: '000660',
+          name: 'SK하이닉스',
+          market: 'KOSPI',
+          exchange: 'KRX',
+        },
       ],
     });
 
@@ -810,7 +931,7 @@ describe('api watchlist persistence', () => {
         symbol: item.symbol,
         ...(item.venue ? { venue: item.venue } : {}),
       })),
-    ).toEqual([{ symbol: 'BTCUSDT' }, { symbol: '005930.KS', venue: 'NXT' }]);
+    ).toEqual([{ symbol: 'BTCUSDT' }, { symbol: '005930.KS', venue: 'NXT' }, { symbol: '000660.KS' }]);
 
     const krxFiltered = await app.inject({
       method: 'GET',
@@ -823,7 +944,28 @@ describe('api watchlist persistence', () => {
         symbol: item.symbol,
         ...(item.venue ? { venue: item.venue } : {}),
       })),
-    ).toEqual([{ symbol: 'BTCUSDT' }]);
+    ).toEqual([{ symbol: 'BTCUSDT' }, { symbol: '000660.KS' }]);
+
+    await restartAppInstance();
+
+    const loadResponse = await app.inject({
+      method: 'GET',
+      url: '/api/watchlist?name=default',
+    });
+    expect(loadResponse.statusCode).toBe(200);
+    expect(loadResponse.json()).toEqual(saved);
+
+    const nxtFilteredAfterRestart = await app.inject({
+      method: 'GET',
+      url: '/api/watchlist?name=default&venue=NXT',
+    });
+    expect(nxtFilteredAfterRestart.statusCode).toBe(200);
+    expect(
+      (nxtFilteredAfterRestart.json() as { items: Array<{ symbol: string; venue?: string }> }).items.map((item) => ({
+        symbol: item.symbol,
+        ...(item.venue ? { venue: item.venue } : {}),
+      })),
+    ).toEqual([{ symbol: 'BTCUSDT' }, { symbol: '005930.KS', venue: 'NXT' }, { symbol: '000660.KS' }]);
   });
 
   it('persists watchlist across app recreation', async () => {
@@ -1750,6 +1892,17 @@ describe('api alerts rules', () => {
     expect(listWithKrx.statusCode).toBe(200);
     expect((listWithKrx.json() as { rules: unknown[] }).rules).toHaveLength(0);
 
+    await restartAppInstance();
+
+    const listAfterRestart = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/rules?symbol=005930.KS&venue=NXT',
+    });
+    expect(listAfterRestart.statusCode).toBe(200);
+    expect(
+      (listAfterRestart.json() as { rules: Array<{ symbol: string; venue?: string }> }).rules,
+    ).toMatchObject([{ symbol: '005930.KS', venue: 'NXT' }]);
+
     const check = await app.inject({
       method: 'POST',
       url: '/api/alerts/check',
@@ -1781,6 +1934,78 @@ describe('api alerts rules', () => {
       total: 1,
       events: [{ symbol: '005930.KS', venue: 'NXT' }],
     });
+  });
+
+  it('keeps KRX-only alert behavior stable when venue is omitted', async () => {
+    const create = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: '000660.ks',
+        metric: 'price',
+        operator: '>=',
+        threshold: 100000,
+        cooldownSec: 0,
+      },
+    });
+
+    expect(create.statusCode).toBe(201);
+    const created = create.json() as {
+      rule: {
+        symbol: string;
+        venue?: string;
+      };
+    };
+    expect(created.rule.symbol).toBe('000660.KS');
+    expect(created.rule.venue).toBeUndefined();
+
+    const listWithoutVenue = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/rules?symbol=000660.KS',
+    });
+    expect(listWithoutVenue.statusCode).toBe(200);
+    expect(
+      (listWithoutVenue.json() as { rules: Array<{ symbol: string; venue?: string }> }).rules,
+    ).toMatchObject([{ symbol: '000660.KS' }]);
+    expect((listWithoutVenue.json() as { rules: Array<{ venue?: string }> }).rules[0].venue).toBeUndefined();
+
+    const listWithKrx = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/rules?symbol=000660.KS&venue=KRX',
+    });
+    expect(listWithKrx.statusCode).toBe(200);
+    expect((listWithKrx.json() as { rules: unknown[] }).rules).toHaveLength(1);
+
+    const check = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check',
+      payload: {
+        symbol: '000660.KS',
+        values: {
+          symbol: '000660.KS',
+          lastPrice: 101000,
+          changePercent: 0.8,
+        },
+      },
+    });
+    expect(check.statusCode).toBe(200);
+    expect(check.json()).toMatchObject({
+      checkedRuleCount: 1,
+      triggeredCount: 1,
+      triggered: [{ symbol: '000660.KS' }],
+    });
+    expect((check.json() as { triggered: Array<{ venue?: string }> }).triggered[0].venue).toBeUndefined();
+
+    const history = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?symbol=000660.KS&venue=KRX&limit=10',
+    });
+    expect(history.statusCode).toBe(200);
+    expect(history.json()).toMatchObject({
+      total: 1,
+      events: [{ symbol: '000660.KS' }],
+    });
+    expect((history.json() as { events: Array<{ venue?: string }> }).events[0].venue).toBeUndefined();
   });
 
   it('ignores venue safely for non-KR symbols', async () => {

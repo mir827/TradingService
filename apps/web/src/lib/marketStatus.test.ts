@@ -83,6 +83,37 @@ describe('market status helpers', () => {
     ]);
   });
 
+  it('falls back to market-level status when KRX phase metadata is partial', () => {
+    expect(
+      normalizeVenueSessionBadges('KOSPI', {
+        ...createBaseKrStatus(),
+        status: 'CLOSED',
+        reason: 'OUT_OF_SESSION',
+        venues: {
+          krx: {
+            venue: 'KRX',
+            available: true,
+          },
+          nxt: {
+            venue: 'NXT',
+            available: false,
+          },
+        },
+      }),
+    ).toEqual([
+      {
+        venue: 'KRX',
+        label: '장외',
+        tone: 'closed',
+      },
+      {
+        venue: 'NXT',
+        label: '미연동',
+        tone: 'pending',
+      },
+    ]);
+  });
+
   it('normalizes optional venue checkedAt values', () => {
     expect(
       normalizeVenueCheckedAt({
