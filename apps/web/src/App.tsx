@@ -89,6 +89,7 @@ import {
   type AlertCenterEventType,
   type AlertLifecycleState,
 } from './lib/alertCenter';
+import { normalizeNxtDetailInfo, type NxtQuoteInfo } from './lib/nxt';
 
 type SymbolItem = {
   symbol: string;
@@ -114,6 +115,7 @@ type Quote = {
   highPrice: number;
   lowPrice: number;
   volume: number;
+  nxt?: NxtQuoteInfo;
 };
 
 type MarketStatusState = 'OPEN' | 'CLOSED';
@@ -3713,6 +3715,10 @@ function App() {
     [searchResults, selectedSymbol, watchlistSymbols],
   );
   const selectedMarket = selectedSymbolMeta?.market ?? 'CRYPTO';
+  const selectedNxtInfo = useMemo(
+    () => normalizeNxtDetailInfo(selectedMarket, selectedQuote),
+    [selectedMarket, selectedQuote],
+  );
 
   useEffect(() => {
     let canceled = false;
@@ -7014,6 +7020,48 @@ function App() {
                       <dd>{selectedQuote ? formatVolume(selectedQuote.volume) : '--'}</dd>
                     </div>
                   </dl>
+                  {selectedNxtInfo ? (
+                    <div className="detail-nxt-section">
+                      <h5>NXT</h5>
+                      <dl>
+                        <div>
+                          <dt>지원 여부</dt>
+                          <dd>{selectedNxtInfo.supportLabel}</dd>
+                        </div>
+                        <div>
+                          <dt>상태</dt>
+                          <dd>{selectedNxtInfo.status}</dd>
+                        </div>
+                        {selectedNxtInfo.reason ? (
+                          <div>
+                            <dt>이유</dt>
+                            <dd>{selectedNxtInfo.reason}</dd>
+                          </div>
+                        ) : null}
+                        {selectedNxtInfo.price !== null ? (
+                          <div>
+                            <dt>NXT 가격</dt>
+                            <dd>{formatPrice(selectedNxtInfo.price)}</dd>
+                          </div>
+                        ) : null}
+                        {selectedNxtInfo.changePercent !== null ? (
+                          <div>
+                            <dt>NXT 등락률</dt>
+                            <dd className={selectedNxtInfo.changePercent >= 0 ? 'up' : 'down'}>
+                              {selectedNxtInfo.changePercent >= 0 ? '+' : ''}
+                              {selectedNxtInfo.changePercent.toFixed(2)}%
+                            </dd>
+                          </div>
+                        ) : null}
+                        {selectedNxtInfo.updatedAt !== null ? (
+                          <div>
+                            <dt>NXT 업데이트</dt>
+                            <dd>{new Date(selectedNxtInfo.updatedAt).toLocaleString('ko-KR')}</dd>
+                          </div>
+                        ) : null}
+                      </dl>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
 

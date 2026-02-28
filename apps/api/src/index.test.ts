@@ -136,7 +136,36 @@ describe('api market status', () => {
     });
 
     expect(openResponse.statusCode).toBe(200);
-    expect(openResponse.json()).toEqual({
+    const openBody = openResponse.json() as {
+      market: string;
+      status: string;
+      reason: string;
+      checkedAt: number;
+      timezone: string;
+      session: {
+        open: string;
+        close: string;
+        text: string;
+      };
+      venues?: {
+        krx?: {
+          venue: string;
+          available: boolean;
+          status: string;
+          reason: string;
+          phase: string;
+        };
+        nxt?: {
+          venue: string;
+          available: boolean;
+          status: string;
+          reason: string;
+          phase: string;
+          unavailableReason?: string;
+        };
+      };
+    };
+    expect(openBody).toMatchObject({
       market: 'KOSPI',
       status: 'OPEN',
       reason: 'SESSION_ACTIVE',
@@ -146,6 +175,23 @@ describe('api market status', () => {
         open: '09:00',
         close: '15:30',
         text: '09:00-15:30 KST',
+      },
+    });
+    expect(openBody.venues).toMatchObject({
+      krx: {
+        venue: 'KRX',
+        available: true,
+        status: 'OPEN',
+        reason: 'SESSION_ACTIVE',
+        phase: 'OPEN',
+      },
+      nxt: {
+        venue: 'NXT',
+        available: false,
+        status: 'CLOSED',
+        reason: 'UNAVAILABLE',
+        phase: 'UNAVAILABLE',
+        unavailableReason: 'NXT_STATUS_NOT_INTEGRATED',
       },
     });
 
@@ -158,7 +204,24 @@ describe('api market status', () => {
     });
 
     expect(closedResponse.statusCode).toBe(200);
-    expect(closedResponse.json()).toEqual({
+    const closedBody = closedResponse.json() as {
+      market: string;
+      status: string;
+      reason: string;
+      checkedAt: number;
+      timezone: string;
+      session: {
+        open: string;
+        close: string;
+        text: string;
+      };
+      venues?: {
+        krx?: {
+          phase: string;
+        };
+      };
+    };
+    expect(closedBody).toMatchObject({
       market: 'KOSPI',
       status: 'CLOSED',
       reason: 'OUT_OF_SESSION',
@@ -169,6 +232,9 @@ describe('api market status', () => {
         close: '15:30',
         text: '09:00-15:30 KST',
       },
+    });
+    expect(closedBody.venues?.krx).toMatchObject({
+      phase: 'PRE_MARKET',
     });
   });
 
@@ -182,7 +248,28 @@ describe('api market status', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({
+    const body = response.json() as {
+      market: string;
+      status: string;
+      reason: string;
+      checkedAt: number;
+      timezone: string;
+      session: {
+        open: string;
+        close: string;
+        text: string;
+      };
+      venues?: {
+        krx?: {
+          phase: string;
+        };
+        nxt?: {
+          phase: string;
+          unavailableReason?: string;
+        };
+      };
+    };
+    expect(body).toMatchObject({
       market: 'KOSDAQ',
       status: 'CLOSED',
       reason: 'WEEKEND',
@@ -193,6 +280,13 @@ describe('api market status', () => {
         close: '15:30',
         text: '09:00-15:30 KST',
       },
+    });
+    expect(body.venues?.krx).toMatchObject({
+      phase: 'CLOSED',
+    });
+    expect(body.venues?.nxt).toMatchObject({
+      phase: 'UNAVAILABLE',
+      unavailableReason: 'NXT_STATUS_NOT_INTEGRATED',
     });
   });
 
@@ -206,7 +300,20 @@ describe('api market status', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({
+    const body = response.json() as {
+      market: string;
+      status: string;
+      reason: string;
+      checkedAt: number;
+      timezone: string;
+      session: {
+        open: string;
+        close: string;
+        text: string;
+      };
+      venues?: unknown;
+    };
+    expect(body).toEqual({
       market: 'CRYPTO',
       status: 'OPEN',
       reason: 'SESSION_ACTIVE',
@@ -218,6 +325,127 @@ describe('api market status', () => {
         text: '24/7',
       },
     });
+    expect(body.venues).toBeUndefined();
+  });
+});
+
+describe('api quote', () => {
+  it('returns KOSPI quote with NXT metadata when NXT quote is unavailable', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const rawUrl =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const url = new URL(rawUrl);
+
+      if (url.hostname === 'query1.finance.yahoo.com' && url.pathname === '/v8/finance/chart/005930.KS') {
+        return jsonResponse({
+          chart: {
+            result: [
+              {
+                meta: {
+                  regularMarketPrice: 71500,
+                  previousClose: 70000,
+                  regularMarketDayHigh: 71800,
+                  regularMarketDayLow: 69800,
+                  regularMarketVolume: 1234567,
+                },
+              },
+            ],
+          },
+        });
+      }
+
+      return jsonResponse({ error: 'unexpected request' }, 404);
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/quote?symbol=005930.KS',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      symbol: string;
+      lastPrice: number;
+      changePercent: number;
+      highPrice: number;
+      lowPrice: number;
+      volume: number;
+      nxt?: {
+        supported: boolean;
+        available: boolean;
+        status: string;
+        reason?: string;
+      };
+    };
+    expect(body).toMatchObject({
+      symbol: '005930.KS',
+      lastPrice: 71500,
+      highPrice: 71800,
+      lowPrice: 69800,
+      volume: 1234567,
+    });
+    expect(body.nxt).toMatchObject({
+      supported: true,
+      available: false,
+      status: 'unavailable',
+      reason: 'NXT_FEED_NOT_CONFIGURED',
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps non-KOSPI/KOSDAQ quote payload backward-compatible', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const rawUrl =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const url = new URL(rawUrl);
+
+      if (url.hostname === 'api.binance.com' && url.pathname === '/api/v3/ticker/24hr') {
+        return jsonResponse({
+          symbol: 'BTCUSDT',
+          lastPrice: '60500.12',
+          priceChangePercent: '1.23',
+          highPrice: '61000.00',
+          lowPrice: '59000.00',
+          volume: '120.5',
+        });
+      }
+
+      return jsonResponse({ error: 'unexpected request' }, 404);
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/quote?symbol=BTCUSDT',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      symbol: string;
+      lastPrice: number;
+      changePercent: number;
+      highPrice: number;
+      lowPrice: number;
+      volume: number;
+      nxt?: unknown;
+    };
+    expect(body).toEqual({
+      symbol: 'BTCUSDT',
+      lastPrice: 60500.12,
+      changePercent: 1.23,
+      highPrice: 61000,
+      lowPrice: 59000,
+      volume: 120.5,
+    });
+    expect(body.nxt).toBeUndefined();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });
 

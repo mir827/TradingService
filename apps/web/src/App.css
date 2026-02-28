@@ -1301,6 +1301,18 @@ select {
   font-size: 12px;
 }
 
+.detail-nxt-section {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #2b2f3a;
+}
+
+.detail-nxt-section h5 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: #9aa1b1;
+}
+
 .alerts-panel {
   display: grid;
   gap: 10px;

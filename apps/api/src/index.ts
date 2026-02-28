@@ -39,6 +39,23 @@ type Candle = {
   volume: number;
 };
 
+type NxtQuoteStatus = 'available' | 'unavailable';
+type NxtQuoteUnavailableReason =
+  | 'NXT_FEED_NOT_CONFIGURED'
+  | 'NXT_SYMBOL_NOT_SUPPORTED'
+  | 'NXT_UPSTREAM_ERROR'
+  | 'NXT_QUOTE_MISSING';
+
+type NxtQuoteInfo = {
+  supported: boolean;
+  available: boolean;
+  status: NxtQuoteStatus;
+  reason?: NxtQuoteUnavailableReason;
+  price?: number;
+  changePercent?: number;
+  updatedAt?: number;
+};
+
 type Quote = {
   symbol: string;
   lastPrice: number;
@@ -46,6 +63,7 @@ type Quote = {
   highPrice: number;
   lowPrice: number;
   volume: number;
+  nxt?: NxtQuoteInfo;
 };
 
 type AlertMetric = 'price' | 'changePercent';
@@ -162,6 +180,24 @@ type AlertCooldownSuppression = {
 
 type MarketStatusState = 'OPEN' | 'CLOSED';
 type MarketStatusReason = 'WEEKEND' | 'OUT_OF_SESSION' | 'SESSION_ACTIVE';
+type MarketVenuePhase = 'PRE_MARKET' | 'OPEN' | 'POST_MARKET' | 'CLOSED' | 'UNAVAILABLE';
+type MarketVenueReason = MarketStatusReason | 'UNAVAILABLE';
+
+type MarketVenueStatus = {
+  venue: 'KRX' | 'NXT';
+  available: boolean;
+  status: MarketStatusState;
+  reason: MarketVenueReason;
+  phase: MarketVenuePhase;
+  checkedAt: number;
+  timezone: string;
+  session: {
+    open: string;
+    close: string;
+    text: string;
+  };
+  unavailableReason?: string;
+};
 
 type MarketStatusPayload = {
   market: MarketType;
@@ -173,6 +209,10 @@ type MarketStatusPayload = {
     open: string;
     close: string;
     text: string;
+  };
+  venues?: {
+    krx: MarketVenueStatus;
+    nxt: MarketVenueStatus;
   };
 };
 
@@ -2631,18 +2671,37 @@ async function loadRuntimeStateFromDisk() {
   );
 }
 
-function getKrxStatus(checkedAt: number): Omit<MarketStatusPayload, 'market' | 'checkedAt'> {
+type KrxStatusSnapshot = Omit<MarketStatusPayload, 'market' | 'checkedAt' | 'venues'> & {
+  phase: Exclude<MarketVenuePhase, 'UNAVAILABLE'>;
+};
+
+function getKrxStatus(checkedAt: number): KrxStatusSnapshot {
   const parts = krxTimeFormatter.formatToParts(new Date(checkedAt));
   const weekday = parts.find((part) => part.type === 'weekday')?.value ?? '';
   const hour = Number(parts.find((part) => part.type === 'hour')?.value ?? '0');
   const minute = Number(parts.find((part) => part.type === 'minute')?.value ?? '0');
   const currentMinute = hour * 60 + minute;
   const weekend = weekday === 'Sat' || weekday === 'Sun';
-  const inSession = currentMinute >= KRX_SESSION_OPEN_MINUTE && currentMinute <= KRX_SESSION_CLOSE_MINUTE;
+
+  let status: MarketStatusState = 'CLOSED';
+  let reason: MarketStatusReason = 'OUT_OF_SESSION';
+  let phase: Exclude<MarketVenuePhase, 'UNAVAILABLE'> = 'POST_MARKET';
+
+  if (weekend) {
+    reason = 'WEEKEND';
+    phase = 'CLOSED';
+  } else if (currentMinute < KRX_SESSION_OPEN_MINUTE) {
+    phase = 'PRE_MARKET';
+  } else if (currentMinute <= KRX_SESSION_CLOSE_MINUTE) {
+    status = 'OPEN';
+    reason = 'SESSION_ACTIVE';
+    phase = 'OPEN';
+  }
 
   return {
-    status: !weekend && inSession ? 'OPEN' : 'CLOSED',
-    reason: weekend ? 'WEEKEND' : inSession ? 'SESSION_ACTIVE' : 'OUT_OF_SESSION',
+    status,
+    reason,
+    phase,
     timezone: KRX_TIMEZONE,
     session: {
       open: KRX_SESSION_OPEN,
@@ -2668,10 +2727,42 @@ function getMarketStatus(market: MarketType, checkedAt = Date.now()): MarketStat
     };
   }
 
+  const krxStatus = getKrxStatus(checkedAt);
+
   return {
     market,
     checkedAt,
-    ...getKrxStatus(checkedAt),
+    status: krxStatus.status,
+    reason: krxStatus.reason,
+    timezone: krxStatus.timezone,
+    session: krxStatus.session,
+    venues: {
+      krx: {
+        venue: 'KRX',
+        available: true,
+        status: krxStatus.status,
+        reason: krxStatus.reason,
+        phase: krxStatus.phase,
+        checkedAt,
+        timezone: krxStatus.timezone,
+        session: krxStatus.session,
+      },
+      nxt: {
+        venue: 'NXT',
+        available: false,
+        status: 'CLOSED',
+        reason: 'UNAVAILABLE',
+        phase: 'UNAVAILABLE',
+        checkedAt,
+        timezone: KRX_TIMEZONE,
+        session: {
+          open: KRX_SESSION_OPEN,
+          close: KRX_SESSION_CLOSE,
+          text: KRX_SESSION_TEXT,
+        },
+        unavailableReason: 'NXT_STATUS_NOT_INTEGRATED',
+      },
+    },
   };
 }
 
@@ -3507,6 +3598,15 @@ async function fetchCryptoQuote(symbol: string): Promise<Quote> {
   };
 }
 
+function createUnavailableNxtQuoteInfo(reason: NxtQuoteUnavailableReason): NxtQuoteInfo {
+  return {
+    supported: true,
+    available: false,
+    status: 'unavailable',
+    reason,
+  };
+}
+
 async function fetchKrxQuote(symbol: string): Promise<Quote> {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=1d`;
   const response = await fetch(url, {
@@ -3547,6 +3647,7 @@ async function fetchKrxQuote(symbol: string): Promise<Quote> {
     highPrice: Number(meta.regularMarketDayHigh ?? lastPrice),
     lowPrice: Number(meta.regularMarketDayLow ?? lastPrice),
     volume: Number(meta.regularMarketVolume ?? 0),
+    nxt: createUnavailableNxtQuoteInfo('NXT_FEED_NOT_CONFIGURED'),
   };
 }
 

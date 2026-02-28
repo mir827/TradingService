@@ -247,3 +247,26 @@ Progress note (2026-02-28):
   - 숫자키 또는 커스텀 단축키로 interval 즉시 전환.
   - 전환 후 차트/지표/비교 상태가 안정적으로 유지.
   - 접근성(포커스 상태/툴팁) 및 기본 회귀 테스트 통과.
+
+## M6 - KOSPI/KOSDAQ NXT 정보 확장
+Deliverables:
+- KOSPI/KOSDAQ 종목에 대해 `KRX` + `NXT` 정보를 함께 다루는 데이터 모델/API 확장
+- 시장 상태 API에서 KRX/NXT 세션 상태(장전/장중/장후/휴장) 분리 제공
+- 우측 상세 패널에서 KRX 대비 NXT 가격/등락/거래대금(가능 범위)과 업데이트 시각 표시
+- NXT 데이터 미제공/지연 시 graceful fallback(`N/A` + 이유 메타) 처리
+
+Phased plan:
+- M6-1: API/스키마 기반 구축 (`/api/quote`, `/api/market-status`에 NXT 필드 추가, KRX 호환 유지)
+- M6-2: Web 상세 패널 UI 반영 (KRX/NXT 비교 카드, 세션 배지)
+- M6-3: 워치리스트/알림 연계 (선택적 venue 필터, 기본은 기존 동작 유지)
+- M6-4: 운영 검증/회귀 강화 (KRX-only 심볼, NXT unavailable, 장시간별 상태 테스트)
+
+Progress note (2026-02-28):
+- M6-1 완료: `/api/quote`와 `/api/market-status`에 KOSPI/KOSDAQ용 NXT optional 메타 필드를 추가했고, 기존 KRX/CRYPTO 응답 호환성을 유지함.
+- 남은 작업: M6-2(Web 상세 패널 고도화), M6-3(워치리스트/알림 venue 연계), M6-4(운영 검증/회귀 강화).
+
+DoD:
+- 기존 KRX-only 플로우가 깨지지 않고, NXT 필드가 optional/backward-compatible 하게 동작
+- KOSPI/KOSDAQ 심볼에서 NXT 정보가 있을 때 UI/응답에 일관되게 노출
+- NXT 미가용 상황에서도 오류 전파 없이 정상 렌더/응답
+- lint/build/test + 핵심 스모크(quote/status/detail panel) 통과
