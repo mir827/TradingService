@@ -539,16 +539,23 @@ const drawingLineSchema = z.object({
   price: z.number().finite(),
 });
 
+const drawingFlagsSchema = {
+  visible: z.boolean().optional(),
+  locked: z.boolean().optional(),
+};
+
 const drawingItemSchema: z.ZodType<DrawingInputItem> = z.discriminatedUnion('type', [
   z.object({
     id: z.string().trim().min(1).optional(),
     type: z.literal('horizontal'),
     price: z.number().finite(),
+    ...drawingFlagsSchema,
   }),
   z.object({
     id: z.string().trim().min(1).optional(),
     type: z.literal('vertical'),
     time: z.number().int().nonnegative(),
+    ...drawingFlagsSchema,
   }),
   z.object({
     id: z.string().trim().min(1).optional(),
@@ -557,6 +564,7 @@ const drawingItemSchema: z.ZodType<DrawingInputItem> = z.discriminatedUnion('typ
     startPrice: z.number().finite(),
     endTime: z.number().int().nonnegative(),
     endPrice: z.number().finite(),
+    ...drawingFlagsSchema,
   }),
   z.object({
     id: z.string().trim().min(1).optional(),
@@ -565,6 +573,7 @@ const drawingItemSchema: z.ZodType<DrawingInputItem> = z.discriminatedUnion('typ
     startPrice: z.number().finite(),
     endTime: z.number().int().nonnegative(),
     endPrice: z.number().finite(),
+    ...drawingFlagsSchema,
   }),
   z.object({
     id: z.string().trim().min(1).optional(),
@@ -573,6 +582,7 @@ const drawingItemSchema: z.ZodType<DrawingInputItem> = z.discriminatedUnion('typ
     startPrice: z.number().finite(),
     endTime: z.number().int().nonnegative(),
     endPrice: z.number().finite(),
+    ...drawingFlagsSchema,
   }),
   z.object({
     id: z.string().trim().min(1).optional(),
@@ -580,6 +590,7 @@ const drawingItemSchema: z.ZodType<DrawingInputItem> = z.discriminatedUnion('typ
     time: z.number().int().nonnegative(),
     price: z.number().finite(),
     text: z.string().trim().min(1).max(240),
+    ...drawingFlagsSchema,
   }),
 ]);
 

@@ -3,17 +3,22 @@ export type DrawingLine = {
   price: number;
 };
 
+type DrawingFlags = {
+  visible: boolean;
+  locked: boolean;
+};
+
 export type HorizontalDrawing = {
   id: string;
   type: 'horizontal';
   price: number;
-};
+} & DrawingFlags;
 
 export type VerticalDrawing = {
   id: string;
   type: 'vertical';
   time: number;
-};
+} & DrawingFlags;
 
 export type TrendlineDrawing = {
   id: string;
@@ -22,7 +27,7 @@ export type TrendlineDrawing = {
   startPrice: number;
   endTime: number;
   endPrice: number;
-};
+} & DrawingFlags;
 
 export type RayDrawing = {
   id: string;
@@ -31,7 +36,7 @@ export type RayDrawing = {
   startPrice: number;
   endTime: number;
   endPrice: number;
-};
+} & DrawingFlags;
 
 export type RectangleDrawing = {
   id: string;
@@ -40,7 +45,7 @@ export type RectangleDrawing = {
   startPrice: number;
   endTime: number;
   endPrice: number;
-};
+} & DrawingFlags;
 
 export type NoteDrawing = {
   id: string;
@@ -48,7 +53,7 @@ export type NoteDrawing = {
   time: number;
   price: number;
   text: string;
-};
+} & DrawingFlags;
 
 export type DrawingItem =
   | HorizontalDrawing
@@ -59,8 +64,8 @@ export type DrawingItem =
   | NoteDrawing;
 
 export type DrawingInputItem =
-  | { id?: string; type: 'horizontal'; price: number }
-  | { id?: string; type: 'vertical'; time: number }
+  | { id?: string; type: 'horizontal'; price: number; visible?: boolean; locked?: boolean }
+  | { id?: string; type: 'vertical'; time: number; visible?: boolean; locked?: boolean }
   | {
       id?: string;
       type: 'trendline';
@@ -68,6 +73,8 @@ export type DrawingInputItem =
       startPrice: number;
       endTime: number;
       endPrice: number;
+      visible?: boolean;
+      locked?: boolean;
     }
   | {
       id?: string;
@@ -76,6 +83,8 @@ export type DrawingInputItem =
       startPrice: number;
       endTime: number;
       endPrice: number;
+      visible?: boolean;
+      locked?: boolean;
     }
   | {
       id?: string;
@@ -84,8 +93,10 @@ export type DrawingInputItem =
       startPrice: number;
       endTime: number;
       endPrice: number;
+      visible?: boolean;
+      locked?: boolean;
     }
-  | { id?: string; type: 'note'; time: number; price: number; text: string };
+  | { id?: string; type: 'note'; time: number; price: number; text: string; visible?: boolean; locked?: boolean };
 
 function createDrawingId(prefix: string) {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -115,11 +126,20 @@ export function createDrawingNoteId() {
   return createDrawingId('note');
 }
 
+function normalizeDrawingFlags(drawing: { visible?: boolean; locked?: boolean }): DrawingFlags {
+  return {
+    visible: drawing.visible ?? true,
+    locked: drawing.locked ?? false,
+  };
+}
+
 export function normalizeDrawingLines(lines: Array<{ id?: string; price: number }>): DrawingItem[] {
   return lines.map((line) => ({
     id: line.id?.trim() || createDrawingLineId(),
     type: 'horizontal',
     price: line.price,
+    visible: true,
+    locked: false,
   }));
 }
 
@@ -130,6 +150,7 @@ export function normalizeDrawingItems(drawings: DrawingInputItem[]): DrawingItem
         id: drawing.id?.trim() || createDrawingLineId(),
         type: 'horizontal',
         price: drawing.price,
+        ...normalizeDrawingFlags(drawing),
       };
     }
 
@@ -138,6 +159,7 @@ export function normalizeDrawingItems(drawings: DrawingInputItem[]): DrawingItem
         id: drawing.id?.trim() || createDrawingVerticalId(),
         type: 'vertical',
         time: drawing.time,
+        ...normalizeDrawingFlags(drawing),
       };
     }
 
@@ -149,6 +171,7 @@ export function normalizeDrawingItems(drawings: DrawingInputItem[]): DrawingItem
         startPrice: drawing.startPrice,
         endTime: drawing.endTime,
         endPrice: drawing.endPrice,
+        ...normalizeDrawingFlags(drawing),
       };
     }
 
@@ -160,6 +183,7 @@ export function normalizeDrawingItems(drawings: DrawingInputItem[]): DrawingItem
         startPrice: drawing.startPrice,
         endTime: drawing.endTime,
         endPrice: drawing.endPrice,
+        ...normalizeDrawingFlags(drawing),
       };
     }
 
@@ -171,6 +195,7 @@ export function normalizeDrawingItems(drawings: DrawingInputItem[]): DrawingItem
         startPrice: drawing.startPrice,
         endTime: drawing.endTime,
         endPrice: drawing.endPrice,
+        ...normalizeDrawingFlags(drawing),
       };
     }
 
@@ -180,6 +205,7 @@ export function normalizeDrawingItems(drawings: DrawingInputItem[]): DrawingItem
       time: drawing.time,
       price: drawing.price,
       text: drawing.text.trim(),
+      ...normalizeDrawingFlags(drawing),
     };
   });
 }

@@ -757,7 +757,7 @@ select {
   min-width: 0;
   overflow: hidden;
   display: grid;
-  grid-template-rows: 44px 36px auto minmax(0, 1fr);
+  grid-template-rows: 44px auto 36px auto minmax(0, 1fr);
   position: relative;
   z-index: 2;
 }
@@ -784,6 +784,123 @@ select {
 .right-panel h3 {
   margin: 0;
   font-size: 13px;
+}
+
+.drawing-objects-panel {
+  border-bottom: 1px solid #273146;
+  background: #101723;
+  padding: 8px 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.drawing-objects-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.drawing-objects-head strong {
+  font-size: 11px;
+  color: #9db5d8;
+}
+
+.drawing-objects-head span {
+  font-size: 10px;
+  color: #86a8d4;
+  border: 1px solid #35537a;
+  border-radius: 999px;
+  padding: 1px 6px;
+  background: #152338;
+}
+
+.drawing-objects-empty {
+  margin: 0;
+  font-size: 11px;
+  color: #8f97a7;
+}
+
+.right-panel .drawing-objects-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  max-height: 168px;
+  overflow: auto;
+}
+
+.right-panel .drawing-objects-list li {
+  border: 1px solid #2d3750;
+  border-radius: 6px;
+  padding: 6px 7px;
+  background: #131b2a;
+  display: grid;
+  gap: 6px;
+  cursor: default;
+}
+
+.right-panel .drawing-objects-list li:hover,
+.right-panel .drawing-objects-list li.selected {
+  background: #162034;
+}
+
+.right-panel .drawing-objects-row {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  text-align: left;
+  display: grid;
+  gap: 1px;
+  cursor: pointer;
+}
+
+.right-panel .drawing-objects-row.selected .drawing-objects-id {
+  color: #d8e8ff;
+}
+
+.right-panel .drawing-objects-type {
+  font-size: 10px;
+  color: #89a5c8;
+}
+
+.right-panel .drawing-objects-id {
+  font-size: 11px;
+  color: #bdcadb;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.right-panel .drawing-objects-detail {
+  font-size: 10px;
+  color: #7f8ea5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.right-panel .drawing-objects-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.right-panel .drawing-objects-actions button {
+  border: 1px solid #3b4f6a;
+  background: #15283f;
+  color: #9fc4f0;
+  border-radius: 999px;
+  font-size: 10px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.right-panel .drawing-objects-actions button.active {
+  border-color: #4b6f40;
+  background: #213922;
+  color: #c3f0a8;
 }
 
 .watch-tabs {

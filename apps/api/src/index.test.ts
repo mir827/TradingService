@@ -2992,8 +2992,8 @@ describe('api drawings persistence', () => {
     expect(saved.lines[1].id).toMatch(/^line_/);
     expect(saved.lines[1].price).toBe(99500.25);
     expect(saved.drawings).toEqual([
-      { id: 'line-fixed', type: 'horizontal', price: 100000.5 },
-      { id: saved.lines[1].id, type: 'horizontal', price: 99500.25 },
+      { id: 'line-fixed', type: 'horizontal', price: 100000.5, visible: true, locked: false },
+      { id: saved.lines[1].id, type: 'horizontal', price: 99500.25, visible: true, locked: false },
     ]);
 
     const loadResponse = await app.inject({
@@ -3040,8 +3040,8 @@ describe('api drawings persistence', () => {
     expect(saved.symbol).toBe('ETHUSDT');
     expect(saved.interval).toBe('60');
     expect(saved.drawings).toHaveLength(6);
-    expect(saved.drawings[0]).toEqual({ id: 'h-fixed', type: 'horizontal', price: 3210.5 });
-    expect(saved.drawings[1]).toEqual({ id: 'v-fixed', type: 'vertical', time: 1735689600 });
+    expect(saved.drawings[0]).toEqual({ id: 'h-fixed', type: 'horizontal', price: 3210.5, visible: true, locked: false });
+    expect(saved.drawings[1]).toEqual({ id: 'v-fixed', type: 'vertical', time: 1735689600, visible: true, locked: false });
     expect(saved.drawings[2]).toEqual({
       id: 'trend-fixed',
       type: 'trendline',
@@ -3049,6 +3049,8 @@ describe('api drawings persistence', () => {
       startPrice: 3201.2,
       endTime: 1735696800,
       endPrice: 3300.4,
+      visible: true,
+      locked: false,
     });
     expect(saved.drawings[3]).toEqual({
       id: 'ray-fixed',
@@ -3057,6 +3059,8 @@ describe('api drawings persistence', () => {
       startPrice: 3220.4,
       endTime: 1735698600,
       endPrice: 3340.2,
+      visible: true,
+      locked: false,
     });
     expect(saved.drawings[4]).toEqual({
       id: expect.stringMatching(/^rect_/),
@@ -3065,6 +3069,8 @@ describe('api drawings persistence', () => {
       startPrice: 3188.7,
       endTime: 1735700400,
       endPrice: 3345.1,
+      visible: true,
+      locked: false,
     });
     expect(saved.drawings[5]).toEqual({
       id: 'note-fixed',
@@ -3072,6 +3078,8 @@ describe('api drawings persistence', () => {
       time: 1735700400,
       price: 3299.1,
       text: 'breakout',
+      visible: true,
+      locked: false,
     });
     expect(saved.lines).toEqual([{ id: 'h-fixed', price: 3210.5 }]);
 
@@ -3112,8 +3120,8 @@ describe('api drawings persistence', () => {
       symbol: 'ETHUSDT',
       interval: '240',
       drawings: [
-        { id: 'persist-h', type: 'horizontal', price: 2500 },
-        { id: 'persist-v', type: 'vertical', time: 1735700000 },
+        { id: 'persist-h', type: 'horizontal', price: 2500, visible: true, locked: false },
+        { id: 'persist-v', type: 'vertical', time: 1735700000, visible: true, locked: false },
         {
           id: 'persist-trend',
           type: 'trendline',
@@ -3121,6 +3129,8 @@ describe('api drawings persistence', () => {
           startPrice: 2488.4,
           endTime: 1735703600,
           endPrice: 2522.7,
+          visible: true,
+          locked: false,
         },
         {
           id: 'persist-ray',
@@ -3129,6 +3139,8 @@ describe('api drawings persistence', () => {
           startPrice: 2494.4,
           endTime: 1735705400,
           endPrice: 2548.3,
+          visible: true,
+          locked: false,
         },
         {
           id: 'persist-rect',
@@ -3137,8 +3149,10 @@ describe('api drawings persistence', () => {
           startPrice: 2475.2,
           endTime: 1735707200,
           endPrice: 2550.5,
+          visible: true,
+          locked: false,
         },
-        { id: 'persist-note', type: 'note', time: 1735707200, price: 2512.3, text: 'hold' },
+        { id: 'persist-note', type: 'note', time: 1735707200, price: 2512.3, text: 'hold', visible: true, locked: false },
       ],
       lines: [{ id: 'persist-h', price: 2500 }],
     });
@@ -3155,8 +3169,8 @@ describe('api drawings persistence', () => {
       symbol: 'ETHUSDT',
       interval: '240',
       drawings: [
-        { id: 'persist-h', type: 'horizontal', price: 2500 },
-        { id: 'persist-v', type: 'vertical', time: 1735700000 },
+        { id: 'persist-h', type: 'horizontal', price: 2500, visible: true, locked: false },
+        { id: 'persist-v', type: 'vertical', time: 1735700000, visible: true, locked: false },
         {
           id: 'persist-trend',
           type: 'trendline',
@@ -3164,6 +3178,8 @@ describe('api drawings persistence', () => {
           startPrice: 2488.4,
           endTime: 1735703600,
           endPrice: 2522.7,
+          visible: true,
+          locked: false,
         },
         {
           id: 'persist-ray',
@@ -3172,6 +3188,8 @@ describe('api drawings persistence', () => {
           startPrice: 2494.4,
           endTime: 1735705400,
           endPrice: 2548.3,
+          visible: true,
+          locked: false,
         },
         {
           id: 'persist-rect',
@@ -3180,10 +3198,110 @@ describe('api drawings persistence', () => {
           startPrice: 2475.2,
           endTime: 1735707200,
           endPrice: 2550.5,
+          visible: true,
+          locked: false,
         },
-        { id: 'persist-note', type: 'note', time: 1735707200, price: 2512.3, text: 'hold' },
+        { id: 'persist-note', type: 'note', time: 1735707200, price: 2512.3, text: 'hold', visible: true, locked: false },
       ],
       lines: [{ id: 'persist-h', price: 2500 }],
+    });
+  });
+
+  it('loads legacy persisted drawings without flags using visible/locked defaults', async () => {
+    await writeFile(
+      stateFile,
+      `${JSON.stringify(
+        {
+          version: 4,
+          drawings: [
+            {
+              symbol: 'BTCUSDT',
+              interval: '60',
+              drawings: [
+                { id: 'legacy-h', type: 'horizontal', price: 101.5 },
+                { id: 'legacy-v', type: 'vertical', time: 1735701000 },
+                {
+                  id: 'legacy-trend',
+                  type: 'trendline',
+                  startTime: 1735701000,
+                  startPrice: 100,
+                  endTime: 1735704600,
+                  endPrice: 120,
+                },
+                {
+                  id: 'legacy-ray',
+                  type: 'ray',
+                  startTime: 1735701000,
+                  startPrice: 100,
+                  endTime: 1735704600,
+                  endPrice: 130,
+                },
+                {
+                  id: 'legacy-rect',
+                  type: 'rectangle',
+                  startTime: 1735701000,
+                  startPrice: 90,
+                  endTime: 1735704600,
+                  endPrice: 110,
+                },
+                { id: 'legacy-note', type: 'note', time: 1735704600, price: 108, text: 'memo' },
+              ],
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+
+    await restartAppInstance();
+
+    const loadResponse = await app.inject({
+      method: 'GET',
+      url: '/api/drawings?symbol=BTCUSDT&interval=60',
+    });
+
+    expect(loadResponse.statusCode).toBe(200);
+    expect(loadResponse.json()).toEqual({
+      symbol: 'BTCUSDT',
+      interval: '60',
+      drawings: [
+        { id: 'legacy-h', type: 'horizontal', price: 101.5, visible: true, locked: false },
+        { id: 'legacy-v', type: 'vertical', time: 1735701000, visible: true, locked: false },
+        {
+          id: 'legacy-trend',
+          type: 'trendline',
+          startTime: 1735701000,
+          startPrice: 100,
+          endTime: 1735704600,
+          endPrice: 120,
+          visible: true,
+          locked: false,
+        },
+        {
+          id: 'legacy-ray',
+          type: 'ray',
+          startTime: 1735701000,
+          startPrice: 100,
+          endTime: 1735704600,
+          endPrice: 130,
+          visible: true,
+          locked: false,
+        },
+        {
+          id: 'legacy-rect',
+          type: 'rectangle',
+          startTime: 1735701000,
+          startPrice: 90,
+          endTime: 1735704600,
+          endPrice: 110,
+          visible: true,
+          locked: false,
+        },
+        { id: 'legacy-note', type: 'note', time: 1735704600, price: 108, text: 'memo', visible: true, locked: false },
+      ],
+      lines: [{ id: 'legacy-h', price: 101.5 }],
     });
   });
 
@@ -3254,5 +3372,29 @@ describe('api drawings persistence', () => {
     });
 
     expect(invalidNoteDrawing.statusCode).toBe(400);
+
+    const invalidVisibleFlag = await app.inject({
+      method: 'PUT',
+      url: '/api/drawings',
+      payload: {
+        symbol: 'BTCUSDT',
+        interval: '60',
+        drawings: [{ type: 'horizontal', price: 100, visible: 'yes' }],
+      },
+    });
+
+    expect(invalidVisibleFlag.statusCode).toBe(400);
+
+    const invalidLockedFlag = await app.inject({
+      method: 'PUT',
+      url: '/api/drawings',
+      payload: {
+        symbol: 'BTCUSDT',
+        interval: '60',
+        drawings: [{ type: 'vertical', time: 1735689600, locked: 1 }],
+      },
+    });
+
+    expect(invalidLockedFlag.statusCode).toBe(400);
   });
 });

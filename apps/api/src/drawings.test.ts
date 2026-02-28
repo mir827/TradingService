@@ -6,9 +6,9 @@ import {
 } from './drawings.js';
 
 describe('drawing normalization helpers', () => {
-  it('normalizes ids and trims note text for mixed drawing inputs', () => {
+  it('normalizes ids, drawing flags, and note text for mixed drawing inputs', () => {
     const drawings = normalizeDrawingItems([
-      { id: '  fixed-h  ', type: 'horizontal', price: 100.25 },
+      { id: '  fixed-h  ', type: 'horizontal', price: 100.25, visible: false, locked: true },
       {
         type: 'trendline',
         startTime: 1000,
@@ -36,10 +36,17 @@ describe('drawing normalization helpers', () => {
         time: 1400,
         price: 10.7,
         text: '  breakout zone  ',
+        visible: false,
       },
     ]);
 
-    expect(drawings[0]).toEqual({ id: 'fixed-h', type: 'horizontal', price: 100.25 });
+    expect(drawings[0]).toEqual({
+      id: 'fixed-h',
+      type: 'horizontal',
+      price: 100.25,
+      visible: false,
+      locked: true,
+    });
     expect(drawings[1]).toEqual({
       id: expect.stringMatching(/^trend_/),
       type: 'trendline',
@@ -47,6 +54,8 @@ describe('drawing normalization helpers', () => {
       startPrice: 10,
       endTime: 1100,
       endPrice: 12.5,
+      visible: true,
+      locked: false,
     });
     expect(drawings[2]).toEqual({
       id: expect.stringMatching(/^rect_/),
@@ -55,6 +64,8 @@ describe('drawing normalization helpers', () => {
       startPrice: 9.5,
       endTime: 1300,
       endPrice: 11,
+      visible: true,
+      locked: false,
     });
     expect(drawings[3]).toEqual({
       id: expect.stringMatching(/^ray_/),
@@ -63,6 +74,8 @@ describe('drawing normalization helpers', () => {
       startPrice: 9.9,
       endTime: 1400,
       endPrice: 12.1,
+      visible: true,
+      locked: false,
     });
     expect(drawings[4]).toEqual({
       id: 'note-fixed',
@@ -70,6 +83,8 @@ describe('drawing normalization helpers', () => {
       time: 1400,
       price: 10.7,
       text: 'breakout zone',
+      visible: false,
+      locked: false,
     });
   });
 
@@ -77,12 +92,26 @@ describe('drawing normalization helpers', () => {
     const normalizedFromLines = normalizeDrawingLines([{ price: 123 }, { id: 'fixed', price: 456 }]);
     const legacyLines = toLegacyDrawingLines([
       ...normalizedFromLines,
-      { id: 'v-1', type: 'vertical', time: 111 },
-      { id: 'n-1', type: 'note', time: 222, price: 9.9, text: 'memo' },
+      { id: 'v-1', type: 'vertical', time: 111, visible: true, locked: false },
+      { id: 'n-1', type: 'note', time: 222, price: 9.9, text: 'memo', visible: true, locked: false },
     ]);
 
     expect(legacyLines).toHaveLength(2);
     expect(legacyLines[0]).toEqual({ id: expect.stringMatching(/^line_/), price: 123 });
     expect(legacyLines[1]).toEqual({ id: 'fixed', price: 456 });
+    expect(normalizedFromLines[0]).toEqual({
+      id: expect.stringMatching(/^line_/),
+      type: 'horizontal',
+      price: 123,
+      visible: true,
+      locked: false,
+    });
+    expect(normalizedFromLines[1]).toEqual({
+      id: 'fixed',
+      type: 'horizontal',
+      price: 456,
+      visible: true,
+      locked: false,
+    });
   });
 });

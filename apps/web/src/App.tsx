@@ -428,39 +428,44 @@ type TradingOrderFormState = {
   stopLossPrice: string;
 };
 
-type HorizontalLine = {
+type HorizontalLine = DrawingFlagState & {
   id: string;
   price: number;
   line: IPriceLine;
 };
 
-type HorizontalLineState = Pick<HorizontalLine, 'id' | 'price'>;
-type VerticalLineState = {
+type DrawingFlagState = {
+  visible: boolean;
+  locked: boolean;
+};
+
+type HorizontalLineState = Pick<HorizontalLine, 'id' | 'price'> & DrawingFlagState;
+type VerticalLineState = DrawingFlagState & {
   id: string;
   time: UTCTimestamp;
 };
-type TrendlineState = {
+type TrendlineState = DrawingFlagState & {
   id: string;
   startTime: UTCTimestamp;
   startPrice: number;
   endTime: UTCTimestamp;
   endPrice: number;
 };
-type RayState = {
+type RayState = DrawingFlagState & {
   id: string;
   startTime: UTCTimestamp;
   startPrice: number;
   endTime: UTCTimestamp;
   endPrice: number;
 };
-type RectangleState = {
+type RectangleState = DrawingFlagState & {
   id: string;
   startTime: UTCTimestamp;
   startPrice: number;
   endTime: UTCTimestamp;
   endPrice: number;
 };
-type NoteState = {
+type NoteState = DrawingFlagState & {
   id: string;
   time: UTCTimestamp;
   price: number;
@@ -470,12 +475,39 @@ type ToolKey = 'cursor' | 'crosshair' | 'vertical' | 'horizontal' | 'trendline' 
 type DrawingKind = 'horizontal' | 'vertical' | 'trendline' | 'ray' | 'rectangle' | 'note';
 type PendingShapeTool = 'trendline' | 'ray' | 'rectangle';
 type DrawingPayloadItem =
-  | { id: string; type: 'horizontal'; price: number }
-  | { id: string; type: 'vertical'; time: number }
-  | { id: string; type: 'trendline'; startTime: number; startPrice: number; endTime: number; endPrice: number }
-  | { id: string; type: 'ray'; startTime: number; startPrice: number; endTime: number; endPrice: number }
-  | { id: string; type: 'rectangle'; startTime: number; startPrice: number; endTime: number; endPrice: number }
-  | { id: string; type: 'note'; time: number; price: number; text: string };
+  | { id: string; type: 'horizontal'; price: number; visible: boolean; locked: boolean }
+  | { id: string; type: 'vertical'; time: number; visible: boolean; locked: boolean }
+  | {
+      id: string;
+      type: 'trendline';
+      startTime: number;
+      startPrice: number;
+      endTime: number;
+      endPrice: number;
+      visible: boolean;
+      locked: boolean;
+    }
+  | {
+      id: string;
+      type: 'ray';
+      startTime: number;
+      startPrice: number;
+      endTime: number;
+      endPrice: number;
+      visible: boolean;
+      locked: boolean;
+    }
+  | {
+      id: string;
+      type: 'rectangle';
+      startTime: number;
+      startPrice: number;
+      endTime: number;
+      endPrice: number;
+      visible: boolean;
+      locked: boolean;
+    }
+  | { id: string; type: 'note'; time: number; price: number; text: string; visible: boolean; locked: boolean };
 
 type DrawingHit = {
   id: string;
@@ -961,6 +993,10 @@ function normalizeLinePrice(price: number) {
   return Number(price.toFixed(Math.abs(price) < 10 ? 4 : 2));
 }
 
+function normalizeDrawingFlag(value: unknown, fallback: boolean) {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
 function formatDrawingTime(time: UTCTimestamp) {
   return new Date(Number(time) * 1000).toLocaleString('ko-KR', {
     month: '2-digit',
@@ -972,6 +1008,15 @@ function formatDrawingTime(time: UTCTimestamp) {
 
 function summarizeNoteText(text: string) {
   return text.length > 18 ? `${text.slice(0, 18)}…` : text;
+}
+
+function formatDrawingKindLabel(kind: DrawingKind) {
+  if (kind === 'horizontal') return '수평선';
+  if (kind === 'vertical') return '수직선';
+  if (kind === 'trendline') return '추세선';
+  if (kind === 'ray') return '레이';
+  if (kind === 'rectangle') return '사각형';
+  return '노트';
 }
 
 function formatCandleDateTime(time: number) {
@@ -1505,17 +1550,19 @@ function App() {
     });
   }, []);
 
-  const toHorizontalLineState = useCallback((line: { id?: string; price: number }) => {
+  const toHorizontalLineState = useCallback((line: { id?: string; price: number; visible?: boolean; locked?: boolean }) => {
     const normalizedPrice = Number(line.price);
     if (!Number.isFinite(normalizedPrice)) return null;
 
     return {
       id: line.id?.trim() || createHorizontalLineId(),
       price: normalizeLinePrice(normalizedPrice),
+      visible: normalizeDrawingFlag(line.visible, true),
+      locked: normalizeDrawingFlag(line.locked, false),
     };
   }, []);
 
-  const toVerticalLineState = useCallback((line: { id?: string; time: number }) => {
+  const toVerticalLineState = useCallback((line: { id?: string; time: number; visible?: boolean; locked?: boolean }) => {
     const normalizedTime = Number(line.time);
     if (!Number.isFinite(normalizedTime)) return null;
 
@@ -1525,11 +1572,21 @@ function App() {
     return {
       id: line.id?.trim() || createVerticalLineId(),
       time: timestamp as UTCTimestamp,
+      visible: normalizeDrawingFlag(line.visible, true),
+      locked: normalizeDrawingFlag(line.locked, false),
     };
   }, []);
 
   const toTrendlineState = useCallback(
-    (drawing: { id?: string; startTime: number; startPrice: number; endTime: number; endPrice: number }) => {
+    (drawing: {
+      id?: string;
+      startTime: number;
+      startPrice: number;
+      endTime: number;
+      endPrice: number;
+      visible?: boolean;
+      locked?: boolean;
+    }) => {
       const startTime = Math.floor(Number(drawing.startTime));
       const endTime = Math.floor(Number(drawing.endTime));
       const startPrice = Number(drawing.startPrice);
@@ -1544,13 +1601,23 @@ function App() {
         startPrice: normalizeLinePrice(startPrice),
         endTime: endTime as UTCTimestamp,
         endPrice: normalizeLinePrice(endPrice),
+        visible: normalizeDrawingFlag(drawing.visible, true),
+        locked: normalizeDrawingFlag(drawing.locked, false),
       };
     },
     [],
   );
 
   const toRayState = useCallback(
-    (drawing: { id?: string; startTime: number; startPrice: number; endTime: number; endPrice: number }) => {
+    (drawing: {
+      id?: string;
+      startTime: number;
+      startPrice: number;
+      endTime: number;
+      endPrice: number;
+      visible?: boolean;
+      locked?: boolean;
+    }) => {
       const startTime = Math.floor(Number(drawing.startTime));
       const endTime = Math.floor(Number(drawing.endTime));
       const startPrice = Number(drawing.startPrice);
@@ -1566,13 +1633,23 @@ function App() {
         startPrice: normalizeLinePrice(startPrice),
         endTime: endTime as UTCTimestamp,
         endPrice: normalizeLinePrice(endPrice),
+        visible: normalizeDrawingFlag(drawing.visible, true),
+        locked: normalizeDrawingFlag(drawing.locked, false),
       };
     },
     [],
   );
 
   const toRectangleState = useCallback(
-    (drawing: { id?: string; startTime: number; startPrice: number; endTime: number; endPrice: number }) => {
+    (drawing: {
+      id?: string;
+      startTime: number;
+      startPrice: number;
+      endTime: number;
+      endPrice: number;
+      visible?: boolean;
+      locked?: boolean;
+    }) => {
       const startTime = Math.floor(Number(drawing.startTime));
       const endTime = Math.floor(Number(drawing.endTime));
       const startPrice = Number(drawing.startPrice);
@@ -1587,12 +1664,14 @@ function App() {
         startPrice: normalizeLinePrice(startPrice),
         endTime: endTime as UTCTimestamp,
         endPrice: normalizeLinePrice(endPrice),
+        visible: normalizeDrawingFlag(drawing.visible, true),
+        locked: normalizeDrawingFlag(drawing.locked, false),
       };
     },
     [],
   );
 
-  const toNoteState = useCallback((drawing: { id?: string; time: number; price: number; text: string }) => {
+  const toNoteState = useCallback((drawing: { id?: string; time: number; price: number; text: string; visible?: boolean; locked?: boolean }) => {
     const time = Math.floor(Number(drawing.time));
     const price = Number(drawing.price);
     const text = drawing.text.trim();
@@ -1604,6 +1683,8 @@ function App() {
       time: time as UTCTimestamp,
       price: normalizeLinePrice(price),
       text,
+      visible: normalizeDrawingFlag(drawing.visible, true),
+      locked: normalizeDrawingFlag(drawing.locked, false),
     };
   }, []);
 
@@ -1611,6 +1692,8 @@ function App() {
     return horizontalLinesRef.current.map((item) => ({
       id: item.id,
       price: item.price,
+      visible: item.visible,
+      locked: item.locked,
     }));
   }, []);
 
@@ -1618,6 +1701,8 @@ function App() {
     return verticalLinesRef.current.map((item) => ({
       id: item.id,
       time: item.time,
+      visible: item.visible,
+      locked: item.locked,
     }));
   }, []);
 
@@ -1651,11 +1736,15 @@ function App() {
           id: line.id,
           type: 'horizontal' as const,
           price: line.price,
+          visible: line.visible,
+          locked: line.locked,
         })),
         ...markers.map((marker) => ({
           id: marker.id,
           type: 'vertical' as const,
           time: Number(marker.time),
+          visible: marker.visible,
+          locked: marker.locked,
         })),
         ...trendShapes.map((shape) => ({
           id: shape.id,
@@ -1664,6 +1753,8 @@ function App() {
           startPrice: shape.startPrice,
           endTime: Number(shape.endTime),
           endPrice: shape.endPrice,
+          visible: shape.visible,
+          locked: shape.locked,
         })),
         ...rayShapes.map((shape) => ({
           id: shape.id,
@@ -1672,6 +1763,8 @@ function App() {
           startPrice: shape.startPrice,
           endTime: Number(shape.endTime),
           endPrice: shape.endPrice,
+          visible: shape.visible,
+          locked: shape.locked,
         })),
         ...rectangleShapes.map((shape) => ({
           id: shape.id,
@@ -1680,6 +1773,8 @@ function App() {
           startPrice: shape.startPrice,
           endTime: Number(shape.endTime),
           endPrice: shape.endPrice,
+          visible: shape.visible,
+          locked: shape.locked,
         })),
         ...noteShapes.map((shape) => ({
           id: shape.id,
@@ -1687,6 +1782,8 @@ function App() {
           time: Number(shape.time),
           price: shape.price,
           text: shape.text,
+          visible: shape.visible,
+          locked: shape.locked,
         })),
       ];
     },
@@ -1703,6 +1800,11 @@ function App() {
     for (const item of verticalLinesRef.current) {
       const node = verticalLineNodesRef.current.get(item.id);
       if (!node) continue;
+
+      if (!item.visible) {
+        node.style.display = 'none';
+        continue;
+      }
 
       const x = chart.timeScale().timeToCoordinate(item.time as Time);
       if (x === null || !Number.isFinite(x) || x < 0 || x > overlayWidth) {
@@ -1726,11 +1828,14 @@ function App() {
     horizontalLinesRef.current = lines.map((item) => ({
       id: item.id,
       price: item.price,
+      visible: item.visible,
+      locked: item.locked,
       line: series.createPriceLine({
         price: item.price,
         color: '#f5a623',
         lineWidth: 1,
-        axisLabelVisible: true,
+        lineVisible: item.visible,
+        axisLabelVisible: item.visible,
         title: `H ${formatPrice(item.price)}`,
       }),
     }));
@@ -1796,6 +1901,8 @@ function App() {
       item.line.applyOptions({
         color: selected ? '#ffcf66' : '#f5a623',
         lineWidth: selected ? 2 : 1,
+        lineVisible: item.visible,
+        axisLabelVisible: item.visible,
       });
     }
   }, [horizontalLines, selectedDrawingId]);
@@ -1806,7 +1913,10 @@ function App() {
 
   useEffect(() => {
     for (const [id, node] of verticalLineNodesRef.current.entries()) {
-      node.className = `vertical-line-marker${selectedDrawingId === id ? ' selected' : ''}`;
+      const line = verticalLinesRef.current.find((item) => item.id === id);
+      node.className = `vertical-line-marker${selectedDrawingId === id ? ' selected' : ''}${line?.locked ? ' locked' : ''}${
+        line?.visible === false ? ' hidden' : ''
+      }`;
     }
   }, [selectedDrawingId, verticalLines]);
 
@@ -1828,7 +1938,10 @@ function App() {
           body: JSON.stringify({
             symbol,
             interval,
-            lines,
+            lines: lines.map((line) => ({
+              id: line.id,
+              price: line.price,
+            })),
             drawings: toDrawingPayload(lines, markers, trendShapes, rayShapes, rectangleShapes, noteShapes),
           }),
         });
@@ -1893,6 +2006,8 @@ function App() {
             endTime?: number;
             endPrice?: number;
             text?: string;
+            visible?: boolean;
+            locked?: boolean;
           }>;
           lines?: Array<{ id?: string; price: number }>;
         };
@@ -1907,14 +2022,24 @@ function App() {
         if (data.drawings?.length) {
           for (const drawing of data.drawings) {
             if (drawing.type === 'horizontal' && typeof drawing.price === 'number') {
-              const horizontalLine = toHorizontalLineState({ id: drawing.id, price: drawing.price });
+              const horizontalLine = toHorizontalLineState({
+                id: drawing.id,
+                price: drawing.price,
+                visible: drawing.visible,
+                locked: drawing.locked,
+              });
               if (horizontalLine) {
                 nextHorizontalLines.push(horizontalLine);
               }
             }
 
             if (drawing.type === 'vertical' && typeof drawing.time === 'number') {
-              const verticalLine = toVerticalLineState({ id: drawing.id, time: drawing.time });
+              const verticalLine = toVerticalLineState({
+                id: drawing.id,
+                time: drawing.time,
+                visible: drawing.visible,
+                locked: drawing.locked,
+              });
               if (verticalLine) {
                 nextVerticalLines.push(verticalLine);
               }
@@ -1933,6 +2058,8 @@ function App() {
                 startPrice: drawing.startPrice,
                 endTime: drawing.endTime,
                 endPrice: drawing.endPrice,
+                visible: drawing.visible,
+                locked: drawing.locked,
               });
               if (trendline) {
                 nextTrendlines.push(trendline);
@@ -1952,6 +2079,8 @@ function App() {
                 startPrice: drawing.startPrice,
                 endTime: drawing.endTime,
                 endPrice: drawing.endPrice,
+                visible: drawing.visible,
+                locked: drawing.locked,
               });
               if (ray) {
                 nextRays.push(ray);
@@ -1971,6 +2100,8 @@ function App() {
                 startPrice: drawing.startPrice,
                 endTime: drawing.endTime,
                 endPrice: drawing.endPrice,
+                visible: drawing.visible,
+                locked: drawing.locked,
               });
               if (rectangle) {
                 nextRectangles.push(rectangle);
@@ -1988,6 +2119,8 @@ function App() {
                 time: drawing.time,
                 price: drawing.price,
                 text: drawing.text,
+                visible: drawing.visible,
+                locked: drawing.locked,
               });
               if (note) {
                 nextNotes.push(note);
@@ -2488,6 +2621,8 @@ function App() {
         horizontalLinesRef.current.push({
           id,
           price: normalizedPrice,
+          visible: true,
+          locked: false,
           line,
         });
 
@@ -2515,7 +2650,10 @@ function App() {
         if (duplicated) return;
         const beforeSnapshot = captureChartHistorySnapshot();
 
-        const nextVerticalLines = [...snapshotVerticalLines(), { id: createVerticalLineId(), time: timestamp }];
+        const nextVerticalLines = [
+          ...snapshotVerticalLines(),
+          { id: createVerticalLineId(), time: timestamp, visible: true, locked: false },
+        ];
         renderVerticalLines(nextVerticalLines);
         void persistDrawings(
           selectedSymbolRef.current,
@@ -2557,6 +2695,8 @@ function App() {
                 startPrice: pending.price,
                 endTime: timestamp,
                 endPrice: normalizedPrice,
+                visible: true,
+                locked: false,
               },
             ];
             renderTrendlines(nextTrendlines);
@@ -2579,6 +2719,8 @@ function App() {
                 startPrice: pending.price,
                 endTime: timestamp,
                 endPrice: normalizedPrice,
+                visible: true,
+                locked: false,
               },
             ];
             renderRays(nextRays);
@@ -2601,6 +2743,8 @@ function App() {
                 startPrice: pending.price,
                 endTime: timestamp,
                 endPrice: normalizedPrice,
+                visible: true,
+                locked: false,
               },
             ];
             renderRectangles(nextRectangles);
@@ -2650,6 +2794,8 @@ function App() {
           time: timestamp,
           price: normalizeLinePrice(price),
           text,
+          visible: true,
+          locked: false,
         },
       ];
       renderNotes(nextNotes);
@@ -4695,12 +4841,14 @@ function App() {
       };
 
       for (const line of horizontalLinesRef.current) {
+        if (!line.visible) continue;
         const yCoord = series.priceToCoordinate(line.price);
         if (yCoord === null || !Number.isFinite(yCoord)) continue;
         upsertHit(line.id, 'horizontal', Math.abs(y - Number(yCoord)));
       }
 
       for (const line of verticalLinesRef.current) {
+        if (!line.visible) continue;
         const xCoord = chart.timeScale().timeToCoordinate(line.time as Time);
         if (xCoord === null || !Number.isFinite(xCoord)) continue;
         upsertHit(line.id, 'vertical', Math.abs(x - Number(xCoord)));
@@ -4715,6 +4863,7 @@ function App() {
       };
 
       for (const line of trendlinesRef.current) {
+        if (!line.visible) continue;
         const start = toCoordinate(line.startTime, line.startPrice);
         const end = toCoordinate(line.endTime, line.endPrice);
         if (!start || !end) continue;
@@ -4723,6 +4872,7 @@ function App() {
       }
 
       for (const line of raysRef.current) {
+        if (!line.visible) continue;
         const start = toCoordinate(line.startTime, line.startPrice);
         const end = toCoordinate(line.endTime, line.endPrice);
         if (!start || !end) continue;
@@ -4731,6 +4881,7 @@ function App() {
       }
 
       for (const shape of rectanglesRef.current) {
+        if (!shape.visible) continue;
         const start = toCoordinate(shape.startTime, shape.startPrice);
         const end = toCoordinate(shape.endTime, shape.endPrice);
         if (!start || !end) continue;
@@ -4753,6 +4904,7 @@ function App() {
       }
 
       for (const note of notesRef.current) {
+        if (!note.visible) continue;
         const point = toCoordinate(note.time, note.price);
         if (!point) continue;
         const distance = pointDistance(x, y, point.x, point.y);
@@ -4848,6 +5000,118 @@ function App() {
     };
   }, []);
 
+  const isDrawingLocked = useCallback((id: string) => {
+    const horizontal = horizontalLinesRef.current.find((item) => item.id === id);
+    if (horizontal) return horizontal.locked;
+
+    const vertical = verticalLinesRef.current.find((item) => item.id === id);
+    if (vertical) return vertical.locked;
+
+    const trendline = trendlinesRef.current.find((item) => item.id === id);
+    if (trendline) return trendline.locked;
+
+    const ray = raysRef.current.find((item) => item.id === id);
+    if (ray) return ray.locked;
+
+    const rectangle = rectanglesRef.current.find((item) => item.id === id);
+    if (rectangle) return rectangle.locked;
+
+    const note = notesRef.current.find((item) => item.id === id);
+    if (note) return note.locked;
+
+    return false;
+  }, []);
+
+  const updateDrawingFlagsById = useCallback(
+    (id: string, updater: (current: DrawingFlagState) => DrawingFlagState) => {
+      const beforeSnapshot = captureChartHistorySnapshot();
+      let updated = false;
+
+      function applyFlags<T extends { id: string; visible: boolean; locked: boolean }>(item: T): T {
+        if (item.id !== id) return item;
+        const nextFlags = updater({ visible: item.visible, locked: item.locked });
+        if (nextFlags.visible === item.visible && nextFlags.locked === item.locked) return item;
+        updated = true;
+        return { ...item, ...nextFlags };
+      }
+
+      const nextHorizontalLines = snapshotHorizontalLines().map((item) => applyFlags(item));
+      const nextVerticalLines = snapshotVerticalLines().map((item) => applyFlags(item));
+      const nextTrendlines = snapshotTrendlines().map((item) => applyFlags(item));
+      const nextRays = snapshotRays().map((item) => applyFlags(item));
+      const nextRectangles = snapshotRectangles().map((item) => applyFlags(item));
+      const nextNotes = snapshotNotes().map((item) => applyFlags(item));
+
+      if (!updated) return false;
+
+      renderHorizontalLines(nextHorizontalLines);
+      renderVerticalLines(nextVerticalLines);
+      renderTrendlines(nextTrendlines);
+      renderRays(nextRays);
+      renderRectangles(nextRectangles);
+      renderNotes(nextNotes);
+      void persistDrawings(
+        selectedSymbolRef.current,
+        selectedIntervalRef.current,
+        nextHorizontalLines,
+        nextVerticalLines,
+        nextTrendlines,
+        nextRays,
+        nextRectangles,
+        nextNotes,
+      );
+      recordHistoryTransition(
+        beforeSnapshot,
+        captureChartHistorySnapshot({
+          horizontalLines: nextHorizontalLines,
+          verticalLines: nextVerticalLines,
+          trendlines: nextTrendlines,
+          rays: nextRays,
+          rectangles: nextRectangles,
+          notes: nextNotes,
+        }),
+      );
+      return true;
+    },
+    [
+      captureChartHistorySnapshot,
+      persistDrawings,
+      recordHistoryTransition,
+      renderHorizontalLines,
+      renderNotes,
+      renderRays,
+      renderRectangles,
+      renderTrendlines,
+      renderVerticalLines,
+      snapshotHorizontalLines,
+      snapshotNotes,
+      snapshotRays,
+      snapshotRectangles,
+      snapshotTrendlines,
+      snapshotVerticalLines,
+    ],
+  );
+
+  const toggleDrawingLockedById = useCallback(
+    (id: string) => {
+      updateDrawingFlagsById(id, (current) => ({
+        ...current,
+        locked: !current.locked,
+      }));
+    },
+    [updateDrawingFlagsById],
+  );
+
+  const toggleDrawingVisibilityById = useCallback(
+    (id: string) => {
+      updateDrawingFlagsById(id, (current) => ({
+        ...current,
+        visible: !current.visible,
+      }));
+    },
+    [updateDrawingFlagsById],
+  );
+
   const handleChartPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
       if (activeToolRef.current !== 'cursor') return;
@@ -4864,6 +5128,10 @@ function App() {
       }
 
       setSelectedDrawingId(hit.id);
+      if (isDrawingLocked(hit.id)) {
+        dragHistoryStartRef.current = null;
+        return;
+      }
 
       const mapped = toTimePriceFromCoordinates(point.x, point.y);
       if (!mapped) {
@@ -4883,7 +5151,7 @@ function App() {
       event.currentTarget.setPointerCapture(event.pointerId);
       event.preventDefault();
     },
-    [captureChartHistorySnapshot, findDrawingAtPoint, getLocalChartPoint, startDragState, toTimePriceFromCoordinates],
+    [captureChartHistorySnapshot, findDrawingAtPoint, getLocalChartPoint, isDrawingLocked, startDragState, toTimePriceFromCoordinates],
   );
 
   const handleChartPointerMove = useCallback(
@@ -4902,7 +5170,9 @@ function App() {
       if (dragState.kind === 'horizontal') {
         const nextPrice = normalizeLinePrice(dragState.originPrice + (mapped.price - dragState.startPrice));
         const nextLines = horizontalLinesRef.current.map((line) =>
-          line.id === dragState.id ? { id: line.id, price: nextPrice } : { id: line.id, price: line.price },
+          line.id === dragState.id
+            ? { id: line.id, price: nextPrice, visible: line.visible, locked: line.locked }
+            : { id: line.id, price: line.price, visible: line.visible, locked: line.locked },
         );
         moved = nextLines.some((line, index) => Math.abs(line.price - horizontalLinesRef.current[index].price) > 0.0001);
         if (moved) {
@@ -5389,36 +5659,46 @@ function App() {
     recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
   }, [captureChartHistorySnapshot, persistDrawings, recordHistoryTransition, renderVerticalLines]);
 
-  const deleteDrawingById = useCallback((id: string) => {
+  const deleteDrawingById = useCallback((id: string, options?: { allowLocked?: boolean }) => {
+    if (!options?.allowLocked && isDrawingLocked(id)) {
+      return false;
+    }
+
     if (horizontalLinesRef.current.some((item) => item.id === id)) {
       removeHorizontalLine(id);
-      return;
+      return true;
     }
     if (verticalLinesRef.current.some((item) => item.id === id)) {
       removeVerticalLine(id);
-      return;
+      return true;
     }
     if (trendlinesRef.current.some((item) => item.id === id)) {
       removeTrendline(id);
-      return;
+      return true;
     }
     if (raysRef.current.some((item) => item.id === id)) {
       removeRay(id);
-      return;
+      return true;
     }
     if (rectanglesRef.current.some((item) => item.id === id)) {
       removeRectangle(id);
-      return;
+      return true;
     }
     if (notesRef.current.some((item) => item.id === id)) {
       removeNote(id);
+      return true;
     }
-  }, [removeHorizontalLine, removeNote, removeRay, removeRectangle, removeTrendline, removeVerticalLine]);
+    return false;
+  }, [isDrawingLocked, removeHorizontalLine, removeNote, removeRay, removeRectangle, removeTrendline, removeVerticalLine]);
 
   const deleteSelectedDrawing = useCallback(() => {
-    if (!selectedDrawingId) return;
-    deleteDrawingById(selectedDrawingId);
-  }, [deleteDrawingById, selectedDrawingId]);
+    if (!selectedDrawingId) return false;
+    if (isDrawingLocked(selectedDrawingId)) {
+      setTopActionFeedback('잠금된 도형은 삭제할 수 없습니다.');
+      return false;
+    }
+    return deleteDrawingById(selectedDrawingId);
+  }, [deleteDrawingById, isDrawingLocked, selectedDrawingId]);
 
   useEffect(() => {
     const isTextInputTarget = (target: EventTarget | null) => {
@@ -5775,6 +6055,53 @@ function App() {
     ],
     [horizontalLines, notes, rays, rectangles, trendlines, verticalLines],
   );
+  const drawingObjects = useMemo(
+    () => [
+      ...horizontalLines.map((line) => ({
+        id: line.id,
+        kind: 'horizontal' as const,
+        detail: formatPrice(line.price),
+        visible: line.visible,
+        locked: line.locked,
+      })),
+      ...verticalLines.map((line) => ({
+        id: line.id,
+        kind: 'vertical' as const,
+        detail: formatDrawingTime(line.time),
+        visible: line.visible,
+        locked: line.locked,
+      })),
+      ...trendlines.map((line) => ({
+        id: line.id,
+        kind: 'trendline' as const,
+        detail: `${formatDrawingTime(line.startTime)}→${formatDrawingTime(line.endTime)}`,
+        visible: line.visible,
+        locked: line.locked,
+      })),
+      ...rays.map((line) => ({
+        id: line.id,
+        kind: 'ray' as const,
+        detail: `${formatDrawingTime(line.startTime)}→${formatDrawingTime(line.endTime)}`,
+        visible: line.visible,
+        locked: line.locked,
+      })),
+      ...rectangles.map((line) => ({
+        id: line.id,
+        kind: 'rectangle' as const,
+        detail: `${formatDrawingTime(line.startTime)}→${formatDrawingTime(line.endTime)}`,
+        visible: line.visible,
+        locked: line.locked,
+      })),
+      ...notes.map((note) => ({
+        id: note.id,
+        kind: 'note' as const,
+        detail: summarizeNoteText(note.text),
+        visible: note.visible,
+        locked: note.locked,
+      })),
+    ],
+    [horizontalLines, notes, rays, rectangles, trendlines, verticalLines],
+  );
   const drawingOverlayGeometry = useMemo(() => {
     void overlayTick;
     const chart = chartRef.current;
@@ -5800,6 +6127,7 @@ function App() {
 
     const trendlineShapes: Array<{ id: string; x1: number; y1: number; x2: number; y2: number }> = [];
     for (const shape of trendlines) {
+      if (!shape.visible) continue;
       const start = toCoordinate(shape.startTime, shape.startPrice);
       const end = toCoordinate(shape.endTime, shape.endPrice);
       if (!start || !end) continue;
@@ -5815,6 +6143,7 @@ function App() {
 
     const rectangleShapes: Array<{ id: string; x: number; y: number; width: number; height: number }> = [];
     for (const shape of rectangles) {
+      if (!shape.visible) continue;
       const start = toCoordinate(shape.startTime, shape.startPrice);
       const end = toCoordinate(shape.endTime, shape.endPrice);
       if (!start || !end) continue;
@@ -5835,6 +6164,7 @@ function App() {
 
     const rayShapes: Array<{ id: string; x1: number; y1: number; x2: number; y2: number }> = [];
     for (const shape of rays) {
+      if (!shape.visible) continue;
       const start = toCoordinate(shape.startTime, shape.startPrice);
       const end = toCoordinate(shape.endTime, shape.endPrice);
       if (!start || !end) continue;
@@ -5860,6 +6190,7 @@ function App() {
 
     const noteShapes: Array<{ id: string; x: number; y: number; text: string }> = [];
     for (const note of notes) {
+      if (!note.visible) continue;
       const point = toCoordinate(note.time, note.price);
       if (!point) continue;
 
@@ -6443,6 +6774,56 @@ function App() {
           <aside className="right-panel">
             <div className="right-panel-header">
               <h3>시장 패널</h3>
+            </div>
+
+            <div className="drawing-objects-panel">
+              <div className="drawing-objects-head">
+                <strong>도형 오브젝트</strong>
+                <span>{drawingObjects.length}</span>
+              </div>
+              {drawingObjects.length === 0 ? (
+                <p className="drawing-objects-empty">저장된 도형이 없습니다.</p>
+              ) : (
+                <ul className="drawing-objects-list" aria-label="드로잉 오브젝트 목록">
+                  {drawingObjects.map((drawing) => (
+                    <li key={drawing.id} className={selectedDrawingId === drawing.id ? 'selected' : ''}>
+                      <button
+                        type="button"
+                        className={`drawing-objects-row${selectedDrawingId === drawing.id ? ' selected' : ''}`}
+                        onClick={() => setSelectedDrawingId(drawing.id)}
+                      >
+                        <span className="drawing-objects-type">{formatDrawingKindLabel(drawing.kind)}</span>
+                        <span className="drawing-objects-id">{drawing.id}</span>
+                        <span className="drawing-objects-detail">{drawing.detail}</span>
+                      </button>
+                      <div className="drawing-objects-actions">
+                        <button
+                          type="button"
+                          className={drawing.locked ? 'active' : ''}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setSelectedDrawingId(drawing.id);
+                            toggleDrawingLockedById(drawing.id);
+                          }}
+                        >
+                          잠금
+                        </button>
+                        <button
+                          type="button"
+                          className={drawing.visible ? 'active' : ''}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setSelectedDrawingId(drawing.id);
+                            toggleDrawingVisibilityById(drawing.id);
+                          }}
+                        >
+                          표시
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
 
             <div className="watch-tabs">

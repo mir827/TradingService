@@ -184,6 +184,7 @@ Progress note (2026-02-28):
 - `/api/trading/orders`, `/api/trading/orders/:id/cancel`, `/api/trading/state`가 확장 페이로드/응답 메타데이터(조건가/링크/상태)를 제공하며 기존 market payload 호환성은 유지됨.
 - `apps/web` `트레이딩 패널`에 주문유형(시장가/지정가/스탑) 입력, 조건부 가격 필드, 브래킷 TP/SL 토글/입력, 주문 링크/상태 표시가 추가되었고 기존 로딩/에러/복구 UX 흐름은 유지됨.
 - M5 P0 status: complete (P0-1, P0-2, P0-3).
+- M5 progress note (2026-02-28): P1 started, and P1-4(드로잉 오브젝트 패널: 목록/잠금/숨김) completed in incremental scope.
 
 ### P1 (분석 생산성/활용도 확장)
 
@@ -197,6 +198,9 @@ Progress note (2026-02-28):
   - 개별 잠금(lock)/숨김(visibility) 토글 및 상태 persistence.
   - 잠금된 오브젝트는 드래그/삭제 불가, 숨김 오브젝트는 렌더 제외.
   - 대량 오브젝트(100개+)에서도 조작 지연이 허용 범위 내 유지.
+
+Progress note (2026-02-28):
+- M5 P1-4 completed (incremental): `apps/web` 우측 패널에 compact 드로잉 오브젝트 목록(UI 선택/타입+ID 표시/잠금/표시 토글) 추가, `apps/web`+`apps/api` 드로잉 모델에 `locked/visible` 상태 확장 및 persistence 반영, 구버전 payload 기본값(`visible=true`, `locked=false`) 호환, 숨김 렌더 제외/잠금 드래그·삭제 보호 동작까지 반영됨.
 
 5) 
 - 기능명: 비교 오버레이 확장 (다중 종목 + 스케일 모드)
