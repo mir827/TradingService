@@ -71,6 +71,7 @@ import {
   type LogicalRangeLike,
 } from './lib/chartLayout';
 import { readUnifiedLayoutState, writeUnifiedLayoutState } from './lib/layoutPersistence';
+import { createUndoRedoHistory, type UndoRedoState } from './lib/history';
 import {
   emitOpsErrorTelemetry,
   emitOpsRecoveryTelemetry,
@@ -474,6 +475,24 @@ type DragState =
       moved: boolean;
     };
 
+type ChartHistorySnapshot = {
+  horizontalLines: HorizontalLineState[];
+  verticalLines: VerticalLineState[];
+  trendlines: TrendlineState[];
+  rays: RayState[];
+  rectangles: RectangleState[];
+  notes: NoteState[];
+  enabledIndicators: Record<IndicatorKey, boolean>;
+  indicatorSettings: IndicatorSettings;
+  compareSymbol: string;
+  chartLayoutMode: ChartLayoutMode;
+};
+
+type ChartHistoryDrawingSnapshot = Pick<
+  ChartHistorySnapshot,
+  'horizontalLines' | 'verticalLines' | 'trendlines' | 'rays' | 'rectangles' | 'notes'
+>;
+
 const intervals = ['1', '5', '15', '60', '240', '1D', '1W'];
 const chartLayoutOptions: Array<{ key: ChartLayoutMode; label: string }> = [
   { key: 'single', label: '단일' },
@@ -526,6 +545,7 @@ const HOVER_TOOLTIP_MARGIN = 14;
 const DRAWING_HIT_TOLERANCE_PX = 8;
 const NOTE_HIT_RADIUS_PX = 14;
 const INDICATOR_PREFS_VERSION = 2;
+const CHART_HISTORY_LIMIT = 100;
 const DEFAULT_STRATEGY_TESTER_FORM: StrategyTesterFormState = {
   symbol: 'BTCUSDT',
   interval: '60',
@@ -603,6 +623,29 @@ function distanceToRay(px: number, py: number, x1: number, y1: number, x2: numbe
   const nearestX = x1 + dx * t;
   const nearestY = y1 + dy * t;
   return pointDistance(px, py, nearestX, nearestY);
+}
+
+function cloneChartHistorySnapshot(snapshot: ChartHistorySnapshot): ChartHistorySnapshot {
+  return {
+    horizontalLines: snapshot.horizontalLines.map((line) => ({ ...line })),
+    verticalLines: snapshot.verticalLines.map((line) => ({ ...line })),
+    trendlines: snapshot.trendlines.map((line) => ({ ...line })),
+    rays: snapshot.rays.map((line) => ({ ...line })),
+    rectangles: snapshot.rectangles.map((shape) => ({ ...shape })),
+    notes: snapshot.notes.map((note) => ({ ...note })),
+    enabledIndicators: { ...snapshot.enabledIndicators },
+    indicatorSettings: normalizeIndicatorSettings(snapshot.indicatorSettings),
+    compareSymbol: snapshot.compareSymbol,
+    chartLayoutMode: snapshot.chartLayoutMode,
+  };
+}
+
+function areChartHistorySnapshotsEqual(left: ChartHistorySnapshot, right: ChartHistorySnapshot) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function areChartHistoryDrawingSnapshotsEqual(left: ChartHistoryDrawingSnapshot, right: ChartHistoryDrawingSnapshot) {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function getStoredWatchPrefs(): Partial<WatchPrefs> {
@@ -955,6 +998,9 @@ function App() {
   const notesRef = useRef<NoteState[]>([]);
   const verticalLineNodesRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const dragStateRef = useRef<DragState | null>(null);
+  const dragHistoryStartRef = useRef<ChartHistorySnapshot | null>(null);
+  const historyRef = useRef(createUndoRedoHistory<ChartHistorySnapshot>({ limit: CHART_HISTORY_LIMIT }));
+  const historyApplyingRef = useRef(false);
   const selectedSymbolRef = useRef('BTCUSDT');
   const selectedIntervalRef = useRef('60');
   const watchlistAlertCheckInFlightRef = useRef(false);
@@ -1069,6 +1115,11 @@ function App() {
   const [opsPanelError, setOpsPanelError] = useState<string | null>(null);
   const [opsErrors, setOpsErrors] = useState<OpsErrorEvent[]>([]);
   const [opsRecoveries, setOpsRecoveries] = useState<OpsRecoveryEvent[]>([]);
+  const [historyState, setHistoryState] = useState<UndoRedoState>(() => historyRef.current.getState());
+  const chartLayoutModeStateRef = useRef<ChartLayoutMode>(chartLayoutMode);
+  const enabledIndicatorsRef = useRef<Record<IndicatorKey, boolean>>(enabledIndicators);
+  const indicatorSettingsRef = useRef<IndicatorSettings>(indicatorSettings);
+  const compareSymbolStateRef = useRef(compareSymbol);
   const hasTradingState = tradingState !== null;
 
   const replayProgress = useMemo(
@@ -1099,6 +1150,22 @@ function App() {
   useEffect(() => {
     selectedIntervalRef.current = selectedInterval;
   }, [selectedInterval]);
+
+  useEffect(() => {
+    chartLayoutModeStateRef.current = chartLayoutMode;
+  }, [chartLayoutMode]);
+
+  useEffect(() => {
+    enabledIndicatorsRef.current = enabledIndicators;
+  }, [enabledIndicators]);
+
+  useEffect(() => {
+    indicatorSettingsRef.current = indicatorSettings;
+  }, [indicatorSettings]);
+
+  useEffect(() => {
+    compareSymbolStateRef.current = compareSymbol;
+  }, [compareSymbol]);
 
   useEffect(() => {
     chartRangeSyncStateRef.current = createChartRangeSyncState();
@@ -1824,6 +1891,159 @@ function App() {
     [toHorizontalLineState, toNoteState, toRayState, toRectangleState, toTrendlineState, toVerticalLineState],
   );
 
+  const syncHistoryState = useCallback(() => {
+    setHistoryState(historyRef.current.getState());
+  }, []);
+
+  const captureChartHistorySnapshot = useCallback(
+    (overrides?: Partial<ChartHistorySnapshot>): ChartHistorySnapshot => {
+      const baseSnapshot: ChartHistorySnapshot = {
+        horizontalLines: snapshotHorizontalLines(),
+        verticalLines: snapshotVerticalLines(),
+        trendlines: snapshotTrendlines(),
+        rays: snapshotRays(),
+        rectangles: snapshotRectangles(),
+        notes: snapshotNotes(),
+        enabledIndicators: { ...enabledIndicatorsRef.current },
+        indicatorSettings: normalizeIndicatorSettings(indicatorSettingsRef.current),
+        compareSymbol: compareSymbolStateRef.current,
+        chartLayoutMode: chartLayoutModeStateRef.current,
+      };
+
+      return cloneChartHistorySnapshot({
+        ...baseSnapshot,
+        ...overrides,
+        horizontalLines: overrides?.horizontalLines ?? baseSnapshot.horizontalLines,
+        verticalLines: overrides?.verticalLines ?? baseSnapshot.verticalLines,
+        trendlines: overrides?.trendlines ?? baseSnapshot.trendlines,
+        rays: overrides?.rays ?? baseSnapshot.rays,
+        rectangles: overrides?.rectangles ?? baseSnapshot.rectangles,
+        notes: overrides?.notes ?? baseSnapshot.notes,
+        enabledIndicators: overrides?.enabledIndicators ?? baseSnapshot.enabledIndicators,
+        indicatorSettings: overrides?.indicatorSettings ?? baseSnapshot.indicatorSettings,
+        compareSymbol: overrides?.compareSymbol ?? baseSnapshot.compareSymbol,
+        chartLayoutMode: overrides?.chartLayoutMode ?? baseSnapshot.chartLayoutMode,
+      });
+    },
+    [
+      snapshotHorizontalLines,
+      snapshotNotes,
+      snapshotRays,
+      snapshotRectangles,
+      snapshotTrendlines,
+      snapshotVerticalLines,
+    ],
+  );
+
+  const recordHistoryTransition = useCallback(
+    (before: ChartHistorySnapshot, after: ChartHistorySnapshot) => {
+      if (historyApplyingRef.current) return;
+
+      const previous = cloneChartHistorySnapshot(before);
+      const next = cloneChartHistorySnapshot(after);
+      if (areChartHistorySnapshotsEqual(previous, next)) return;
+
+      historyRef.current.push({ before: previous, after: next });
+      syncHistoryState();
+    },
+    [syncHistoryState],
+  );
+
+  const applyChartHistorySnapshot = useCallback(
+    (snapshot: ChartHistorySnapshot) => {
+      const nextSnapshot = cloneChartHistorySnapshot(snapshot);
+      const previousDrawingSnapshot: ChartHistoryDrawingSnapshot = {
+        horizontalLines: snapshotHorizontalLines(),
+        verticalLines: snapshotVerticalLines(),
+        trendlines: snapshotTrendlines(),
+        rays: snapshotRays(),
+        rectangles: snapshotRectangles(),
+        notes: snapshotNotes(),
+      };
+      historyApplyingRef.current = true;
+
+      renderHorizontalLines(nextSnapshot.horizontalLines);
+      renderVerticalLines(nextSnapshot.verticalLines);
+      renderTrendlines(nextSnapshot.trendlines);
+      renderRays(nextSnapshot.rays);
+      renderRectangles(nextSnapshot.rectangles);
+      renderNotes(nextSnapshot.notes);
+      setEnabledIndicators({ ...nextSnapshot.enabledIndicators });
+      setIndicatorSettings(normalizeIndicatorSettings(nextSnapshot.indicatorSettings));
+      setCompareSymbol(nextSnapshot.compareSymbol);
+      setCompareError(null);
+      if (!nextSnapshot.compareSymbol) {
+        setCompareCandles([]);
+      }
+      setChartLayoutMode(nextSnapshot.chartLayoutMode);
+      setPendingShapeStart(null);
+      setSelectedDrawingId(null);
+      dragStateRef.current = null;
+      setIsDraggingDrawing(false);
+
+      historyApplyingRef.current = false;
+
+      const nextDrawingSnapshot: ChartHistoryDrawingSnapshot = {
+        horizontalLines: nextSnapshot.horizontalLines,
+        verticalLines: nextSnapshot.verticalLines,
+        trendlines: nextSnapshot.trendlines,
+        rays: nextSnapshot.rays,
+        rectangles: nextSnapshot.rectangles,
+        notes: nextSnapshot.notes,
+      };
+      if (!areChartHistoryDrawingSnapshotsEqual(previousDrawingSnapshot, nextDrawingSnapshot)) {
+        void persistDrawings(
+          selectedSymbolRef.current,
+          selectedIntervalRef.current,
+          nextSnapshot.horizontalLines,
+          nextSnapshot.verticalLines,
+          nextSnapshot.trendlines,
+          nextSnapshot.rays,
+          nextSnapshot.rectangles,
+          nextSnapshot.notes,
+        );
+      }
+    },
+    [
+      persistDrawings,
+      renderHorizontalLines,
+      renderNotes,
+      renderRays,
+      renderRectangles,
+      renderTrendlines,
+      renderVerticalLines,
+      snapshotHorizontalLines,
+      snapshotNotes,
+      snapshotRays,
+      snapshotRectangles,
+      snapshotTrendlines,
+      snapshotVerticalLines,
+    ],
+  );
+
+  const undoHistory = useCallback(() => {
+    const transition = historyRef.current.undo();
+    if (!transition) return false;
+
+    applyChartHistorySnapshot(transition.before);
+    syncHistoryState();
+    return true;
+  }, [applyChartHistorySnapshot, syncHistoryState]);
+
+  const redoHistory = useCallback(() => {
+    const transition = historyRef.current.redo();
+    if (!transition) return false;
+
+    applyChartHistorySnapshot(transition.after);
+    syncHistoryState();
+    return true;
+  }, [applyChartHistorySnapshot, syncHistoryState]);
+
+  useEffect(() => {
+    historyRef.current.clear();
+    syncHistoryState();
+  }, [selectedInterval, selectedSymbol, syncHistoryState]);
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
@@ -2127,6 +2347,7 @@ function App() {
         const normalizedPrice = normalizeLinePrice(price);
         const duplicated = horizontalLinesRef.current.some((item) => Math.abs(item.price - normalizedPrice) < 0.0001);
         if (duplicated) return;
+        const beforeSnapshot = captureChartHistorySnapshot();
 
         const id = createHorizontalLineId();
         const line = candleSeries.createPriceLine({
@@ -2155,6 +2376,7 @@ function App() {
           snapshotRectangles(),
           snapshotNotes(),
         );
+        recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
         return;
       }
 
@@ -2164,6 +2386,7 @@ function App() {
         const timestamp = Math.floor(param.time) as UTCTimestamp;
         const duplicated = verticalLinesRef.current.some((item) => Number(item.time) === Number(timestamp));
         if (duplicated) return;
+        const beforeSnapshot = captureChartHistorySnapshot();
 
         const nextVerticalLines = [...snapshotVerticalLines(), { id: createVerticalLineId(), time: timestamp }];
         renderVerticalLines(nextVerticalLines);
@@ -2177,6 +2400,7 @@ function App() {
           snapshotRectangles(),
           snapshotNotes(),
         );
+        recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
         return;
       }
 
@@ -2195,6 +2419,7 @@ function App() {
             Number(pending.time) === Number(timestamp) &&
             Math.abs(pending.price - normalizedPrice) < 0.0001;
           if (samePoint) return;
+          const beforeSnapshot = captureChartHistorySnapshot();
 
           if (nextTool === 'trendline') {
             const nextTrendlines = [
@@ -2264,6 +2489,7 @@ function App() {
             );
           }
 
+          recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
           setPendingShapeStart(null);
           return;
         }
@@ -2287,6 +2513,7 @@ function App() {
 
       const text = textInput.trim();
       if (!text) return;
+      const beforeSnapshot = captureChartHistorySnapshot();
 
       const timestamp = Math.floor(param.time) as UTCTimestamp;
       const nextNotes = [
@@ -2309,6 +2536,7 @@ function App() {
         snapshotRectangles(),
         nextNotes,
       );
+      recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
     };
 
     const onVisibleLogicalRangeChange = (range: LogicalRangeLike) => {
@@ -2372,6 +2600,7 @@ function App() {
       }
       verticalLineNodes.clear();
       dragStateRef.current = null;
+      dragHistoryStartRef.current = null;
       setHorizontalLines([]);
       setVerticalLines([]);
       setTrendlines([]);
@@ -2384,10 +2613,12 @@ function App() {
       setChartReady(false);
     };
   }, [
+    captureChartHistorySnapshot,
     clearHoveredCandle,
     pendingShapeStart,
     persistDrawings,
     refreshDrawingOverlay,
+    recordHistoryTransition,
     renderNotes,
     renderRays,
     renderRectangles,
@@ -2515,6 +2746,9 @@ function App() {
       renderNotes(loaded.notes);
       setPendingShapeStart(null);
       setSelectedDrawingId(null);
+      dragHistoryStartRef.current = null;
+      historyRef.current.clear();
+      syncHistoryState();
     };
 
     void loadPersistedDrawings();
@@ -2533,6 +2767,7 @@ function App() {
     renderVerticalLines,
     selectedInterval,
     selectedSymbol,
+    syncHistoryState,
   ]);
 
   useEffect(() => {
@@ -4365,6 +4600,7 @@ function App() {
 
       const hit = findDrawingAtPoint(point.x, point.y);
       if (!hit) {
+        dragHistoryStartRef.current = null;
         setSelectedDrawingId(null);
         return;
       }
@@ -4372,17 +4608,24 @@ function App() {
       setSelectedDrawingId(hit.id);
 
       const mapped = toTimePriceFromCoordinates(point.x, point.y);
-      if (!mapped) return;
+      if (!mapped) {
+        dragHistoryStartRef.current = null;
+        return;
+      }
 
       const dragState = startDragState(hit, event.pointerId, mapped.time, mapped.price);
-      if (!dragState) return;
+      if (!dragState) {
+        dragHistoryStartRef.current = null;
+        return;
+      }
 
       dragStateRef.current = dragState;
+      dragHistoryStartRef.current = captureChartHistorySnapshot();
       setIsDraggingDrawing(true);
       event.currentTarget.setPointerCapture(event.pointerId);
       event.preventDefault();
     },
-    [findDrawingAtPoint, getLocalChartPoint, startDragState, toTimePriceFromCoordinates],
+    [captureChartHistorySnapshot, findDrawingAtPoint, getLocalChartPoint, startDragState, toTimePriceFromCoordinates],
   );
 
   const handleChartPointerMove = useCallback(
@@ -4552,23 +4795,47 @@ function App() {
         event.currentTarget.releasePointerCapture(event.pointerId);
       }
 
+      const beforeSnapshot = dragHistoryStartRef.current;
+      dragHistoryStartRef.current = null;
       dragStateRef.current = null;
       setIsDraggingDrawing(false);
       if (!dragState.moved) return;
 
+      const nextHorizontalLines = snapshotHorizontalLines();
+      const nextVerticalLines = snapshotVerticalLines();
+      const nextTrendlines = snapshotTrendlines();
+      const nextRays = snapshotRays();
+      const nextRectangles = snapshotRectangles();
+      const nextNotes = snapshotNotes();
+
       void persistDrawings(
         selectedSymbolRef.current,
         selectedIntervalRef.current,
-        snapshotHorizontalLines(),
-        snapshotVerticalLines(),
-        snapshotTrendlines(),
-        snapshotRays(),
-        snapshotRectangles(),
-        snapshotNotes(),
+        nextHorizontalLines,
+        nextVerticalLines,
+        nextTrendlines,
+        nextRays,
+        nextRectangles,
+        nextNotes,
       );
+      if (beforeSnapshot) {
+        recordHistoryTransition(
+          beforeSnapshot,
+          captureChartHistorySnapshot({
+            horizontalLines: nextHorizontalLines,
+            verticalLines: nextVerticalLines,
+            trendlines: nextTrendlines,
+            rays: nextRays,
+            rectangles: nextRectangles,
+            notes: nextNotes,
+          }),
+        );
+      }
     },
     [
+      captureChartHistorySnapshot,
       persistDrawings,
+      recordHistoryTransition,
       snapshotHorizontalLines,
       snapshotNotes,
       snapshotRays,
@@ -4584,6 +4851,7 @@ function App() {
 
     const targetIndex = horizontalLinesRef.current.findIndex((item) => item.id === id);
     if (targetIndex < 0) return;
+    const beforeSnapshot = captureChartHistorySnapshot();
 
     const [target] = horizontalLinesRef.current.splice(targetIndex, 1);
     series.removePriceLine(target.line);
@@ -4599,10 +4867,14 @@ function App() {
       snapshotRectangles(),
       snapshotNotes(),
     );
+    recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
     setSelectedDrawingId((previous) => (previous === id ? null : previous));
-  }, [persistDrawings, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
+  }, [captureChartHistorySnapshot, persistDrawings, recordHistoryTransition, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
 
   const clearHorizontalLines = useCallback(() => {
+    if (!horizontalLinesRef.current.length) return;
+    const beforeSnapshot = captureChartHistorySnapshot();
+
     const series = candleSeriesRef.current;
     if (series) {
       for (const item of horizontalLinesRef.current) {
@@ -4622,14 +4894,16 @@ function App() {
       snapshotRectangles(),
       snapshotNotes(),
     );
+    recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
     setSelectedDrawingId((previous) =>
       previous && horizontalLinesRef.current.some((item) => item.id === previous) ? previous : null,
     );
-  }, [persistDrawings, snapshotNotes, snapshotRays, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
+  }, [captureChartHistorySnapshot, persistDrawings, recordHistoryTransition, snapshotNotes, snapshotRays, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
 
   const removeVerticalLine = useCallback((id: string) => {
     const nextVerticalLines = verticalLinesRef.current.filter((item) => item.id !== id);
     if (nextVerticalLines.length === verticalLinesRef.current.length) return;
+    const beforeSnapshot = captureChartHistorySnapshot();
 
     renderVerticalLines(nextVerticalLines);
     void persistDrawings(
@@ -4642,11 +4916,13 @@ function App() {
       snapshotRectangles(),
       snapshotNotes(),
     );
+    recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
     setSelectedDrawingId((previous) => (previous === id ? null : previous));
-  }, [persistDrawings, renderVerticalLines, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotRectangles, snapshotTrendlines]);
+  }, [captureChartHistorySnapshot, persistDrawings, recordHistoryTransition, renderVerticalLines, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotRectangles, snapshotTrendlines]);
 
   const clearVerticalLines = useCallback(() => {
     if (!verticalLinesRef.current.length) return;
+    const beforeSnapshot = captureChartHistorySnapshot();
 
     renderVerticalLines([]);
     void persistDrawings(
@@ -4659,14 +4935,16 @@ function App() {
       snapshotRectangles(),
       snapshotNotes(),
     );
+    recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
     setSelectedDrawingId((previous) =>
       previous && verticalLinesRef.current.some((item) => item.id === previous) ? previous : null,
     );
-  }, [persistDrawings, renderVerticalLines, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotRectangles, snapshotTrendlines]);
+  }, [captureChartHistorySnapshot, persistDrawings, recordHistoryTransition, renderVerticalLines, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotRectangles, snapshotTrendlines]);
 
   const removeTrendline = useCallback((id: string) => {
     const nextTrendlines = trendlinesRef.current.filter((item) => item.id !== id);
     if (nextTrendlines.length === trendlinesRef.current.length) return;
+    const beforeSnapshot = captureChartHistorySnapshot();
 
     renderTrendlines(nextTrendlines);
     void persistDrawings(
@@ -4679,11 +4957,13 @@ function App() {
       snapshotRectangles(),
       snapshotNotes(),
     );
+    recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
     setSelectedDrawingId((previous) => (previous === id ? null : previous));
-  }, [persistDrawings, renderTrendlines, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotRectangles, snapshotVerticalLines]);
+  }, [captureChartHistorySnapshot, persistDrawings, recordHistoryTransition, renderTrendlines, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotRectangles, snapshotVerticalLines]);
 
   const clearTrendlines = useCallback(() => {
     if (!trendlinesRef.current.length) return;
+    const beforeSnapshot = captureChartHistorySnapshot();
 
     renderTrendlines([]);
     void persistDrawings(
@@ -4696,14 +4976,16 @@ function App() {
       snapshotRectangles(),
       snapshotNotes(),
     );
+    recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
     setSelectedDrawingId((previous) =>
       previous && trendlinesRef.current.some((item) => item.id === previous) ? previous : null,
     );
-  }, [persistDrawings, renderTrendlines, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotRectangles, snapshotVerticalLines]);
+  }, [captureChartHistorySnapshot, persistDrawings, recordHistoryTransition, renderTrendlines, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotRectangles, snapshotVerticalLines]);
 
   const removeRay = useCallback((id: string) => {
     const nextRays = raysRef.current.filter((item) => item.id !== id);
     if (nextRays.length === raysRef.current.length) return;
+    const beforeSnapshot = captureChartHistorySnapshot();
 
     renderRays(nextRays);
     void persistDrawings(
@@ -4716,11 +4998,13 @@ function App() {
       snapshotRectangles(),
       snapshotNotes(),
     );
+    recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
     setSelectedDrawingId((previous) => (previous === id ? null : previous));
-  }, [persistDrawings, renderRays, snapshotHorizontalLines, snapshotNotes, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
+  }, [captureChartHistorySnapshot, persistDrawings, recordHistoryTransition, renderRays, snapshotHorizontalLines, snapshotNotes, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
 
   const clearRays = useCallback(() => {
     if (!raysRef.current.length) return;
+    const beforeSnapshot = captureChartHistorySnapshot();
 
     renderRays([]);
     void persistDrawings(
@@ -4733,14 +5017,16 @@ function App() {
       snapshotRectangles(),
       snapshotNotes(),
     );
+    recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
     setSelectedDrawingId((previous) =>
       previous && raysRef.current.some((item) => item.id === previous) ? previous : null,
     );
-  }, [persistDrawings, renderRays, snapshotHorizontalLines, snapshotNotes, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
+  }, [captureChartHistorySnapshot, persistDrawings, recordHistoryTransition, renderRays, snapshotHorizontalLines, snapshotNotes, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
 
   const removeRectangle = useCallback((id: string) => {
     const nextRectangles = rectanglesRef.current.filter((item) => item.id !== id);
     if (nextRectangles.length === rectanglesRef.current.length) return;
+    const beforeSnapshot = captureChartHistorySnapshot();
 
     renderRectangles(nextRectangles);
     void persistDrawings(
@@ -4753,11 +5039,13 @@ function App() {
       nextRectangles,
       snapshotNotes(),
     );
+    recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
     setSelectedDrawingId((previous) => (previous === id ? null : previous));
-  }, [persistDrawings, renderRectangles, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotTrendlines, snapshotVerticalLines]);
+  }, [captureChartHistorySnapshot, persistDrawings, recordHistoryTransition, renderRectangles, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotTrendlines, snapshotVerticalLines]);
 
   const clearRectangles = useCallback(() => {
     if (!rectanglesRef.current.length) return;
+    const beforeSnapshot = captureChartHistorySnapshot();
 
     renderRectangles([]);
     void persistDrawings(
@@ -4770,14 +5058,16 @@ function App() {
       [],
       snapshotNotes(),
     );
+    recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
     setSelectedDrawingId((previous) =>
       previous && rectanglesRef.current.some((item) => item.id === previous) ? previous : null,
     );
-  }, [persistDrawings, renderRectangles, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotTrendlines, snapshotVerticalLines]);
+  }, [captureChartHistorySnapshot, persistDrawings, recordHistoryTransition, renderRectangles, snapshotHorizontalLines, snapshotNotes, snapshotRays, snapshotTrendlines, snapshotVerticalLines]);
 
   const removeNote = useCallback((id: string) => {
     const nextNotes = notesRef.current.filter((item) => item.id !== id);
     if (nextNotes.length === notesRef.current.length) return;
+    const beforeSnapshot = captureChartHistorySnapshot();
 
     renderNotes(nextNotes);
     void persistDrawings(
@@ -4790,11 +5080,13 @@ function App() {
       snapshotRectangles(),
       nextNotes,
     );
+    recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
     setSelectedDrawingId((previous) => (previous === id ? null : previous));
-  }, [persistDrawings, renderNotes, snapshotHorizontalLines, snapshotRays, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
+  }, [captureChartHistorySnapshot, persistDrawings, recordHistoryTransition, renderNotes, snapshotHorizontalLines, snapshotRays, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
 
   const clearNotes = useCallback(() => {
     if (!notesRef.current.length) return;
+    const beforeSnapshot = captureChartHistorySnapshot();
 
     renderNotes([]);
     void persistDrawings(
@@ -4807,12 +5099,14 @@ function App() {
       snapshotRectangles(),
       [],
     );
+    recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
     setSelectedDrawingId((previous) =>
       previous && notesRef.current.some((item) => item.id === previous) ? previous : null,
     );
-  }, [persistDrawings, renderNotes, snapshotHorizontalLines, snapshotRays, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
+  }, [captureChartHistorySnapshot, persistDrawings, recordHistoryTransition, renderNotes, snapshotHorizontalLines, snapshotRays, snapshotRectangles, snapshotTrendlines, snapshotVerticalLines]);
 
   const clearAllDrawings = useCallback(() => {
+    const beforeSnapshot = captureChartHistorySnapshot();
     const series = candleSeriesRef.current;
     if (series) {
       for (const item of horizontalLinesRef.current) {
@@ -4834,7 +5128,8 @@ function App() {
     setSelectedDrawingId(null);
     setPendingShapeStart(null);
     void persistDrawings(selectedSymbolRef.current, selectedIntervalRef.current, [], [], [], [], [], []);
-  }, [persistDrawings, renderVerticalLines]);
+    recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
+  }, [captureChartHistorySnapshot, persistDrawings, recordHistoryTransition, renderVerticalLines]);
 
   const deleteDrawingById = useCallback((id: string) => {
     if (horizontalLinesRef.current.some((item) => item.id === id)) {
@@ -4877,10 +5172,30 @@ function App() {
     };
 
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.ctrlKey || event.metaKey || event.altKey) return;
       if (isTextInputTarget(event.target)) return;
 
       const key = event.key.toLowerCase();
+      const hasHistoryModifier = event.ctrlKey || event.metaKey;
+      if (hasHistoryModifier && !event.altKey) {
+        if (key === 'z') {
+          event.preventDefault();
+          if (event.shiftKey) {
+            redoHistory();
+            return;
+          }
+          undoHistory();
+          return;
+        }
+
+        if (key === 'y' && !event.shiftKey) {
+          event.preventDefault();
+          redoHistory();
+          return;
+        }
+      }
+
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+
       if (key === 'h') {
         event.preventDefault();
         setActiveTool('horizontal');
@@ -4935,74 +5250,111 @@ function App() {
     return () => {
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [deleteSelectedDrawing, selectedDrawingId]);
+  }, [deleteSelectedDrawing, redoHistory, selectedDrawingId, undoHistory]);
 
   const toggleIndicator = useCallback((key: IndicatorKey) => {
-    setEnabledIndicators((prev) => ({
-      ...prev,
-      [key]: !prev[key],
-    }));
-  }, []);
+    const beforeSnapshot = captureChartHistorySnapshot();
+    const nextEnabledIndicators = {
+      ...enabledIndicators,
+      [key]: !enabledIndicators[key],
+    };
+
+    setEnabledIndicators(nextEnabledIndicators);
+    recordHistoryTransition(
+      beforeSnapshot,
+      captureChartHistorySnapshot({
+        enabledIndicators: nextEnabledIndicators,
+      }),
+    );
+  }, [captureChartHistorySnapshot, enabledIndicators, recordHistoryTransition]);
 
   const updateRsiPeriod = useCallback((value: string) => {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return;
+    const nextIndicatorSettings = normalizeIndicatorSettings({
+      ...indicatorSettings,
+      rsi: {
+        ...indicatorSettings.rsi,
+        period: numeric,
+      },
+    });
+    if (nextIndicatorSettings.rsi.period === indicatorSettings.rsi.period) return;
 
-    setIndicatorSettings((previous) =>
-      normalizeIndicatorSettings({
-        ...previous,
-        rsi: {
-          ...previous.rsi,
-          period: numeric,
-        },
+    const beforeSnapshot = captureChartHistorySnapshot();
+    setIndicatorSettings(nextIndicatorSettings);
+    recordHistoryTransition(
+      beforeSnapshot,
+      captureChartHistorySnapshot({
+        indicatorSettings: nextIndicatorSettings,
       }),
     );
-  }, []);
+  }, [captureChartHistorySnapshot, indicatorSettings, recordHistoryTransition]);
 
   const updateMacdSetting = useCallback((field: keyof IndicatorSettings['macd'], value: string) => {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return;
+    const nextIndicatorSettings = normalizeIndicatorSettings({
+      ...indicatorSettings,
+      macd: {
+        ...indicatorSettings.macd,
+        [field]: numeric,
+      },
+    });
+    if (nextIndicatorSettings.macd[field] === indicatorSettings.macd[field]) return;
 
-    setIndicatorSettings((previous) =>
-      normalizeIndicatorSettings({
-        ...previous,
-        macd: {
-          ...previous.macd,
-          [field]: numeric,
-        },
+    const beforeSnapshot = captureChartHistorySnapshot();
+    setIndicatorSettings(nextIndicatorSettings);
+    recordHistoryTransition(
+      beforeSnapshot,
+      captureChartHistorySnapshot({
+        indicatorSettings: nextIndicatorSettings,
       }),
     );
-  }, []);
+  }, [captureChartHistorySnapshot, indicatorSettings, recordHistoryTransition]);
 
   const updateBollingerPeriod = useCallback((value: string) => {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return;
+    const nextIndicatorSettings = normalizeIndicatorSettings({
+      ...indicatorSettings,
+      bollinger: {
+        ...indicatorSettings.bollinger,
+        period: numeric,
+      },
+    });
+    if (nextIndicatorSettings.bollinger.period === indicatorSettings.bollinger.period) return;
 
-    setIndicatorSettings((previous) =>
-      normalizeIndicatorSettings({
-        ...previous,
-        bollinger: {
-          ...previous.bollinger,
-          period: numeric,
-        },
+    const beforeSnapshot = captureChartHistorySnapshot();
+    setIndicatorSettings(nextIndicatorSettings);
+    recordHistoryTransition(
+      beforeSnapshot,
+      captureChartHistorySnapshot({
+        indicatorSettings: nextIndicatorSettings,
       }),
     );
-  }, []);
+  }, [captureChartHistorySnapshot, indicatorSettings, recordHistoryTransition]);
 
   const updateBollingerStdDev = useCallback((value: string) => {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return;
+    const nextIndicatorSettings = normalizeIndicatorSettings({
+      ...indicatorSettings,
+      bollinger: {
+        ...indicatorSettings.bollinger,
+        stdDev: numeric,
+      },
+    });
+    if (nextIndicatorSettings.bollinger.stdDev === indicatorSettings.bollinger.stdDev) return;
 
-    setIndicatorSettings((previous) =>
-      normalizeIndicatorSettings({
-        ...previous,
-        bollinger: {
-          ...previous.bollinger,
-          stdDev: numeric,
-        },
+    const beforeSnapshot = captureChartHistorySnapshot();
+    setIndicatorSettings(nextIndicatorSettings);
+    recordHistoryTransition(
+      beforeSnapshot,
+      captureChartHistorySnapshot({
+        indicatorSettings: nextIndicatorSettings,
       }),
     );
-  }, []);
+  }, [captureChartHistorySnapshot, indicatorSettings, recordHistoryTransition]);
 
   const startReplay = useCallback(() => {
     if (candles.length === 0) return false;
@@ -5043,6 +5395,39 @@ function App() {
     setReplayVisibleBars((previous) => stepReplayVisibleCount(previous, candles.length, 1));
   }, [candles.length, replayMode]);
 
+  const updateChartLayoutMode = useCallback((mode: ChartLayoutMode) => {
+    if (mode === chartLayoutMode) return;
+    const beforeSnapshot = captureChartHistorySnapshot();
+    setChartLayoutMode(mode);
+    recordHistoryTransition(
+      beforeSnapshot,
+      captureChartHistorySnapshot({
+        chartLayoutMode: mode,
+      }),
+    );
+  }, [captureChartHistorySnapshot, chartLayoutMode, recordHistoryTransition]);
+
+  const updateCompareSymbol = useCallback((nextSymbol: string) => {
+    const normalizedSymbol = nextSymbol.trim();
+    if (normalizedSymbol === compareSymbol) {
+      setCompareError(null);
+      return;
+    }
+
+    const beforeSnapshot = captureChartHistorySnapshot();
+    setCompareSymbol(normalizedSymbol);
+    if (!normalizedSymbol) {
+      setCompareCandles([]);
+    }
+    setCompareError(null);
+    recordHistoryTransition(
+      beforeSnapshot,
+      captureChartHistorySnapshot({
+        compareSymbol: normalizedSymbol,
+      }),
+    );
+  }, [captureChartHistorySnapshot, compareSymbol, recordHistoryTransition]);
+
   const handleTopActionClick = useCallback((key: TopActionKey) => {
     if (key === 'indicator') {
       setIndicatorPanelOpen((prev) => !prev);
@@ -5076,10 +5461,8 @@ function App() {
   }, [exitReplay, replayMode, startReplay]);
 
   const clearCompareSymbol = useCallback(() => {
-    setCompareSymbol('');
-    setCompareCandles([]);
-    setCompareError(null);
-  }, []);
+    updateCompareSymbol('');
+  }, [updateCompareSymbol]);
 
   const selectedCode = selectedSymbolMeta ? getDisplayCode(selectedSymbolMeta) : shortTicker(selectedSymbol);
   const selectedName = selectedSymbolMeta?.name ?? shortTicker(selectedSymbol);
@@ -5341,7 +5724,7 @@ function App() {
                 key={layout.key}
                 type="button"
                 className={chartLayoutMode === layout.key ? 'active' : ''}
-                onClick={() => setChartLayoutMode(layout.key)}
+                onClick={() => updateChartLayoutMode(layout.key)}
               >
                 {layout.label}
               </button>
@@ -5556,10 +5939,7 @@ function App() {
                   <div className="compare-controls">
                     <select
                       value={compareSymbol}
-                      onChange={(event) => {
-                        setCompareSymbol(event.target.value);
-                        setCompareError(null);
-                      }}
+                      onChange={(event) => updateCompareSymbol(event.target.value)}
                     >
                       <option value="">비교 심볼 선택</option>
                       {compareCandidates.map((item) => (
@@ -5721,7 +6101,15 @@ function App() {
             {topActionFeedback ? <span className="status-chip">{topActionFeedback}</span> : null}
             {activeToolDescription ? <span className="status-chip">{activeToolDescription}</span> : null}
             {replayStatusText ? <span className="status-chip replay-status-chip">{replayStatusText}</span> : null}
-            <span className="status-chip">단축키 H/V/T/Y/R/N · Esc · Delete/Backspace</span>
+            <span className="status-chip">단축키 H/V/T/Y/R/N · Esc · Delete/Backspace · Ctrl/Cmd+Z · Ctrl/Cmd+Shift+Z</span>
+            <div className="status-actions status-actions-history">
+              <button className="status-button" type="button" onClick={undoHistory} disabled={!historyState.canUndo}>
+                Undo
+              </button>
+              <button className="status-button" type="button" onClick={redoHistory} disabled={!historyState.canRedo}>
+                Redo
+              </button>
+            </div>
             {pendingShapeStart ? (
               <span className="status-chip">
                 {pendingShapeStart.tool === 'trendline' ? '추세선' : pendingShapeStart.tool === 'ray' ? '레이' : '사각형'} 시작점 고정 · 다음 클릭으로 완료

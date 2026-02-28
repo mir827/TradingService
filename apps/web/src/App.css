@@ -620,6 +620,10 @@ select {
   flex-wrap: wrap;
 }
 
+.status-actions-history {
+  gap: 6px;
+}
+
 .status-chip {
   color: #ffcc66;
   font-size: 11px;
@@ -637,6 +641,13 @@ select {
   padding: 3px 8px;
   font-size: 11px;
   cursor: pointer;
+}
+
+.status-button:disabled {
+  border-color: #3b3428;
+  background: #1f1c16;
+  color: #8f8166;
+  cursor: not-allowed;
 }
 
 .line-tags {

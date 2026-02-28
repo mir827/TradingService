@@ -149,6 +149,9 @@ DoD:
   - Undo/Redo 수행 후에도 저장 포맷 무결성 유지(새로고침 후 상태 동일).
   - 주요 액션 시나리오 회귀 테스트 추가.
 
+Progress note (2026-02-28):
+- M5 P0-1 completed (incremental v1): `apps/web`에 bounded undo/redo 히스토리 유틸(기본 depth 100, 최소 50), 키보드 단축키(`Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z`, `Ctrl+Y`), 입력 포커스 가드, 드로잉/지표/비교/레이아웃 액션 히스토리 연결, Undo/Redo 상태 버튼 UI, 유틸 단위 테스트(경계/redo invalidation/빈 스택/스냅샷 복원 결정성)까지 반영됨.
+
 2) 
 - 기능명: 알림 운영화 v2 (상태 머신 + 중복 억제 + 인앱 알림센터)
 - 사용자 가치: 알림 "왜 안 왔는지/왜 여러 번 왔는지"를 추적 가능하게 만들어 신뢰도를 높이고 실사용 가능성을 크게 개선.
