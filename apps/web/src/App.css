@@ -737,8 +737,30 @@ select {
   stroke-linejoin: round;
 }
 
-.drawing-shape.selected {
-  filter: brightness(1.2);
+.drawing-shape.trendline.selected {
+  stroke: #c7ffe5;
+  stroke-width: 2.5;
+}
+
+.drawing-shape.ray.selected {
+  stroke: #b4f0f2;
+  stroke-width: 2.5;
+}
+
+.drawing-shape.rectangle.selected {
+  stroke: #ffd9bf;
+  stroke-width: 2;
+  fill: rgb(255 166 102 / 20%);
+}
+
+.drawing-shape.note.selected circle {
+  fill: #edd6ff;
+  stroke: #2d1f44;
+  stroke-width: 2;
+}
+
+.drawing-shape.note.selected text {
+  fill: #f4e8ff;
 }
 
 .status-time {
