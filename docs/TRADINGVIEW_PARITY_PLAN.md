@@ -187,7 +187,8 @@ Progress note (2026-02-28):
 - M5 progress note (2026-02-28): P1 started, P1-4(드로잉 오브젝트 패널) + P1-5(비교 오버레이 확장) completed.
 - M5 progress note (2026-02-28): P1-6(백테스트 현실화 옵션) completed.
 - M5 progress note (2026-02-28): P2-7(Data Window / Crosshair 인스펙터) completed.
-- M5 remaining items: P2-8 only.
+- M5 progress note (2026-02-28): P2-8(탐색 속도 개선 UX: 타임프레임 즐겨찾기 + 단축키) completed.
+- M5 status: complete.
 
 ### P1 (분석 생산성/활용도 확장)
 
@@ -265,6 +266,12 @@ Progress note (2026-02-28):
   - 숫자키 또는 커스텀 단축키로 interval 즉시 전환.
   - 전환 후 차트/지표/비교 상태가 안정적으로 유지.
   - 접근성(포커스 상태/툴팁) 및 기본 회귀 테스트 통과.
+
+Progress note (2026-02-28):
+- M5 P2-8 completed (incremental): `apps/web` 상단 interval 영역에 사용자 설정 즐겨찾기(추가/제거) UX를 추가하고, 즐겨찾기 목록을 localStorage(`tradingservice.intervalfavorites.v1`)에 schema-safe 방식으로 저장/복원하도록 반영함(legacy payload 마이그레이션 + 기본값 fallback 포함).
+- 기존 고정 interval 버튼 동작은 유지하면서 즐겨찾기 여부를 개별 토글할 수 있고, 즐겨찾기-숫자키 매핑 힌트/툴팁(예: `1:1 · 2:5 ...`)을 compact UI로 제공함.
+- 전역 키보드 처리에 즐겨찾기 숫자키 전환(`1..n`)을 추가하되 입력 요소(`input/textarea/select/contenteditable`) 포커스에서는 no-op 가드를 적용해 기존 도형/undo/redo 단축키 충돌 없이 공존하도록 처리함.
+- interval 전환 경로를 공통 setter로 통일해 기존 차트/지표/비교/드로잉/replay 상태 관리 흐름을 유지하면서 불필요한 동일 interval 재선택 업데이트를 방지함.
 
 ## M6 - KOSPI/KOSDAQ NXT 정보 확장
 Deliverables:

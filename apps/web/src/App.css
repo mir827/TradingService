@@ -85,10 +85,22 @@ select {
   max-width: 320px;
 }
 
+.interval-tools {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
 .intervals {
   display: flex;
   gap: 6px;
   min-width: 0;
+}
+
+.interval-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .intervals button,
@@ -96,6 +108,29 @@ select {
 .top-actions button {
   padding: 6px 10px;
   cursor: pointer;
+}
+
+.interval-favorite-toggle {
+  width: 22px;
+  padding: 0;
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.interval-favorite-toggle.active {
+  border-color: #c8992d;
+  color: #f8d58a;
+  background: #2b2412;
+}
+
+.interval-favorites-hint {
+  color: #8690a4;
+  font-size: 10px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .intervals button.active,
@@ -2569,6 +2604,10 @@ select {
 @media (max-width: 1380px) {
   .tv-topbar {
     grid-template-columns: 140px minmax(0, 1fr) 230px;
+  }
+
+  .interval-favorites-hint {
+    display: none;
   }
 
   .top-actions {
