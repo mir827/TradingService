@@ -1948,6 +1948,10 @@ select {
   gap: 8px;
 }
 
+.trading-order-grid-bracket {
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+}
+
 .trading-order-grid label {
   display: grid;
   gap: 4px;
@@ -1973,6 +1977,22 @@ select {
 .trading-order-grid input[readonly] {
   color: #9da5b6;
   background: #1a1f2b;
+}
+
+.trading-order-bracket {
+  display: grid;
+  gap: 8px;
+  border: 1px dashed #2f3a52;
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.trading-order-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #8d95a5;
 }
 
 .trading-order-meta {
@@ -2058,6 +2078,50 @@ select {
 
 .trading-side-sell {
   color: #ef5350;
+}
+
+.trading-link-cell {
+  color: #8d95a5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-size: 10px;
+}
+
+.trading-order-status {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10px;
+  letter-spacing: 0.2px;
+}
+
+.trading-order-status-pending {
+  border-color: #3e4b66;
+  color: #aebbd6;
+}
+
+.trading-order-status-filled {
+  border-color: #2f6f5f;
+  color: #8cd8c8;
+}
+
+.trading-order-status-canceled {
+  border-color: #6d5561;
+  color: #d3a9b8;
+}
+
+.trading-order-status-rejected {
+  border-color: #7a4145;
+  color: #ff9fa6;
+}
+
+.trading-order-substatus {
+  display: block;
+  margin-top: 2px;
+  color: #7f8798;
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
 }
 
 .trading-error {

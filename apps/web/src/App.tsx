@@ -353,7 +353,9 @@ type StrategyBacktestResult = {
 
 type TradingMode = 'PAPER';
 type TradingOrderSide = 'BUY' | 'SELL';
+type TradingOrderType = 'MARKET' | 'LIMIT' | 'STOP';
 type TradingOrderStatus = 'PENDING' | 'FILLED' | 'CANCELED' | 'REJECTED';
+type TradingOrderLinkType = 'BRACKET_TAKE_PROFIT' | 'BRACKET_STOP_LOSS';
 
 type TradingPosition = {
   symbol: string;
@@ -369,10 +371,18 @@ type TradingOrder = {
   id: string;
   symbol: string;
   side: TradingOrderSide;
-  type: 'MARKET';
+  type: TradingOrderType;
   status: TradingOrderStatus;
   qty: number;
   notional: number;
+  triggerPrice?: number;
+  limitPrice?: number;
+  takeProfitPrice?: number;
+  stopLossPrice?: number;
+  parentOrderId?: string;
+  linkType?: TradingOrderLinkType;
+  bracketChildOrderIds?: string[];
+  canceledByOrderId?: string;
   fillPrice?: number;
   filledAt?: number;
   createdAt: number;
@@ -409,8 +419,13 @@ type TradingState = {
 
 type TradingOrderFormState = {
   side: TradingOrderSide;
+  orderType: TradingOrderType;
   qty: string;
-  notional: string;
+  limitPrice: string;
+  triggerPrice: string;
+  useBracket: boolean;
+  takeProfitPrice: string;
+  stopLossPrice: string;
 };
 
 type HorizontalLine = {
@@ -606,8 +621,13 @@ const DEFAULT_STRATEGY_TESTER_FORM: StrategyTesterFormState = {
 };
 const DEFAULT_TRADING_ORDER_FORM: TradingOrderFormState = {
   side: 'BUY',
+  orderType: 'MARKET',
   qty: '',
-  notional: '',
+  limitPrice: '',
+  triggerPrice: '',
+  useBracket: false,
+  takeProfitPrice: '',
+  stopLossPrice: '',
 };
 
 const DEFAULT_ENABLED_INDICATORS: Record<IndicatorKey, boolean> = {
@@ -970,6 +990,41 @@ function formatSignedCurrency(value: number) {
 
 function formatQty(value: number) {
   return value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 8 });
+}
+
+function formatTradingOrderType(orderType: TradingOrderType) {
+  if (orderType === 'MARKET') return '시장가';
+  if (orderType === 'LIMIT') return '지정가';
+  return '스탑';
+}
+
+function shortenTradingOrderId(orderId: string) {
+  return orderId.length > 14 ? `${orderId.slice(0, 7)}…${orderId.slice(-4)}` : orderId;
+}
+
+function formatTradingOrderCondition(order: TradingOrder) {
+  if (order.type === 'LIMIT') {
+    return typeof order.limitPrice === 'number' ? `L ${formatPrice(order.limitPrice)}` : '--';
+  }
+
+  if (order.type === 'STOP') {
+    return typeof order.triggerPrice === 'number' ? `S ${formatPrice(order.triggerPrice)}` : '--';
+  }
+
+  return '--';
+}
+
+function formatTradingOrderLink(order: TradingOrder) {
+  if (order.parentOrderId) {
+    const role = order.linkType === 'BRACKET_STOP_LOSS' ? 'SL' : order.linkType === 'BRACKET_TAKE_PROFIT' ? 'TP' : 'CHILD';
+    return `${role} ← ${shortenTradingOrderId(order.parentOrderId)}`;
+  }
+
+  if (order.bracketChildOrderIds?.length) {
+    return `CHILD x${order.bracketChildOrderIds.length}`;
+  }
+
+  return '--';
 }
 
 function createMiniChartPath(points: StrategyBacktestPoint[]) {
@@ -3436,24 +3491,41 @@ function App() {
   );
   const tradingEstimatedNotional = useMemo(() => {
     const qtyInput = tradingOrderForm.qty.trim();
-    const notionalInput = tradingOrderForm.notional.trim();
+    if (!qtyInput) return null;
 
-    if (qtyInput && selectedQuote) {
-      const qty = Number(qtyInput);
-      if (Number.isFinite(qty) && qty > 0) {
-        return qty * selectedQuote.lastPrice;
-      }
+    const qty = Number(qtyInput);
+    if (!Number.isFinite(qty) || qty <= 0) {
+      return null;
     }
 
-    if (notionalInput) {
-      const notional = Number(notionalInput);
-      if (Number.isFinite(notional) && notional > 0) {
-        return notional;
+    if (tradingOrderForm.orderType === 'LIMIT') {
+      const limitPrice = Number(tradingOrderForm.limitPrice.trim());
+      if (Number.isFinite(limitPrice) && limitPrice > 0) {
+        return qty * limitPrice;
       }
+      return null;
+    }
+
+    if (tradingOrderForm.orderType === 'STOP') {
+      const triggerPrice = Number(tradingOrderForm.triggerPrice.trim());
+      if (Number.isFinite(triggerPrice) && triggerPrice > 0) {
+        return qty * triggerPrice;
+      }
+      return null;
+    }
+
+    if (selectedQuote) {
+      return qty * selectedQuote.lastPrice;
     }
 
     return null;
-  }, [selectedQuote, tradingOrderForm.notional, tradingOrderForm.qty]);
+  }, [
+    selectedQuote,
+    tradingOrderForm.limitPrice,
+    tradingOrderForm.orderType,
+    tradingOrderForm.qty,
+    tradingOrderForm.triggerPrice,
+  ]);
   const tradingUpdatedAt = tradingState?.updatedAt ?? tradingLastUpdatedAt;
   const latestCandle = activeCandles.at(-1) ?? null;
   const displayCandle = hoveredCandle ?? latestCandle;
@@ -4068,23 +4140,77 @@ function App() {
       event.preventDefault();
       setTradingRecovery(null);
 
+      const orderType = tradingOrderForm.orderType;
       const qtyInput = tradingOrderForm.qty.trim();
-      const notionalInput = tradingOrderForm.notional.trim();
-      const qty = qtyInput.length > 0 ? Number(qtyInput) : null;
-      const notional = notionalInput.length > 0 ? Number(notionalInput) : null;
-
-      if (qty === null && notional === null) {
-        setTradingFormError('수량 또는 금액 중 하나를 입력해주세요.');
-        return;
-      }
-
-      if (qty !== null && (!Number.isFinite(qty) || qty <= 0)) {
+      const qty = Number(qtyInput);
+      if (!Number.isFinite(qty) || qty <= 0) {
         setTradingFormError('수량은 0보다 큰 숫자여야 합니다.');
         return;
       }
 
-      if (notional !== null && (!Number.isFinite(notional) || notional <= 0)) {
-        setTradingFormError('금액은 0보다 큰 숫자여야 합니다.');
+      const limitPrice = Number(tradingOrderForm.limitPrice.trim());
+      if (orderType === 'LIMIT' && (!Number.isFinite(limitPrice) || limitPrice <= 0)) {
+        setTradingFormError('지정가 주문에는 0보다 큰 지정가가 필요합니다.');
+        return;
+      }
+
+      const triggerPrice = Number(tradingOrderForm.triggerPrice.trim());
+      if (orderType === 'STOP' && (!Number.isFinite(triggerPrice) || triggerPrice <= 0)) {
+        setTradingFormError('스탑 주문에는 0보다 큰 트리거 가격이 필요합니다.');
+        return;
+      }
+
+      let takeProfitPrice: number | null = null;
+      let stopLossPrice: number | null = null;
+
+      if (tradingOrderForm.useBracket) {
+        const takeProfitInput = tradingOrderForm.takeProfitPrice.trim();
+        const stopLossInput = tradingOrderForm.stopLossPrice.trim();
+        takeProfitPrice = takeProfitInput.length > 0 ? Number(takeProfitInput) : null;
+        stopLossPrice = stopLossInput.length > 0 ? Number(stopLossInput) : null;
+
+        if (takeProfitPrice === null && stopLossPrice === null) {
+          setTradingFormError('브래킷 사용 시 TP 또는 SL 중 하나 이상을 입력해주세요.');
+          return;
+        }
+
+        if (takeProfitPrice !== null && (!Number.isFinite(takeProfitPrice) || takeProfitPrice <= 0)) {
+          setTradingFormError('TP 가격은 0보다 큰 숫자여야 합니다.');
+          return;
+        }
+
+        if (stopLossPrice !== null && (!Number.isFinite(stopLossPrice) || stopLossPrice <= 0)) {
+          setTradingFormError('SL 가격은 0보다 큰 숫자여야 합니다.');
+          return;
+        }
+
+        const referencePrice =
+          orderType === 'MARKET' ? selectedQuote?.lastPrice ?? null : orderType === 'LIMIT' ? limitPrice : triggerPrice;
+
+        if (tradingOrderForm.side === 'BUY' && referencePrice && Number.isFinite(referencePrice) && referencePrice > 0) {
+          if (takeProfitPrice !== null && takeProfitPrice <= referencePrice) {
+            setTradingFormError('BUY 주문의 TP는 진입가보다 커야 합니다.');
+            return;
+          }
+
+          if (stopLossPrice !== null && stopLossPrice >= referencePrice) {
+            setTradingFormError('BUY 주문의 SL은 진입가보다 작아야 합니다.');
+            return;
+          }
+        }
+
+        if (
+          takeProfitPrice !== null &&
+          stopLossPrice !== null &&
+          stopLossPrice >= takeProfitPrice
+        ) {
+          setTradingFormError('SL은 TP보다 작아야 합니다.');
+          return;
+        }
+      }
+
+      if (tradingOrderForm.side !== 'BUY' && tradingOrderForm.useBracket) {
+        setTradingFormError('현재 브래킷 TP/SL은 BUY 주문에서만 지원됩니다.');
         return;
       }
 
@@ -4096,19 +4222,33 @@ function App() {
         const payload: {
           symbol: string;
           side: TradingOrderSide;
-          qty?: number;
-          notional?: number;
+          orderType: 'market' | 'limit' | 'stop';
+          qty: number;
+          limitPrice?: number;
+          triggerPrice?: number;
+          takeProfitPrice?: number;
+          stopLossPrice?: number;
         } = {
           symbol: selectedSymbol,
           side: tradingOrderForm.side,
+          orderType: orderType.toLowerCase() as 'market' | 'limit' | 'stop',
+          qty,
         };
 
-        if (qty !== null) {
-          payload.qty = qty;
+        if (orderType === 'LIMIT') {
+          payload.limitPrice = limitPrice;
         }
 
-        if (notional !== null) {
-          payload.notional = notional;
+        if (orderType === 'STOP') {
+          payload.triggerPrice = triggerPrice;
+        }
+
+        if (takeProfitPrice !== null) {
+          payload.takeProfitPrice = takeProfitPrice;
+        }
+
+        if (stopLossPrice !== null) {
+          payload.stopLossPrice = stopLossPrice;
         }
 
         const response = await fetch(`${apiBase}/api/trading/orders`, {
@@ -4144,7 +4284,8 @@ function App() {
         setTradingOrderForm((previous) => ({
           ...previous,
           qty: '',
-          notional: '',
+          ...(orderType === 'LIMIT' ? {} : { limitPrice: '' }),
+          ...(orderType === 'STOP' ? {} : { triggerPrice: '' }),
         }));
       } catch (error) {
         const normalized =
@@ -4169,6 +4310,7 @@ function App() {
             operation: 'submitTradingOrder',
             symbol: selectedSymbol,
             side: tradingOrderForm.side,
+            orderType,
             retryable: normalized.retryable,
             ...(typeof normalized.status === 'number' ? { status: normalized.status } : {}),
           },
@@ -4177,7 +4319,7 @@ function App() {
         setTradingSubmitting(false);
       }
     },
-    [loadTradingState, reportOpsError, selectedSymbol, tradingOrderForm],
+    [loadTradingState, reportOpsError, selectedQuote?.lastPrice, selectedSymbol, tradingOrderForm],
   );
 
   const handleCreateAlertRule = async (event: FormEvent<HTMLFormElement>) => {
@@ -7276,12 +7418,32 @@ function App() {
                             setTradingOrderForm((previous) => ({
                               ...previous,
                               side: event.target.value as TradingOrderSide,
+                              ...(event.target.value === 'BUY' ? {} : { useBracket: false }),
                             }))
                           }
                           disabled={tradingSubmitting}
                         >
                           <option value="BUY">BUY</option>
                           <option value="SELL">SELL</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>주문 유형</span>
+                        <select
+                          value={tradingOrderForm.orderType}
+                          onChange={(event) =>
+                            setTradingOrderForm((previous) => ({
+                              ...previous,
+                              orderType: event.target.value as TradingOrderType,
+                              ...(event.target.value === 'LIMIT' ? {} : { limitPrice: '' }),
+                              ...(event.target.value === 'STOP' ? {} : { triggerPrice: '' }),
+                            }))
+                          }
+                          disabled={tradingSubmitting}
+                        >
+                          <option value="MARKET">시장가</option>
+                          <option value="LIMIT">지정가</option>
+                          <option value="STOP">스탑</option>
                         </select>
                       </label>
                       <label>
@@ -7302,27 +7464,111 @@ function App() {
                           disabled={tradingSubmitting}
                         />
                       </label>
-                      <label>
-                        <span>금액 (선택)</span>
+                      {tradingOrderForm.orderType === 'LIMIT' ? (
+                        <label>
+                          <span>지정가</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            inputMode="decimal"
+                            value={tradingOrderForm.limitPrice}
+                            onChange={(event) =>
+                              setTradingOrderForm((previous) => ({
+                                ...previous,
+                                limitPrice: event.target.value,
+                              }))
+                            }
+                            placeholder="예: 98000"
+                            disabled={tradingSubmitting}
+                          />
+                        </label>
+                      ) : null}
+                      {tradingOrderForm.orderType === 'STOP' ? (
+                        <label>
+                          <span>스탑 트리거</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            inputMode="decimal"
+                            value={tradingOrderForm.triggerPrice}
+                            onChange={(event) =>
+                              setTradingOrderForm((previous) => ({
+                                ...previous,
+                                triggerPrice: event.target.value,
+                              }))
+                            }
+                            placeholder="예: 102000"
+                            disabled={tradingSubmitting}
+                          />
+                        </label>
+                      ) : null}
+                    </div>
+
+                    <div className="trading-order-bracket">
+                      <label className="trading-order-toggle">
                         <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          inputMode="decimal"
-                          value={tradingOrderForm.notional}
+                          type="checkbox"
+                          checked={tradingOrderForm.useBracket}
                           onChange={(event) =>
                             setTradingOrderForm((previous) => ({
                               ...previous,
-                              notional: event.target.value,
+                              useBracket: event.target.checked,
                             }))
                           }
-                          placeholder="예: 1000"
-                          disabled={tradingSubmitting}
+                          disabled={tradingSubmitting || tradingOrderForm.side !== 'BUY'}
                         />
+                        <span>브래킷 TP/SL</span>
                       </label>
+                      {tradingOrderForm.side !== 'BUY' ? (
+                        <span className="muted">v1에서는 BUY 주문에만 브래킷을 지원합니다.</span>
+                      ) : null}
+
+                      {tradingOrderForm.useBracket ? (
+                        <div className="trading-order-grid trading-order-grid-bracket">
+                          <label>
+                            <span>TP (익절)</span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              inputMode="decimal"
+                              value={tradingOrderForm.takeProfitPrice}
+                              onChange={(event) =>
+                                setTradingOrderForm((previous) => ({
+                                  ...previous,
+                                  takeProfitPrice: event.target.value,
+                                }))
+                              }
+                              placeholder="선택 입력"
+                              disabled={tradingSubmitting}
+                            />
+                          </label>
+                          <label>
+                            <span>SL (손절)</span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              inputMode="decimal"
+                              value={tradingOrderForm.stopLossPrice}
+                              onChange={(event) =>
+                                setTradingOrderForm((previous) => ({
+                                  ...previous,
+                                  stopLossPrice: event.target.value,
+                                }))
+                              }
+                              placeholder="선택 입력"
+                              disabled={tradingSubmitting}
+                            />
+                          </label>
+                        </div>
+                      ) : null}
                     </div>
 
                     <div className="trading-order-meta">
+                      <span>주문유형: {formatTradingOrderType(tradingOrderForm.orderType)}</span>
                       <span>
                         예상 체결금액:{' '}
                         {tradingEstimatedNotional !== null ? formatPrice(tradingEstimatedNotional) : '--'}
@@ -7335,7 +7581,13 @@ function App() {
 
                     <div className="trading-order-actions">
                       <button type="submit" disabled={tradingSubmitting}>
-                        {tradingSubmitting ? '주문 전송 중...' : '시장가 주문'}
+                        {tradingSubmitting
+                          ? '주문 전송 중...'
+                          : tradingOrderForm.orderType === 'MARKET'
+                            ? '시장가 주문'
+                            : tradingOrderForm.orderType === 'LIMIT'
+                              ? '지정가 주문'
+                              : '스탑 주문'}
                       </button>
                     </div>
 
@@ -7392,9 +7644,12 @@ function App() {
                               <tr>
                                 <th>시간</th>
                                 <th>심볼</th>
+                                <th>유형</th>
                                 <th>방향</th>
                                 <th>수량</th>
+                                <th>조건</th>
                                 <th>체결가</th>
+                                <th>링크</th>
                                 <th>상태</th>
                               </tr>
                             </thead>
@@ -7403,12 +7658,22 @@ function App() {
                                 <tr key={order.id}>
                                   <td>{new Date(order.createdAt).toLocaleString('ko-KR')}</td>
                                   <td>{order.symbol}</td>
+                                  <td>{formatTradingOrderType(order.type)}</td>
                                   <td className={order.side === 'BUY' ? 'trading-side-buy' : 'trading-side-sell'}>
                                     {order.side}
                                   </td>
                                   <td>{formatQty(order.qty)}</td>
+                                  <td>{formatTradingOrderCondition(order)}</td>
                                   <td>{typeof order.fillPrice === 'number' ? formatPrice(order.fillPrice) : '--'}</td>
-                                  <td>{order.status}</td>
+                                  <td className="trading-link-cell">{formatTradingOrderLink(order)}</td>
+                                  <td>
+                                    <span className={`trading-order-status trading-order-status-${order.status.toLowerCase()}`}>
+                                      {order.status}
+                                    </span>
+                                    {order.canceledByOrderId ? (
+                                      <span className="trading-order-substatus">by {shortenTradingOrderId(order.canceledByOrderId)}</span>
+                                    ) : null}
+                                  </td>
                                 </tr>
                               ))}
                             </tbody>

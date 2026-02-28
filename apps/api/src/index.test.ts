@@ -651,8 +651,17 @@ describe('api paper trading workflows', () => {
       id: string;
       symbol: string;
       side: 'BUY' | 'SELL';
+      type: 'MARKET' | 'LIMIT' | 'STOP';
       status: string;
       qty: number;
+      triggerPrice?: number;
+      limitPrice?: number;
+      takeProfitPrice?: number;
+      stopLossPrice?: number;
+      parentOrderId?: string;
+      linkType?: 'BRACKET_TAKE_PROFIT' | 'BRACKET_STOP_LOSS';
+      bracketChildOrderIds?: string[];
+      canceledByOrderId?: string;
       fillPrice?: number;
     }>;
     fills: Array<{
@@ -701,8 +710,12 @@ describe('api paper trading workflows', () => {
     });
   }
 
+  function findOrder(state: TradingStateResponse, orderId: string) {
+    return state.orders.find((order) => order.id === orderId);
+  }
+
   it('supports buy then sell flow with persisted paper state', async () => {
-    const fetchSpy = mockPaperQuoteFeed([100, 120]);
+    const fetchSpy = mockPaperQuoteFeed([100, 120, 120, 120]);
 
     const buyResponse = await app.inject({
       method: 'POST',
@@ -722,6 +735,7 @@ describe('api paper trading workflows', () => {
     ).toMatchObject({
       symbol: 'BTCUSDT',
       side: 'BUY',
+      type: 'MARKET',
       status: 'FILLED',
       fillPrice: 100,
     });
@@ -863,6 +877,307 @@ describe('api paper trading workflows', () => {
       marketPrice: 110,
       realizedPnl: 20,
       unrealizedPnl: 10,
+    });
+  });
+
+  it('keeps backward compatibility for legacy market payloads', async () => {
+    mockPaperQuoteFeed([101]);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        qty: 1,
+      },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(
+      (response.json() as {
+        order: { type: string; status: string };
+      }).order,
+    ).toMatchObject({
+      type: 'MARKET',
+      status: 'FILLED',
+    });
+  });
+
+  it('validates limit/stop payloads with stable error shape', async () => {
+    const missingLimitPrice = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        orderType: 'limit',
+        qty: 1,
+      },
+    });
+
+    expect(missingLimitPrice.statusCode).toBe(400);
+    expect(missingLimitPrice.json()).toMatchObject({
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid trading order payload',
+      },
+    });
+
+    const missingStopTrigger = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        orderType: 'stop',
+        qty: 1,
+      },
+    });
+
+    expect(missingStopTrigger.statusCode).toBe(400);
+    expect(missingStopTrigger.json()).toMatchObject({
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid trading order payload',
+      },
+    });
+  });
+
+  it('transitions pending limit/stop orders to filled on quote updates', async () => {
+    mockPaperQuoteFeed([100, 100, 104, 106, 89]);
+
+    const limitOrder = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        orderType: 'limit',
+        qty: 1,
+        limitPrice: 90,
+      },
+    });
+    expect(limitOrder.statusCode).toBe(201);
+    const limitOrderId = (limitOrder.json() as { order: { id: string } }).order.id;
+
+    const stopOrder = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        orderType: 'stop',
+        qty: 1,
+        triggerPrice: 105,
+      },
+    });
+    expect(stopOrder.statusCode).toBe(201);
+    const stopOrderId = (stopOrder.json() as { order: { id: string } }).order.id;
+
+    const preTrigger = await app.inject({
+      method: 'GET',
+      url: '/api/trading/state',
+    });
+    expect(preTrigger.statusCode).toBe(200);
+
+    const stopTrigger = await app.inject({
+      method: 'GET',
+      url: '/api/trading/state',
+    });
+    expect(stopTrigger.statusCode).toBe(200);
+
+    const limitTrigger = await app.inject({
+      method: 'GET',
+      url: '/api/trading/state',
+    });
+    expect(limitTrigger.statusCode).toBe(200);
+
+    const state = limitTrigger.json() as TradingStateResponse;
+    expect(findOrder(state, stopOrderId)).toMatchObject({
+      id: stopOrderId,
+      type: 'STOP',
+      status: 'FILLED',
+      fillPrice: 106,
+    });
+    expect(findOrder(state, limitOrderId)).toMatchObject({
+      id: limitOrderId,
+      type: 'LIMIT',
+      status: 'FILLED',
+      fillPrice: 89,
+    });
+    expect(state.fills.filter((fill) => fill.orderId === stopOrderId)).toHaveLength(1);
+    expect(state.fills.filter((fill) => fill.orderId === limitOrderId)).toHaveLength(1);
+  });
+
+  it('creates bracket child exits and preserves parent-child relationship integrity', async () => {
+    mockPaperQuoteFeed([100, 100]);
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        orderType: 'market',
+        qty: 1,
+        takeProfitPrice: 110,
+        stopLossPrice: 95,
+      },
+    });
+    expect(createResponse.statusCode).toBe(201);
+    const parentOrderId = (createResponse.json() as { order: { id: string } }).order.id;
+
+    const stateResponse = await app.inject({
+      method: 'GET',
+      url: '/api/trading/state',
+    });
+    expect(stateResponse.statusCode).toBe(200);
+    const state = stateResponse.json() as TradingStateResponse;
+
+    const parent = findOrder(state, parentOrderId);
+    expect(parent).toMatchObject({
+      id: parentOrderId,
+      type: 'MARKET',
+      status: 'FILLED',
+      takeProfitPrice: 110,
+      stopLossPrice: 95,
+    });
+
+    const children = state.orders.filter((order) => order.parentOrderId === parentOrderId);
+    expect(children).toHaveLength(2);
+    expect(children.map((order) => order.linkType).sort()).toEqual(['BRACKET_STOP_LOSS', 'BRACKET_TAKE_PROFIT']);
+    expect(children.every((order) => order.status === 'PENDING')).toBe(true);
+    expect(children.every((order) => order.side === 'SELL' && order.qty === 1)).toBe(true);
+
+    const parentChildIds = [...(parent?.bracketChildOrderIds ?? [])].sort();
+    const childIds = children.map((order) => order.id).sort();
+    expect(parentChildIds).toEqual(childIds);
+  });
+
+  it('maintains parent/child cancel integrity for pending and bracket children', async () => {
+    mockPaperQuoteFeed([120, 100]);
+
+    const pendingParentResponse = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        orderType: 'limit',
+        qty: 1,
+        limitPrice: 90,
+        takeProfitPrice: 110,
+        stopLossPrice: 80,
+      },
+    });
+    expect(pendingParentResponse.statusCode).toBe(201);
+    const pendingParentId = (pendingParentResponse.json() as { order: { id: string } }).order.id;
+
+    const cancelPendingParent = await app.inject({
+      method: 'POST',
+      url: `/api/trading/orders/${pendingParentId}/cancel`,
+    });
+    expect(cancelPendingParent.statusCode).toBe(200);
+    expect((cancelPendingParent.json() as { order: { status: string } }).order.status).toBe('CANCELED');
+
+    const bracketParentResponse = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        qty: 1,
+        takeProfitPrice: 110,
+        stopLossPrice: 95,
+      },
+    });
+    expect(bracketParentResponse.statusCode).toBe(201);
+    const bracketParentId = (bracketParentResponse.json() as { order: { id: string } }).order.id;
+
+    const afterCreate = await app.inject({
+      method: 'GET',
+      url: '/api/trading/state',
+    });
+    expect(afterCreate.statusCode).toBe(200);
+    const beforeCancelState = afterCreate.json() as TradingStateResponse;
+    const children = beforeCancelState.orders.filter((order) => order.parentOrderId === bracketParentId);
+    expect(children).toHaveLength(2);
+
+    const childToCancel = children[0];
+    const cancelChild = await app.inject({
+      method: 'POST',
+      url: `/api/trading/orders/${childToCancel.id}/cancel`,
+    });
+    expect(cancelChild.statusCode).toBe(200);
+    expect((cancelChild.json() as { order: { status: string } }).order.status).toBe('CANCELED');
+
+    const finalStateResponse = await app.inject({
+      method: 'GET',
+      url: '/api/trading/state',
+    });
+    expect(finalStateResponse.statusCode).toBe(200);
+    const finalState = finalStateResponse.json() as TradingStateResponse;
+
+    const canceledChild = findOrder(finalState, childToCancel.id);
+    expect(canceledChild?.status).toBe('CANCELED');
+
+    const sibling = finalState.orders.find(
+      (order) => order.parentOrderId === bracketParentId && order.id !== childToCancel.id,
+    );
+    expect(sibling).toBeTruthy();
+    expect(sibling?.status).toBe('CANCELED');
+    expect(sibling?.canceledByOrderId).toBe(childToCancel.id);
+  });
+
+  it('applies deterministic same-tick priority for simultaneously triggered pending orders', async () => {
+    mockPaperQuoteFeed([120, 120, 100]);
+
+    const firstOrderResponse = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        orderType: 'limit',
+        qty: 600,
+        limitPrice: 100,
+      },
+    });
+    expect(firstOrderResponse.statusCode).toBe(201);
+    const firstOrderId = (firstOrderResponse.json() as { order: { id: string } }).order.id;
+
+    await new Promise((resolve) => setTimeout(resolve, 2));
+
+    const secondOrderResponse = await app.inject({
+      method: 'POST',
+      url: '/api/trading/orders',
+      payload: {
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        orderType: 'limit',
+        qty: 600,
+        limitPrice: 100,
+      },
+    });
+    expect(secondOrderResponse.statusCode).toBe(201);
+    const secondOrderId = (secondOrderResponse.json() as { order: { id: string } }).order.id;
+
+    const triggerStateResponse = await app.inject({
+      method: 'GET',
+      url: '/api/trading/state',
+    });
+    expect(triggerStateResponse.statusCode).toBe(200);
+    const state = triggerStateResponse.json() as TradingStateResponse;
+
+    expect(findOrder(state, firstOrderId)).toMatchObject({
+      id: firstOrderId,
+      status: 'FILLED',
+      fillPrice: 100,
+    });
+    expect(findOrder(state, secondOrderId)).toMatchObject({
+      id: secondOrderId,
+      status: 'REJECTED',
     });
   });
 

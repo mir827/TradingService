@@ -178,7 +178,8 @@ type MarketStatusPayload = {
 
 type TradingMode = 'PAPER';
 type TradingOrderSide = 'BUY' | 'SELL';
-type TradingOrderType = 'MARKET';
+type TradingOrderType = 'MARKET' | 'LIMIT' | 'STOP';
+type TradingOrderLinkType = 'BRACKET_TAKE_PROFIT' | 'BRACKET_STOP_LOSS';
 type TradingOrderStatus = 'PENDING' | 'FILLED' | 'CANCELED' | 'REJECTED';
 
 type TradingPosition = {
@@ -199,6 +200,14 @@ type TradingOrder = {
   status: TradingOrderStatus;
   qty: number;
   notional: number;
+  triggerPrice?: number;
+  limitPrice?: number;
+  takeProfitPrice?: number;
+  stopLossPrice?: number;
+  parentOrderId?: string;
+  linkType?: TradingOrderLinkType;
+  bracketChildOrderIds?: string[];
+  canceledByOrderId?: string;
   fillPrice?: number;
   filledAt?: number;
   canceledAt?: number;
@@ -314,6 +323,7 @@ const PAPER_TRADING_VALUE_PRECISION = 8;
 const PAPER_TRADING_EPSILON = 1e-8;
 const PAPER_TRADING_MAX_ORDERS = 1000;
 const PAPER_TRADING_MAX_FILLS = 2000;
+const PAPER_TRADING_MAX_BRACKET_CHILDREN = 2;
 const ALERT_HISTORY_MAX_EVENTS = 500;
 const ALERT_INDICATOR_INTERVAL = '60';
 const ALERT_INDICATOR_CANDLE_LIMIT = 200;
@@ -326,6 +336,10 @@ const ALERT_BOLLINGER_DEFAULT_STD_DEV = 2;
 const ALERT_ERROR_EVENT_DEDUP_WINDOW_MS = 30_000;
 const OPS_ERROR_MAX_EVENTS = 500;
 const OPS_RECOVERY_MAX_EVENTS = 500;
+const TRADING_TRIGGER_PRIORITY_BY_LINK_TYPE: Record<TradingOrderLinkType, number> = {
+  BRACKET_STOP_LOSS: 0,
+  BRACKET_TAKE_PROFIT: 1,
+};
 const paperTradingState = createInitialPaperTradingState();
 
 const cryptoIntervalMap: Record<string, string> = {
@@ -701,16 +715,115 @@ const tradingOrderSideSchema = z.preprocess((value) => {
   return value;
 }, z.enum(['BUY', 'SELL']));
 
+const tradingOrderTypeSchema = z.preprocess((value) => {
+  if (typeof value === 'string') {
+    return value.trim().toUpperCase();
+  }
+  return value;
+}, z.enum(['MARKET', 'LIMIT', 'STOP']));
+
 const tradingOrderCreateBodySchema = z
   .object({
     symbol: z.string().trim().min(1),
     side: tradingOrderSideSchema,
+    orderType: tradingOrderTypeSchema.optional(),
     qty: z.coerce.number().finite().positive().optional(),
     notional: z.coerce.number().finite().positive().optional(),
+    triggerPrice: z.coerce.number().finite().positive().optional(),
+    limitPrice: z.coerce.number().finite().positive().optional(),
+    takeProfitPrice: z.coerce.number().finite().positive().optional(),
+    stopLossPrice: z.coerce.number().finite().positive().optional(),
   })
-  .refine((data) => typeof data.qty === 'number' || typeof data.notional === 'number', {
-    message: 'Either qty or notional is required',
-    path: ['qty'],
+  .superRefine((data, context) => {
+    const orderType = data.orderType ?? 'MARKET';
+
+    if (orderType === 'MARKET') {
+      if (typeof data.qty !== 'number' && typeof data.notional !== 'number') {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Either qty or notional is required',
+          path: ['qty'],
+        });
+      }
+
+      if (typeof data.limitPrice === 'number') {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'limitPrice is only supported for limit orders',
+          path: ['limitPrice'],
+        });
+      }
+
+      if (typeof data.triggerPrice === 'number') {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'triggerPrice is only supported for stop orders',
+          path: ['triggerPrice'],
+        });
+      }
+    }
+
+    if (orderType !== 'MARKET') {
+      if (typeof data.qty !== 'number') {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'qty is required for non-market orders',
+          path: ['qty'],
+        });
+      }
+
+      if (typeof data.notional === 'number') {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'notional is only supported for market orders',
+          path: ['notional'],
+        });
+      }
+    }
+
+    if (orderType === 'LIMIT') {
+      if (typeof data.limitPrice !== 'number') {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'limitPrice is required for limit orders',
+          path: ['limitPrice'],
+        });
+      }
+
+      if (typeof data.triggerPrice === 'number') {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'triggerPrice is not valid for limit orders',
+          path: ['triggerPrice'],
+        });
+      }
+    }
+
+    if (orderType === 'STOP') {
+      if (typeof data.triggerPrice !== 'number') {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'triggerPrice is required for stop orders',
+          path: ['triggerPrice'],
+        });
+      }
+
+      if (typeof data.limitPrice === 'number') {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'limitPrice is not valid for stop orders',
+          path: ['limitPrice'],
+        });
+      }
+    }
+
+    if ((typeof data.takeProfitPrice === 'number' || typeof data.stopLossPrice === 'number') && data.side !== 'BUY') {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Bracket TP/SL is currently supported only for BUY orders',
+        path: ['side'],
+      });
+    }
   });
 
 const tradingOrderCancelParamSchema = z.object({
@@ -731,10 +844,18 @@ const persistedTradingOrderSchema = z.object({
   id: z.string().trim().min(1),
   symbol: z.string().trim().min(1),
   side: z.enum(['BUY', 'SELL']),
-  type: z.literal('MARKET'),
+  type: z.enum(['MARKET', 'LIMIT', 'STOP']),
   status: z.enum(['PENDING', 'FILLED', 'CANCELED', 'REJECTED']),
   qty: z.coerce.number().finite().positive(),
   notional: z.coerce.number().finite().nonnegative(),
+  triggerPrice: z.coerce.number().finite().positive().optional(),
+  limitPrice: z.coerce.number().finite().positive().optional(),
+  takeProfitPrice: z.coerce.number().finite().positive().optional(),
+  stopLossPrice: z.coerce.number().finite().positive().optional(),
+  parentOrderId: z.string().trim().min(1).optional(),
+  linkType: z.enum(['BRACKET_TAKE_PROFIT', 'BRACKET_STOP_LOSS']).optional(),
+  bracketChildOrderIds: z.array(z.string().trim().min(1)).max(2).optional(),
+  canceledByOrderId: z.string().trim().min(1).optional(),
   fillPrice: z.coerce.number().finite().positive().optional(),
   filledAt: z.coerce.number().int().nonnegative().optional(),
   canceledAt: z.coerce.number().int().nonnegative().optional(),
@@ -1163,7 +1284,10 @@ function cloneTradingPosition(position: TradingPosition): TradingPosition {
 }
 
 function cloneTradingOrder(order: TradingOrder): TradingOrder {
-  return { ...order };
+  return {
+    ...order,
+    ...(order.bracketChildOrderIds ? { bracketChildOrderIds: [...order.bracketChildOrderIds] } : {}),
+  };
 }
 
 function cloneTradingFill(fill: TradingFill): TradingFill {
@@ -1222,75 +1346,157 @@ function sendOpsTelemetryError(
   });
 }
 
-async function refreshPaperTradingPositionMarks() {
-  const symbols = [...paperTradingState.positions.keys()];
-  if (!symbols.length) return;
+function normalizeTradingPrice(rawPrice: number) {
+  const normalized = roundTradingValue(rawPrice);
+  if (!Number.isFinite(normalized) || normalized <= PAPER_TRADING_EPSILON) {
+    return null;
+  }
+  return normalized;
+}
 
-  const settled = await Promise.allSettled(
-    symbols.map(async (symbol) => {
-      const quote = await fetchLiveQuote(symbol, { skipCache: true });
-      return { symbol, marketPrice: quote.lastPrice };
-    }),
-  );
-
-  let updated = false;
-
-  for (const result of settled) {
-    if (result.status !== 'fulfilled') {
-      app.log.warn({ error: result.reason }, 'Unable to refresh paper trading mark price');
-      continue;
-    }
-
-    const position = paperTradingState.positions.get(result.value.symbol);
-    if (!position) continue;
-
-    const marketPrice = roundTradingValue(result.value.marketPrice);
-    position.marketPrice = marketPrice;
-    position.unrealizedPnl = roundTradingValue((marketPrice - position.avgPrice) * position.qty);
-    position.updatedAt = Date.now();
-    updated = true;
+function validateBracketPriceInput(
+  side: TradingOrderSide,
+  referencePrice: number,
+  takeProfitPrice?: number,
+  stopLossPrice?: number,
+) {
+  if (typeof takeProfitPrice !== 'number' && typeof stopLossPrice !== 'number') {
+    return { ok: true as const };
   }
 
-  if (updated) {
-    paperTradingState.updatedAt = Date.now();
+  if (side !== 'BUY') {
+    return {
+      ok: false as const,
+      statusCode: 400,
+      code: 'VALIDATION_ERROR' as TradingErrorCode,
+      message: 'Bracket TP/SL is currently supported only for BUY orders',
+    };
+  }
+
+  if (!Number.isFinite(referencePrice) || referencePrice <= PAPER_TRADING_EPSILON) {
+    return {
+      ok: false as const,
+      statusCode: 400,
+      code: 'VALIDATION_ERROR' as TradingErrorCode,
+      message: 'Invalid bracket reference price',
+    };
+  }
+
+  if (typeof takeProfitPrice === 'number' && takeProfitPrice <= referencePrice + PAPER_TRADING_EPSILON) {
+    return {
+      ok: false as const,
+      statusCode: 400,
+      code: 'VALIDATION_ERROR' as TradingErrorCode,
+      message: 'takeProfitPrice must be greater than entry price for BUY orders',
+    };
+  }
+
+  if (typeof stopLossPrice === 'number' && stopLossPrice >= referencePrice - PAPER_TRADING_EPSILON) {
+    return {
+      ok: false as const,
+      statusCode: 400,
+      code: 'VALIDATION_ERROR' as TradingErrorCode,
+      message: 'stopLossPrice must be less than entry price for BUY orders',
+    };
+  }
+
+  if (
+    typeof takeProfitPrice === 'number' &&
+    typeof stopLossPrice === 'number' &&
+    stopLossPrice + PAPER_TRADING_EPSILON >= takeProfitPrice
+  ) {
+    return {
+      ok: false as const,
+      statusCode: 400,
+      code: 'VALIDATION_ERROR' as TradingErrorCode,
+      message: 'stopLossPrice must be less than takeProfitPrice',
+    };
+  }
+
+  return { ok: true as const };
+}
+
+function markTradingOrderCanceled(order: TradingOrder, canceledAt: number, canceledByOrderId?: string) {
+  order.status = 'CANCELED';
+  order.canceledAt = canceledAt;
+  order.updatedAt = canceledAt;
+  delete order.rejectReason;
+
+  if (canceledByOrderId) {
+    order.canceledByOrderId = canceledByOrderId;
+  } else {
+    delete order.canceledByOrderId;
   }
 }
 
-function buildPaperTradingStateSnapshot() {
-  const positions = [...paperTradingState.positions.values()]
-    .map(cloneTradingPosition)
-    .sort((a, b) => a.symbol.localeCompare(b.symbol));
+function cancelPendingBracketChildren(parentOrderId: string, canceledAt: number, canceledByOrderId: string) {
+  let canceled = 0;
 
-  const marketValue = roundTradingValue(
-    positions.reduce((sum, position) => sum + position.qty * position.marketPrice, 0),
-  );
-  const realizedPnl = roundTradingValue(
-    paperTradingState.fills.reduce((sum, fill) => sum + fill.realizedPnl, 0),
-  );
-  const unrealizedPnl = roundTradingValue(
-    positions.reduce((sum, position) => sum + position.unrealizedPnl, 0),
-  );
-  const cash = roundTradingValue(paperTradingState.cash);
-  const equity = roundTradingValue(cash + marketValue);
+  for (const order of paperTradingState.orders) {
+    if (order.status !== 'PENDING') continue;
+    if (order.parentOrderId !== parentOrderId) continue;
+    markTradingOrderCanceled(order, canceledAt, canceledByOrderId);
+    canceled += 1;
+  }
 
-  return {
-    mode: paperTradingState.mode,
-    startingCash: paperTradingState.startingCash,
-    cash,
-    summary: {
-      equity,
-      marketValue,
-      realizedPnl,
-      unrealizedPnl,
-    },
-    positions,
-    orders: [...paperTradingState.orders].map(cloneTradingOrder).reverse(),
-    fills: [...paperTradingState.fills].map(cloneTradingFill).reverse(),
-    updatedAt: paperTradingState.updatedAt,
-  };
+  return canceled;
 }
 
-function executePaperMarketOrder(symbol: string, side: TradingOrderSide, qty: number, fillPrice: number, now: number) {
+function cancelSiblingBracketOrders(order: TradingOrder, canceledAt: number) {
+  if (!order.parentOrderId) return 0;
+
+  let canceled = 0;
+  for (const sibling of paperTradingState.orders) {
+    if (sibling.id === order.id) continue;
+    if (sibling.status !== 'PENDING') continue;
+    if (sibling.parentOrderId !== order.parentOrderId) continue;
+    markTradingOrderCanceled(sibling, canceledAt, order.id);
+    canceled += 1;
+  }
+
+  return canceled;
+}
+
+function cancelPendingBracketOrdersForSymbol(symbol: string, canceledAt: number, canceledByOrderId: string) {
+  let canceled = 0;
+  for (const order of paperTradingState.orders) {
+    if (order.status !== 'PENDING') continue;
+    if (order.symbol !== symbol) continue;
+    if (!order.parentOrderId) continue;
+    markTradingOrderCanceled(order, canceledAt, canceledByOrderId);
+    canceled += 1;
+  }
+  return canceled;
+}
+
+function shouldTriggerPendingOrder(order: TradingOrder, marketPrice: number) {
+  if (order.status !== 'PENDING') return false;
+
+  if (order.type === 'LIMIT') {
+    if (typeof order.limitPrice !== 'number') return false;
+    return order.side === 'BUY'
+      ? marketPrice <= order.limitPrice + PAPER_TRADING_EPSILON
+      : marketPrice + PAPER_TRADING_EPSILON >= order.limitPrice;
+  }
+
+  if (order.type === 'STOP') {
+    if (typeof order.triggerPrice !== 'number') return false;
+    return order.side === 'BUY'
+      ? marketPrice + PAPER_TRADING_EPSILON >= order.triggerPrice
+      : marketPrice <= order.triggerPrice + PAPER_TRADING_EPSILON;
+  }
+
+  return true;
+}
+
+function getPendingOrderTriggerPriority(order: TradingOrder) {
+  if (order.parentOrderId && order.linkType) {
+    return TRADING_TRIGGER_PRIORITY_BY_LINK_TYPE[order.linkType] ?? 2;
+  }
+  return 2;
+}
+
+function applyPaperExecutionToPortfolio(symbol: string, side: TradingOrderSide, qty: number, fillPrice: number, now: number) {
   const normalizedQty = normalizeTradingQty(qty);
   if (!normalizedQty) {
     return {
@@ -1301,8 +1507,8 @@ function executePaperMarketOrder(symbol: string, side: TradingOrderSide, qty: nu
     };
   }
 
-  const normalizedPrice = roundTradingValue(fillPrice);
-  if (!Number.isFinite(normalizedPrice) || normalizedPrice <= PAPER_TRADING_EPSILON) {
+  const normalizedPrice = normalizeTradingPrice(fillPrice);
+  if (!normalizedPrice) {
     return {
       ok: false as const,
       statusCode: 502,
@@ -1367,6 +1573,7 @@ function executePaperMarketOrder(symbol: string, side: TradingOrderSide, qty: nu
 
     if (nextQty <= PAPER_TRADING_EPSILON) {
       paperTradingState.positions.delete(symbol);
+      cancelPendingBracketOrdersForSymbol(symbol, now, `auto_flatten_${symbol}`);
     } else {
       paperTradingState.positions.set(symbol, {
         symbol,
@@ -1382,44 +1589,429 @@ function executePaperMarketOrder(symbol: string, side: TradingOrderSide, qty: nu
     paperTradingState.cash = roundTradingValue(paperTradingState.cash + notional);
   }
 
-  const orderId = createTradingOrderId();
-  const fillId = createTradingFillId();
-
-  const order: TradingOrder = {
-    id: orderId,
-    symbol,
-    side,
-    type: 'MARKET',
-    status: 'FILLED',
+  return {
+    ok: true as const,
     qty: normalizedQty,
-    notional,
     fillPrice: normalizedPrice,
-    filledAt: now,
-    createdAt: now,
-    updatedAt: now,
+    notional,
+    realizedPnlDelta,
   };
+}
+
+function createBracketChildOrdersForFilledParent(parentOrder: TradingOrder, createdAt: number) {
+  if (parentOrder.status !== 'FILLED') return 0;
+  if (parentOrder.parentOrderId) return 0;
+  if (parentOrder.side !== 'BUY') return 0;
+
+  const linkedChildIds: string[] = [];
+  const existingChildren = paperTradingState.orders.filter((order) => order.parentOrderId === parentOrder.id);
+  let createdCount = 0;
+
+  const ensureChild = (linkType: TradingOrderLinkType, type: TradingOrderType, rawPrice: number | undefined) => {
+    if (typeof rawPrice !== 'number') return;
+
+    const normalizedPrice = normalizeTradingPrice(rawPrice);
+    if (!normalizedPrice) return;
+
+    const existing = existingChildren.find((order) => order.linkType === linkType);
+    if (existing) {
+      linkedChildIds.push(existing.id);
+      return;
+    }
+
+    const child: TradingOrder = {
+      id: createTradingOrderId(),
+      symbol: parentOrder.symbol,
+      side: 'SELL',
+      type,
+      status: 'PENDING',
+      qty: parentOrder.qty,
+      notional: roundTradingValue(parentOrder.qty * normalizedPrice),
+      ...(type === 'LIMIT' ? { limitPrice: normalizedPrice } : { triggerPrice: normalizedPrice }),
+      parentOrderId: parentOrder.id,
+      linkType,
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    paperTradingState.orders.push(child);
+    linkedChildIds.push(child.id);
+    createdCount += 1;
+  };
+
+  ensureChild('BRACKET_TAKE_PROFIT', 'LIMIT', parentOrder.takeProfitPrice);
+  ensureChild('BRACKET_STOP_LOSS', 'STOP', parentOrder.stopLossPrice);
+
+  if (linkedChildIds.length > 0) {
+    parentOrder.bracketChildOrderIds = [...new Set(linkedChildIds)].slice(0, PAPER_TRADING_MAX_BRACKET_CHILDREN);
+    parentOrder.updatedAt = Math.max(parentOrder.updatedAt, createdAt);
+  }
+
+  return createdCount;
+}
+
+function fillPendingPaperOrder(order: TradingOrder, fillPrice: number, now: number) {
+  if (order.status !== 'PENDING') {
+    return {
+      changed: false as const,
+      autoCanceledCount: 0,
+      rejected: false,
+      fill: null as TradingFill | null,
+    };
+  }
+
+  const execution = applyPaperExecutionToPortfolio(order.symbol, order.side, order.qty, fillPrice, now);
+  if (!execution.ok) {
+    order.status = 'REJECTED';
+    order.rejectReason = execution.message;
+    order.updatedAt = now;
+    delete order.canceledAt;
+    delete order.canceledByOrderId;
+
+    let autoCanceledCount = 0;
+    if (order.parentOrderId) {
+      autoCanceledCount += cancelSiblingBracketOrders(order, now);
+    }
+
+    paperTradingState.updatedAt = now;
+    return {
+      changed: true as const,
+      autoCanceledCount,
+      rejected: true,
+      fill: null as TradingFill | null,
+    };
+  }
+
+  order.status = 'FILLED';
+  order.notional = execution.notional;
+  order.fillPrice = execution.fillPrice;
+  order.filledAt = now;
+  order.updatedAt = now;
+  delete order.rejectReason;
+  delete order.canceledAt;
+  delete order.canceledByOrderId;
 
   const fill: TradingFill = {
-    id: fillId,
-    orderId,
-    symbol,
-    side,
-    qty: normalizedQty,
-    price: normalizedPrice,
-    notional,
-    realizedPnl: realizedPnlDelta,
+    id: createTradingFillId(),
+    orderId: order.id,
+    symbol: order.symbol,
+    side: order.side,
+    qty: execution.qty,
+    price: execution.fillPrice,
+    notional: execution.notional,
+    realizedPnl: execution.realizedPnlDelta,
     filledAt: now,
   };
-
-  paperTradingState.orders.push(order);
   paperTradingState.fills.push(fill);
+
+  let autoCanceledCount = 0;
+  if (order.parentOrderId) {
+    autoCanceledCount += cancelSiblingBracketOrders(order, now);
+  } else {
+    createBracketChildOrdersForFilledParent(order, now);
+  }
+
   trimPaperTradingHistory();
   paperTradingState.updatedAt = now;
 
   return {
-    ok: true as const,
-    order,
+    changed: true as const,
+    autoCanceledCount,
+    rejected: false,
     fill,
+  };
+}
+
+function evaluatePendingPaperOrdersForSymbol(symbol: string, marketPrice: number, evaluatedAt: number) {
+  const normalizedPrice = normalizeTradingPrice(marketPrice);
+  if (!normalizedPrice) {
+    return {
+      changed: false,
+      filledCount: 0,
+      rejectedCount: 0,
+      autoCanceledCount: 0,
+    };
+  }
+
+  let changed = false;
+  let filledCount = 0;
+  let rejectedCount = 0;
+  let autoCanceledCount = 0;
+  let safetyCounter = 0;
+
+  while (safetyCounter < PAPER_TRADING_MAX_ORDERS) {
+    safetyCounter += 1;
+
+    // Deterministic same-tick conflict rule:
+    // 1) bracket stop-loss, 2) bracket take-profit, 3) other pending orders, then createdAt/id.
+    const pending = paperTradingState.orders
+      .filter((order) => order.symbol === symbol && order.status === 'PENDING')
+      .filter((order) => shouldTriggerPendingOrder(order, normalizedPrice))
+      .sort((a, b) => {
+        const priorityDiff = getPendingOrderTriggerPriority(a) - getPendingOrderTriggerPriority(b);
+        if (priorityDiff !== 0) return priorityDiff;
+        if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+        return a.id.localeCompare(b.id);
+      });
+
+    if (!pending.length) break;
+
+    const outcome = fillPendingPaperOrder(pending[0], normalizedPrice, evaluatedAt);
+    if (!outcome.changed) break;
+
+    changed = true;
+    if (outcome.fill) {
+      filledCount += 1;
+    }
+    if (outcome.rejected) {
+      rejectedCount += 1;
+    }
+    autoCanceledCount += outcome.autoCanceledCount;
+  }
+
+  return {
+    changed,
+    filledCount,
+    rejectedCount,
+    autoCanceledCount,
+  };
+}
+
+async function refreshPaperTradingPositionMarks() {
+  const symbolSet = new Set<string>(paperTradingState.positions.keys());
+  for (const order of paperTradingState.orders) {
+    if (order.status === 'PENDING') {
+      symbolSet.add(order.symbol);
+    }
+  }
+
+  const symbols = [...symbolSet];
+  if (!symbols.length) {
+    return {
+      updated: false,
+      filledCount: 0,
+      rejectedCount: 0,
+      autoCanceledCount: 0,
+    };
+  }
+
+  const settled = await Promise.allSettled(
+    symbols.map(async (symbol) => {
+      const quote = await fetchLiveQuote(symbol, { skipCache: true });
+      return { symbol, marketPrice: quote.lastPrice };
+    }),
+  );
+
+  let updated = false;
+  let filledCount = 0;
+  let rejectedCount = 0;
+  let autoCanceledCount = 0;
+
+  for (const result of settled) {
+    if (result.status !== 'fulfilled') {
+      app.log.warn({ error: result.reason }, 'Unable to refresh paper trading mark price');
+      continue;
+    }
+
+    const normalizedPrice = normalizeTradingPrice(result.value.marketPrice);
+    if (!normalizedPrice) continue;
+
+    const evaluatedAt = Date.now();
+    const matchResult = evaluatePendingPaperOrdersForSymbol(result.value.symbol, normalizedPrice, evaluatedAt);
+    if (matchResult.changed) {
+      updated = true;
+      filledCount += matchResult.filledCount;
+      rejectedCount += matchResult.rejectedCount;
+      autoCanceledCount += matchResult.autoCanceledCount;
+    }
+
+    const position = paperTradingState.positions.get(result.value.symbol);
+    if (!position) continue;
+
+    position.marketPrice = normalizedPrice;
+    position.unrealizedPnl = roundTradingValue((normalizedPrice - position.avgPrice) * position.qty);
+    position.updatedAt = evaluatedAt;
+    updated = true;
+  }
+
+  if (updated) {
+    paperTradingState.updatedAt = Date.now();
+  }
+
+  return {
+    updated,
+    filledCount,
+    rejectedCount,
+    autoCanceledCount,
+  };
+}
+
+function buildPaperTradingStateSnapshot() {
+  const positions = [...paperTradingState.positions.values()]
+    .map(cloneTradingPosition)
+    .sort((a, b) => a.symbol.localeCompare(b.symbol));
+
+  const marketValue = roundTradingValue(
+    positions.reduce((sum, position) => sum + position.qty * position.marketPrice, 0),
+  );
+  const realizedPnl = roundTradingValue(
+    paperTradingState.fills.reduce((sum, fill) => sum + fill.realizedPnl, 0),
+  );
+  const unrealizedPnl = roundTradingValue(
+    positions.reduce((sum, position) => sum + position.unrealizedPnl, 0),
+  );
+  const cash = roundTradingValue(paperTradingState.cash);
+  const equity = roundTradingValue(cash + marketValue);
+
+  return {
+    mode: paperTradingState.mode,
+    startingCash: paperTradingState.startingCash,
+    cash,
+    summary: {
+      equity,
+      marketValue,
+      realizedPnl,
+      unrealizedPnl,
+    },
+    positions,
+    orders: [...paperTradingState.orders].map(cloneTradingOrder).reverse(),
+    fills: [...paperTradingState.fills].map(cloneTradingFill).reverse(),
+    updatedAt: paperTradingState.updatedAt,
+  };
+}
+
+function executePaperMarketOrder(input: {
+  symbol: string;
+  side: TradingOrderSide;
+  qty: number;
+  fillPrice: number;
+  now: number;
+  takeProfitPrice?: number;
+  stopLossPrice?: number;
+}) {
+  const bracketValidation = validateBracketPriceInput(
+    input.side,
+    input.fillPrice,
+    input.takeProfitPrice,
+    input.stopLossPrice,
+  );
+  if (!bracketValidation.ok) {
+    return bracketValidation;
+  }
+
+  const execution = applyPaperExecutionToPortfolio(input.symbol, input.side, input.qty, input.fillPrice, input.now);
+  if (!execution.ok) {
+    return execution;
+  }
+
+  const order: TradingOrder = {
+    id: createTradingOrderId(),
+    symbol: input.symbol,
+    side: input.side,
+    type: 'MARKET',
+    status: 'FILLED',
+    qty: execution.qty,
+    notional: execution.notional,
+    ...(typeof input.takeProfitPrice === 'number'
+      ? { takeProfitPrice: roundTradingValue(input.takeProfitPrice) }
+      : {}),
+    ...(typeof input.stopLossPrice === 'number' ? { stopLossPrice: roundTradingValue(input.stopLossPrice) } : {}),
+    fillPrice: execution.fillPrice,
+    filledAt: input.now,
+    createdAt: input.now,
+    updatedAt: input.now,
+  };
+
+  const fill: TradingFill = {
+    id: createTradingFillId(),
+    orderId: order.id,
+    symbol: input.symbol,
+    side: input.side,
+    qty: execution.qty,
+    price: execution.fillPrice,
+    notional: execution.notional,
+    realizedPnl: execution.realizedPnlDelta,
+    filledAt: input.now,
+  };
+
+  paperTradingState.orders.push(order);
+  paperTradingState.fills.push(fill);
+  createBracketChildOrdersForFilledParent(order, input.now);
+  trimPaperTradingHistory();
+  paperTradingState.updatedAt = input.now;
+
+  return {
+    ok: true as const,
+    order: cloneTradingOrder(order),
+    fill: cloneTradingFill(fill),
+  };
+}
+
+function createPaperPendingOrder(input: {
+  symbol: string;
+  side: TradingOrderSide;
+  type: Exclude<TradingOrderType, 'MARKET'>;
+  qty: number;
+  now: number;
+  limitPrice?: number;
+  triggerPrice?: number;
+  takeProfitPrice?: number;
+  stopLossPrice?: number;
+}) {
+  const normalizedQty = normalizeTradingQty(input.qty);
+  if (!normalizedQty) {
+    return {
+      ok: false as const,
+      statusCode: 400,
+      code: 'VALIDATION_ERROR' as TradingErrorCode,
+      message: 'Order quantity must be greater than zero',
+    };
+  }
+
+  const rawReferencePrice = input.type === 'LIMIT' ? input.limitPrice : input.triggerPrice;
+  const normalizedReferencePrice = normalizeTradingPrice(rawReferencePrice ?? NaN);
+  if (!normalizedReferencePrice) {
+    return {
+      ok: false as const,
+      statusCode: 400,
+      code: 'VALIDATION_ERROR' as TradingErrorCode,
+      message: 'Order trigger/limit price must be greater than zero',
+    };
+  }
+
+  const bracketValidation = validateBracketPriceInput(
+    input.side,
+    normalizedReferencePrice,
+    input.takeProfitPrice,
+    input.stopLossPrice,
+  );
+  if (!bracketValidation.ok) {
+    return bracketValidation;
+  }
+
+  const order: TradingOrder = {
+    id: createTradingOrderId(),
+    symbol: input.symbol,
+    side: input.side,
+    type: input.type,
+    status: 'PENDING',
+    qty: normalizedQty,
+    notional: roundTradingValue(normalizedQty * normalizedReferencePrice),
+    ...(typeof input.limitPrice === 'number' ? { limitPrice: roundTradingValue(input.limitPrice) } : {}),
+    ...(typeof input.triggerPrice === 'number' ? { triggerPrice: roundTradingValue(input.triggerPrice) } : {}),
+    ...(typeof input.takeProfitPrice === 'number' ? { takeProfitPrice: roundTradingValue(input.takeProfitPrice) } : {}),
+    ...(typeof input.stopLossPrice === 'number' ? { stopLossPrice: roundTradingValue(input.stopLossPrice) } : {}),
+    createdAt: input.now,
+    updatedAt: input.now,
+  };
+
+  paperTradingState.orders.push(order);
+  trimPaperTradingHistory();
+  paperTradingState.updatedAt = input.now;
+
+  return {
+    ok: true as const,
+    order: cloneTradingOrder(order),
   };
 }
 
@@ -1443,9 +2035,14 @@ function cancelPaperTradingOrder(orderId: string, canceledAt: number) {
     };
   }
 
-  target.status = 'CANCELED';
-  target.canceledAt = canceledAt;
-  target.updatedAt = canceledAt;
+  markTradingOrderCanceled(target, canceledAt);
+
+  if (target.parentOrderId) {
+    cancelSiblingBracketOrders(target, canceledAt);
+  } else {
+    cancelPendingBracketChildren(target.id, canceledAt, target.id);
+  }
+
   paperTradingState.updatedAt = canceledAt;
 
   return {
@@ -1540,6 +2137,24 @@ function restorePaperTradingState(rawTrading: unknown) {
       status: parsedOrder.data.status,
       qty: roundTradingValue(parsedOrder.data.qty),
       notional: roundTradingValue(parsedOrder.data.notional),
+      ...(typeof parsedOrder.data.triggerPrice === 'number'
+        ? { triggerPrice: roundTradingValue(parsedOrder.data.triggerPrice) }
+        : {}),
+      ...(typeof parsedOrder.data.limitPrice === 'number'
+        ? { limitPrice: roundTradingValue(parsedOrder.data.limitPrice) }
+        : {}),
+      ...(typeof parsedOrder.data.takeProfitPrice === 'number'
+        ? { takeProfitPrice: roundTradingValue(parsedOrder.data.takeProfitPrice) }
+        : {}),
+      ...(typeof parsedOrder.data.stopLossPrice === 'number'
+        ? { stopLossPrice: roundTradingValue(parsedOrder.data.stopLossPrice) }
+        : {}),
+      ...(parsedOrder.data.parentOrderId ? { parentOrderId: parsedOrder.data.parentOrderId } : {}),
+      ...(parsedOrder.data.linkType ? { linkType: parsedOrder.data.linkType } : {}),
+      ...(parsedOrder.data.bracketChildOrderIds?.length
+        ? { bracketChildOrderIds: [...new Set(parsedOrder.data.bracketChildOrderIds)] }
+        : {}),
+      ...(parsedOrder.data.canceledByOrderId ? { canceledByOrderId: parsedOrder.data.canceledByOrderId } : {}),
       ...(typeof parsedOrder.data.fillPrice === 'number'
         ? { fillPrice: roundTradingValue(parsedOrder.data.fillPrice) }
         : {}),
@@ -1549,6 +2164,30 @@ function restorePaperTradingState(rawTrading: unknown) {
       createdAt: parsedOrder.data.createdAt,
       updatedAt: parsedOrder.data.updatedAt,
     });
+  }
+
+  const restoredOrderById = new Map(restoredOrders.map((order) => [order.id, order]));
+  for (const order of restoredOrders) {
+    if (order.bracketChildOrderIds?.length) {
+      order.bracketChildOrderIds = order.bracketChildOrderIds
+        .filter((childId) => {
+          const child = restoredOrderById.get(childId);
+          return Boolean(child && child.parentOrderId === order.id);
+        })
+        .slice(0, PAPER_TRADING_MAX_BRACKET_CHILDREN);
+      if (!order.bracketChildOrderIds.length) {
+        delete order.bracketChildOrderIds;
+      }
+    }
+  }
+
+  for (const order of restoredOrders) {
+    if (!order.parentOrderId) continue;
+    const parent = restoredOrderById.get(order.parentOrderId);
+    if (!parent) continue;
+    const existing = new Set(parent.bracketChildOrderIds ?? []);
+    existing.add(order.id);
+    parent.bracketChildOrderIds = [...existing].slice(0, PAPER_TRADING_MAX_BRACKET_CHILDREN);
   }
 
   let skippedFills = 0;
@@ -3235,7 +3874,12 @@ app.get('/api/quote', async (request, reply) => {
 
   const symbol = parsed.data.symbol.toUpperCase();
   try {
-    return await fetchLiveQuote(symbol);
+    const quote = await fetchLiveQuote(symbol);
+    const matchResult = evaluatePendingPaperOrdersForSymbol(symbol, quote.lastPrice, Date.now());
+    if (matchResult.filledCount > 0 || matchResult.rejectedCount > 0 || matchResult.autoCanceledCount > 0) {
+      await persistRuntimeState();
+    }
+    return quote;
   } catch (error) {
     app.log.error({ error, symbol }, 'Failed to fetch quote');
     return reply.code(502).send({ error: 'Failed to fetch quote data from upstream exchange' });
@@ -3253,7 +3897,10 @@ app.get('/api/market-status', async (request, reply) => {
 });
 
 app.get('/api/trading/state', async () => {
-  await refreshPaperTradingPositionMarks();
+  const refreshed = await refreshPaperTradingPositionMarks();
+  if (refreshed.filledCount > 0 || refreshed.rejectedCount > 0 || refreshed.autoCanceledCount > 0) {
+    await persistRuntimeState();
+  }
   return buildPaperTradingStateSnapshot();
 });
 
@@ -3266,6 +3913,7 @@ app.post('/api/trading/orders', async (request, reply) => {
 
   const symbol = normalizeSymbol(parsed.data.symbol);
   const side = parsed.data.side;
+  const orderType = parsed.data.orderType ?? 'MARKET';
 
   let quote: Quote;
   try {
@@ -3275,34 +3923,93 @@ app.post('/api/trading/orders', async (request, reply) => {
     return sendTradingError(reply, 502, 'QUOTE_UNAVAILABLE', 'Unable to fetch quote for this symbol');
   }
 
-  const fillPrice = roundTradingValue(quote.lastPrice);
-  if (!Number.isFinite(fillPrice) || fillPrice <= PAPER_TRADING_EPSILON) {
+  const fillPrice = normalizeTradingPrice(quote.lastPrice);
+  if (!fillPrice) {
     return sendTradingError(reply, 502, 'QUOTE_UNAVAILABLE', 'Unable to determine fill price from quote');
   }
 
-  const requestedQty =
-    typeof parsed.data.qty === 'number'
-      ? parsed.data.qty
-      : typeof parsed.data.notional === 'number'
-        ? parsed.data.notional / fillPrice
-        : NaN;
-  const normalizedQty = normalizeTradingQty(requestedQty);
+  const requestAt = Date.now();
+  const preMatchResult = evaluatePendingPaperOrdersForSymbol(symbol, fillPrice, requestAt);
+  const preMatchChanged =
+    preMatchResult.filledCount > 0 || preMatchResult.rejectedCount > 0 || preMatchResult.autoCanceledCount > 0;
 
-  if (!normalizedQty) {
-    return sendTradingError(reply, 400, 'VALIDATION_ERROR', 'Resolved order quantity must be greater than zero');
-  }
+  let responseOrder: TradingOrder | null = null;
+  let responseFill: TradingFill | null = null;
 
-  const execution = executePaperMarketOrder(symbol, side, normalizedQty, fillPrice, Date.now());
-  if (!execution.ok) {
-    return sendTradingError(reply, execution.statusCode, execution.code, execution.message);
+  if (orderType === 'MARKET') {
+    const requestedQty =
+      typeof parsed.data.qty === 'number'
+        ? parsed.data.qty
+        : typeof parsed.data.notional === 'number'
+          ? parsed.data.notional / fillPrice
+          : NaN;
+    const normalizedQty = normalizeTradingQty(requestedQty);
+
+    if (!normalizedQty) {
+      if (preMatchChanged) {
+        await persistRuntimeState();
+      }
+      return sendTradingError(reply, 400, 'VALIDATION_ERROR', 'Resolved order quantity must be greater than zero');
+    }
+
+    const execution = executePaperMarketOrder({
+      symbol,
+      side,
+      qty: normalizedQty,
+      fillPrice,
+      now: requestAt,
+      takeProfitPrice: parsed.data.takeProfitPrice,
+      stopLossPrice: parsed.data.stopLossPrice,
+    });
+    if (!execution.ok) {
+      if (preMatchChanged) {
+        await persistRuntimeState();
+      }
+      return sendTradingError(reply, execution.statusCode, execution.code, execution.message);
+    }
+
+    responseOrder = execution.order;
+    responseFill = execution.fill;
+  } else {
+    const pending = createPaperPendingOrder({
+      symbol,
+      side,
+      type: orderType,
+      qty: parsed.data.qty ?? NaN,
+      now: requestAt,
+      limitPrice: parsed.data.limitPrice,
+      triggerPrice: parsed.data.triggerPrice,
+      takeProfitPrice: parsed.data.takeProfitPrice,
+      stopLossPrice: parsed.data.stopLossPrice,
+    });
+    if (!pending.ok) {
+      if (preMatchChanged) {
+        await persistRuntimeState();
+      }
+      return sendTradingError(reply, pending.statusCode, pending.code, pending.message);
+    }
+
+    evaluatePendingPaperOrdersForSymbol(symbol, fillPrice, requestAt);
+    const currentOrder = paperTradingState.orders.find((order) => order.id === pending.order.id);
+    responseOrder = currentOrder ? cloneTradingOrder(currentOrder) : pending.order;
+
+    if (responseOrder.status === 'FILLED') {
+      for (let index = paperTradingState.fills.length - 1; index >= 0; index -= 1) {
+        const candidate = paperTradingState.fills[index];
+        if (candidate.orderId === responseOrder.id) {
+          responseFill = cloneTradingFill(candidate);
+          break;
+        }
+      }
+    }
   }
 
   await persistRuntimeState();
 
   return reply.code(201).send({
     mode: PAPER_TRADING_MODE,
-    order: execution.order,
-    fill: execution.fill,
+    order: responseOrder,
+    ...(responseFill ? { fill: responseFill } : {}),
     state: buildPaperTradingStateSnapshot(),
   });
 });
