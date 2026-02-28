@@ -221,6 +221,231 @@ describe('api market status', () => {
   });
 });
 
+describe('api ops telemetry', () => {
+  it('ingests errors and recoveries and supports filtered inspection', async () => {
+    const errorResponse = await app.inject({
+      method: 'POST',
+      url: '/api/ops/errors',
+      payload: {
+        level: 'recoverable',
+        source: 'web',
+        code: 'TRADING_STATE_FETCH_FAILED',
+        message: 'Failed to load trading state',
+        context: {
+          workflow: 'trading',
+          status: 502,
+        },
+      },
+    });
+
+    expect(errorResponse.statusCode).toBe(201);
+    const errorBody = errorResponse.json() as {
+      event: {
+        id: string;
+        level: 'recoverable' | 'critical';
+        source: string;
+        code: string;
+      };
+    };
+    expect(errorBody.event).toMatchObject({
+      level: 'recoverable',
+      source: 'web',
+      code: 'TRADING_STATE_FETCH_FAILED',
+    });
+    expect(errorBody.event.id).toMatch(/^opserr_/);
+
+    const recoveryResponse = await app.inject({
+      method: 'POST',
+      url: '/api/ops/recovery',
+      payload: {
+        source: 'web',
+        action: 'retry_load_trading_state',
+        status: 'attempted',
+        context: {
+          workflow: 'trading',
+        },
+      },
+    });
+
+    expect(recoveryResponse.statusCode).toBe(201);
+    const recoveryBody = recoveryResponse.json() as {
+      event: {
+        id: string;
+        source: string;
+        action: string;
+        status: string;
+      };
+    };
+    expect(recoveryBody.event).toMatchObject({
+      source: 'web',
+      action: 'retry_load_trading_state',
+      status: 'attempted',
+    });
+    expect(recoveryBody.event.id).toMatch(/^opsrec_/);
+
+    const filtered = await app.inject({
+      method: 'GET',
+      url: '/api/ops/errors?level=recoverable&source=web&limit=20&recoveryLimit=20',
+    });
+
+    expect(filtered.statusCode).toBe(200);
+    expect(filtered.json()).toMatchObject({
+      total: 1,
+      limit: 20,
+      recoveryTotal: 1,
+      recoveryLimit: 20,
+      errors: [
+        {
+          level: 'recoverable',
+          source: 'web',
+          code: 'TRADING_STATE_FETCH_FAILED',
+        },
+      ],
+      recoveries: [
+        {
+          source: 'web',
+          action: 'retry_load_trading_state',
+          status: 'attempted',
+        },
+      ],
+    });
+  });
+
+  it('returns stable validation errors for malformed telemetry payloads', async () => {
+    const invalidQuery = await app.inject({
+      method: 'GET',
+      url: '/api/ops/errors?level=warn',
+    });
+
+    expect(invalidQuery.statusCode).toBe(400);
+    expect(invalidQuery.json()).toMatchObject({
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid query',
+      },
+    });
+
+    const invalidErrorBody = await app.inject({
+      method: 'POST',
+      url: '/api/ops/errors',
+      payload: {
+        level: 'recoverable',
+        source: 'web',
+        code: 'not_valid',
+        message: 'bad code',
+      },
+    });
+
+    expect(invalidErrorBody.statusCode).toBe(400);
+    expect(invalidErrorBody.json()).toMatchObject({
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid body',
+      },
+    });
+
+    const invalidRecoveryBody = await app.inject({
+      method: 'POST',
+      url: '/api/ops/recovery',
+      payload: {
+        source: 'web',
+        action: 'retry_action',
+        status: 'done',
+      },
+    });
+
+    expect(invalidRecoveryBody.statusCode).toBe(400);
+    expect(invalidRecoveryBody.json()).toMatchObject({
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid body',
+      },
+    });
+  });
+
+  it('applies retention bounds and restores telemetry from runtime state', async () => {
+    const oversizedErrors = Array.from({ length: 520 }, (_, index) => ({
+      id: `err_${index}`,
+      level: index % 2 === 0 ? 'recoverable' : 'critical',
+      source: 'web',
+      code: `ERR_${index}`,
+      message: `error ${index}`,
+      occurredAt: 1_750_000_000_000 + index,
+      recordedAt: 1_750_000_000_000 + index,
+    }));
+
+    const oversizedRecoveries = Array.from({ length: 520 }, (_, index) => ({
+      id: `rec_${index}`,
+      source: 'web',
+      action: 'retry_action',
+      status: index % 3 === 0 ? 'failed' : index % 2 === 0 ? 'attempted' : 'succeeded',
+      message: `recovery ${index}`,
+      occurredAt: 1_750_010_000_000 + index,
+      recordedAt: 1_750_010_000_000 + index,
+    }));
+
+    await writeFile(
+      stateFile,
+      `${JSON.stringify(
+        {
+          version: 4,
+          opsErrors: oversizedErrors,
+          opsRecoveries: oversizedRecoveries,
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+
+    await restartAppInstance();
+
+    const listResponse = await app.inject({
+      method: 'GET',
+      url: '/api/ops/errors?limit=200&recoveryLimit=200',
+    });
+
+    expect(listResponse.statusCode).toBe(200);
+    const listBody = listResponse.json() as {
+      total: number;
+      errors: Array<{ id: string }>;
+      recoveryTotal: number;
+      recoveries: Array<{ id: string }>;
+    };
+
+    expect(listBody.total).toBe(500);
+    expect(listBody.recoveryTotal).toBe(500);
+    expect(listBody.errors[0].id).toBe('err_519');
+    expect(listBody.recoveries[0].id).toBe('rec_519');
+
+    const persistError = await app.inject({
+      method: 'POST',
+      url: '/api/ops/errors',
+      payload: {
+        level: 'critical',
+        source: 'api',
+        code: 'RUNTIME_STATE_LOAD_FAILED',
+        message: 'State reload issue',
+      },
+    });
+
+    expect(persistError.statusCode).toBe(201);
+
+    await restartAppInstance();
+
+    const afterRestart = await app.inject({
+      method: 'GET',
+      url: '/api/ops/errors?source=api&limit=20&recoveryLimit=0',
+    });
+
+    expect(afterRestart.statusCode).toBe(200);
+    expect(afterRestart.json()).toMatchObject({
+      total: 1,
+      errors: [{ code: 'RUNTIME_STATE_LOAD_FAILED' }],
+    });
+  });
+});
+
 describe('api watchlist persistence', () => {
   it('returns default watchlist when no state file exists', async () => {
     const response = await app.inject({

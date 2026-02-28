@@ -71,6 +71,15 @@ import {
   type LogicalRangeLike,
 } from './lib/chartLayout';
 import { readUnifiedLayoutState, writeUnifiedLayoutState } from './lib/layoutPersistence';
+import {
+  emitOpsErrorTelemetry,
+  emitOpsRecoveryTelemetry,
+  fetchOpsTelemetryFeed,
+  normalizeApiOperationError,
+  type OpsErrorEvent,
+  type OpsRecoveryEvent,
+  type OpsTelemetrySource,
+} from './lib/apiOperations';
 
 type SymbolItem = {
   symbol: string;
@@ -178,6 +187,32 @@ type AlertHistoryEvent = AlertCheckEvent & {
   source?: AlertHistorySource;
   sourceSymbol?: string;
 };
+
+type WorkflowKey = 'alerts' | 'strategy' | 'trading';
+type RecoveryActionKind = 'retry-backtest' | 'retry-trading-state' | 'retry-alerts-refresh';
+type WorkflowRecoveryState = {
+  workflow: WorkflowKey;
+  message: string;
+  actionKind: RecoveryActionKind;
+};
+
+type OpsTimelineItem =
+  | {
+      id: string;
+      kind: 'error';
+      source: OpsTelemetrySource;
+      label: string;
+      detail: string;
+      occurredAt: number;
+    }
+  | {
+      id: string;
+      kind: 'recovery';
+      source: OpsTelemetrySource;
+      label: string;
+      detail: string;
+      occurredAt: number;
+    };
 
 type WatchTab = 'watchlist' | 'detail' | 'alerts';
 type BottomTab = 'pine' | 'strategy' | 'trading';
@@ -824,24 +859,6 @@ function formatQty(value: number) {
   return value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 8 });
 }
 
-function readApiErrorMessage(payload: unknown) {
-  if (!payload || typeof payload !== 'object') return null;
-
-  const errorValue = (payload as { error?: unknown }).error;
-  if (typeof errorValue === 'string' && errorValue.trim().length > 0) {
-    return errorValue;
-  }
-
-  if (errorValue && typeof errorValue === 'object') {
-    const message = (errorValue as { message?: unknown }).message;
-    if (typeof message === 'string' && message.trim().length > 0) {
-      return message;
-    }
-  }
-
-  return null;
-}
-
 function createMiniChartPath(points: StrategyBacktestPoint[]) {
   if (points.length === 0) {
     return null;
@@ -968,6 +985,7 @@ function App() {
   const [strategyResult, setStrategyResult] = useState<StrategyBacktestResult | null>(null);
   const [strategyLoading, setStrategyLoading] = useState(false);
   const [strategyError, setStrategyError] = useState<string | null>(null);
+  const [strategyRecovery, setStrategyRecovery] = useState<WorkflowRecoveryState | null>(null);
   const [tradingOrderForm, setTradingOrderForm] = useState<TradingOrderFormState>(() => ({
     ...DEFAULT_TRADING_ORDER_FORM,
   }));
@@ -977,6 +995,7 @@ function App() {
   const [tradingSubmitting, setTradingSubmitting] = useState(false);
   const [tradingError, setTradingError] = useState<string | null>(null);
   const [tradingFormError, setTradingFormError] = useState<string | null>(null);
+  const [tradingRecovery, setTradingRecovery] = useState<WorkflowRecoveryState | null>(null);
   const [tradingLastUpdatedAt, setTradingLastUpdatedAt] = useState<number | null>(null);
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [indicatorPanelOpen, setIndicatorPanelOpen] = useState(false);
@@ -1045,6 +1064,11 @@ function App() {
   const [alertHistoryIndicatorAwareOnly, setAlertHistoryIndicatorAwareOnly] = useState(false);
   const [alertsHistoryLoading, setAlertsHistoryLoading] = useState(false);
   const [alertsHistoryClearing, setAlertsHistoryClearing] = useState(false);
+  const [alertsRecovery, setAlertsRecovery] = useState<WorkflowRecoveryState | null>(null);
+  const [opsLoading, setOpsLoading] = useState(false);
+  const [opsPanelError, setOpsPanelError] = useState<string | null>(null);
+  const [opsErrors, setOpsErrors] = useState<OpsErrorEvent[]>([]);
+  const [opsRecoveries, setOpsRecoveries] = useState<OpsRecoveryEvent[]>([]);
   const hasTradingState = tradingState !== null;
 
   const replayProgress = useMemo(
@@ -1127,6 +1151,108 @@ function App() {
       window.clearTimeout(timer);
     };
   }, [topActionFeedback]);
+
+  const loadOpsTelemetry = useCallback(
+    async (options?: { silent?: boolean }) => {
+      const silent = options?.silent === true;
+      if (!silent) {
+        setOpsLoading(true);
+      }
+
+      try {
+        const feed = await fetchOpsTelemetryFeed(apiBase, { limit: 20, recoveryLimit: 20 });
+        setOpsErrors(feed.errors);
+        setOpsRecoveries(feed.recoveries);
+        setOpsPanelError(null);
+        return true;
+      } catch (error) {
+        const message =
+          error instanceof Error && error.message
+            ? error.message
+            : '운영 텔레메트리를 불러오지 못했습니다.';
+        setOpsPanelError(message);
+        return false;
+      } finally {
+        if (!silent) {
+          setOpsLoading(false);
+        }
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (rightPanelCollapsed) return;
+
+    let canceled = false;
+
+    const runLoad = async (silent = false) => {
+      if (canceled) return;
+      await loadOpsTelemetry({ silent });
+    };
+
+    void runLoad(false);
+    const timer = window.setInterval(() => {
+      void runLoad(true);
+    }, 30000);
+
+    return () => {
+      canceled = true;
+      window.clearInterval(timer);
+    };
+  }, [loadOpsTelemetry, rightPanelCollapsed]);
+
+  const reportOpsError = useCallback(
+    (input: {
+      source: OpsTelemetrySource;
+      code: string;
+      message: string;
+      level: 'recoverable' | 'critical';
+      context?: Record<string, unknown>;
+    }) => {
+      void (async () => {
+        const sent = await emitOpsErrorTelemetry(apiBase, {
+          source: input.source,
+          code: input.code,
+          message: input.message,
+          level: input.level,
+          ...(input.context ? { context: input.context } : {}),
+        });
+
+        if (sent) {
+          void loadOpsTelemetry({ silent: true });
+        }
+      })();
+    },
+    [loadOpsTelemetry],
+  );
+
+  const reportOpsRecovery = useCallback(
+    (input: {
+      source: OpsTelemetrySource;
+      action: string;
+      status: 'attempted' | 'succeeded' | 'failed';
+      message?: string;
+      errorCode?: string;
+      context?: Record<string, unknown>;
+    }) => {
+      void (async () => {
+        const sent = await emitOpsRecoveryTelemetry(apiBase, {
+          source: input.source,
+          action: input.action,
+          status: input.status,
+          ...(input.message ? { message: input.message } : {}),
+          ...(input.errorCode ? { errorCode: input.errorCode } : {}),
+          ...(input.context ? { context: input.context } : {}),
+        });
+
+        if (sent) {
+          void loadOpsTelemetry({ silent: true });
+        }
+      })();
+    },
+    [loadOpsTelemetry],
+  );
 
   const clearHoveredCandle = useCallback(() => {
     setHoveredCandle(null);
@@ -2609,31 +2735,52 @@ function App() {
       try {
         const response = await fetch(`${apiBase}/api/trading/state`);
         if (!response.ok) {
-          let message = '트레이딩 상태를 불러오지 못했습니다.';
-
+          let payload: unknown;
           try {
-            const payload = (await response.json()) as unknown;
-            const parsedMessage = readApiErrorMessage(payload);
-            if (parsedMessage) {
-              message = parsedMessage;
-            }
-          } catch (parseError) {
-            void parseError;
+            payload = (await response.json()) as unknown;
+          } catch {
+            payload = undefined;
           }
 
-          throw new Error(message);
+          throw normalizeApiOperationError({
+            fallbackMessage: '트레이딩 상태를 불러오지 못했습니다.',
+            status: response.status,
+            payload,
+          });
         }
 
         const data = (await response.json()) as TradingState;
         setTradingState(data);
         setTradingLastUpdatedAt(data.updatedAt);
         setTradingError(null);
+        setTradingRecovery(null);
+        return true;
       } catch (error) {
-        const message =
-          error instanceof Error && error.message
-            ? error.message
-            : '트레이딩 상태를 불러오지 못했습니다.';
-        setTradingError(message);
+        const normalized =
+          typeof error === 'object' && error !== null && 'retryable' in error
+            ? (error as ReturnType<typeof normalizeApiOperationError>)
+            : normalizeApiOperationError({
+                fallbackMessage: '트레이딩 상태를 불러오지 못했습니다.',
+                error,
+              });
+        setTradingError(normalized.message);
+        setTradingRecovery({
+          workflow: 'trading',
+          message: normalized.message,
+          actionKind: 'retry-trading-state',
+        });
+        reportOpsError({
+          source: 'trading',
+          code: normalized.code ?? 'TRADING_STATE_FETCH_FAILED',
+          message: normalized.message,
+          level: normalized.level,
+          context: {
+            operation: 'loadTradingState',
+            retryable: normalized.retryable,
+            ...(typeof normalized.status === 'number' ? { status: normalized.status } : {}),
+          },
+        });
+        return false;
       } finally {
         if (silent) {
           setTradingRefreshing(false);
@@ -2642,7 +2789,7 @@ function App() {
         }
       }
     },
-    [],
+    [reportOpsError],
   );
 
   const loadAlertRules = useCallback(async () => {
@@ -2661,17 +2808,56 @@ function App() {
 
       const query = params.toString();
       const response = await fetch(`${apiBase}/api/alerts/rules${query ? `?${query}` : ''}`);
-      if (!response.ok) throw new Error('alert rules fetch failed');
+      if (!response.ok) {
+        let payload: unknown;
+        try {
+          payload = (await response.json()) as unknown;
+        } catch {
+          payload = undefined;
+        }
+
+        throw normalizeApiOperationError({
+          fallbackMessage: '알림 규칙을 불러오지 못했습니다.',
+          status: response.status,
+          payload,
+        });
+      }
 
       const data = (await response.json()) as { rules: AlertRule[] };
       setAlertRules(data.rules ?? []);
-    } catch {
+      setAlertsRecovery(null);
+      return true;
+    } catch (error) {
+      const normalized =
+        typeof error === 'object' && error !== null && 'retryable' in error
+          ? (error as ReturnType<typeof normalizeApiOperationError>)
+          : normalizeApiOperationError({
+              fallbackMessage: '알림 규칙을 불러오지 못했습니다.',
+              error,
+            });
       setAlertRules([]);
-      setAlertMessage('알림 규칙을 불러오지 못했습니다.');
+      setAlertMessage(normalized.message);
+      setAlertsRecovery({
+        workflow: 'alerts',
+        message: normalized.message,
+        actionKind: 'retry-alerts-refresh',
+      });
+      reportOpsError({
+        source: 'alerts',
+        code: normalized.code ?? 'ALERT_RULES_FETCH_FAILED',
+        message: normalized.message,
+        level: normalized.level,
+        context: {
+          operation: 'loadAlertRules',
+          retryable: normalized.retryable,
+          ...(typeof normalized.status === 'number' ? { status: normalized.status } : {}),
+        },
+      });
+      return false;
     } finally {
       setAlertsLoading(false);
     }
-  }, [alertRuleIndicatorAwareOnly, alertRuleSymbolFilter]);
+  }, [alertRuleIndicatorAwareOnly, alertRuleSymbolFilter, reportOpsError]);
 
   const loadAlertHistory = useCallback(async () => {
     setAlertsHistoryLoading(true);
@@ -2692,17 +2878,55 @@ function App() {
       }
 
       const response = await fetch(`${apiBase}/api/alerts/history?${params.toString()}`);
-      if (!response.ok) throw new Error('alert history fetch failed');
+      if (!response.ok) {
+        let payload: unknown;
+        try {
+          payload = (await response.json()) as unknown;
+        } catch {
+          payload = undefined;
+        }
+
+        throw normalizeApiOperationError({
+          fallbackMessage: '알림 히스토리를 불러오지 못했습니다.',
+          status: response.status,
+          payload,
+        });
+      }
 
       const data = (await response.json()) as { events?: AlertHistoryEvent[] };
       setAlertHistoryEvents(data.events ?? []);
-    } catch {
+      return true;
+    } catch (error) {
+      const normalized =
+        typeof error === 'object' && error !== null && 'retryable' in error
+          ? (error as ReturnType<typeof normalizeApiOperationError>)
+          : normalizeApiOperationError({
+              fallbackMessage: '알림 히스토리를 불러오지 못했습니다.',
+              error,
+            });
       setAlertHistoryEvents([]);
-      setAlertMessage((prev) => prev ?? '알림 히스토리를 불러오지 못했습니다.');
+      setAlertMessage((prev) => prev ?? normalized.message);
+      setAlertsRecovery({
+        workflow: 'alerts',
+        message: normalized.message,
+        actionKind: 'retry-alerts-refresh',
+      });
+      reportOpsError({
+        source: 'alerts',
+        code: normalized.code ?? 'ALERT_HISTORY_FETCH_FAILED',
+        message: normalized.message,
+        level: normalized.level,
+        context: {
+          operation: 'loadAlertHistory',
+          retryable: normalized.retryable,
+          ...(typeof normalized.status === 'number' ? { status: normalized.status } : {}),
+        },
+      });
+      return false;
     } finally {
       setAlertsHistoryLoading(false);
     }
-  }, [alertHistoryIndicatorAwareOnly, alertHistorySourceFilter, alertHistorySymbolFilter]);
+  }, [alertHistoryIndicatorAwareOnly, alertHistorySourceFilter, alertHistorySymbolFilter, reportOpsError]);
 
   useEffect(() => {
     setAlertMessage(null);
@@ -3107,12 +3331,15 @@ function App() {
         if (source === 'manual') {
           setAlertMessage('관심종목에 등록된 심볼이 없습니다.');
         }
-        return;
+        return false;
       }
 
-      if (watchlistAlertCheckInFlightRef.current) return;
+      if (watchlistAlertCheckInFlightRef.current) return false;
 
       watchlistAlertCheckInFlightRef.current = true;
+      if (source === 'manual') {
+        setAlertsRecovery(null);
+      }
       if (source === 'manual') {
         setAlertsWatchlistChecking(true);
       }
@@ -3126,7 +3353,23 @@ function App() {
             ...(alertRuleIndicatorAwareOnly ? { indicatorAwareOnly: true } : {}),
           }),
         });
-        if (!response.ok) throw new Error('check watchlist alerts failed');
+        if (!response.ok) {
+          let payload: unknown;
+          try {
+            payload = (await response.json()) as unknown;
+          } catch {
+            payload = undefined;
+          }
+
+          throw normalizeApiOperationError({
+            fallbackMessage:
+              source === 'manual'
+                ? '관심종목 알림 체크에 실패했습니다.'
+                : '관심종목 자동 체크에 실패했습니다.',
+            status: response.status,
+            payload,
+          });
+        }
 
         const data = (await response.json()) as {
           checkedAt: number;
@@ -3142,14 +3385,41 @@ function App() {
         } else if (events.length > 0) {
           setAlertMessage(`자동 체크 트리거 ${events.length}건`);
         }
+        setAlertsRecovery(null);
         await loadAlertRules();
         await loadAlertHistory();
-      } catch {
-        setAlertMessage(
-          source === 'manual'
-            ? '관심종목 알림 체크에 실패했습니다.'
-            : '관심종목 자동 체크에 실패했습니다.',
-        );
+        return true;
+      } catch (error) {
+        const normalized =
+          typeof error === 'object' && error !== null && 'retryable' in error
+            ? (error as ReturnType<typeof normalizeApiOperationError>)
+            : normalizeApiOperationError({
+                fallbackMessage:
+                  source === 'manual'
+                    ? '관심종목 알림 체크에 실패했습니다.'
+                    : '관심종목 자동 체크에 실패했습니다.',
+                error,
+              });
+        setAlertMessage(normalized.message);
+        setAlertsRecovery({
+          workflow: 'alerts',
+          message: normalized.message,
+          actionKind: 'retry-alerts-refresh',
+        });
+        reportOpsError({
+          source: 'alerts',
+          code: normalized.code ?? 'ALERT_WATCHLIST_CHECK_FAILED',
+          message: normalized.message,
+          level: normalized.level,
+          context: {
+            operation: 'runWatchlistAlertCheck',
+            mode: source,
+            symbolCount: watchlistAlertSymbols.length,
+            retryable: normalized.retryable,
+            ...(typeof normalized.status === 'number' ? { status: normalized.status } : {}),
+          },
+        });
+        return false;
       } finally {
         if (source === 'manual') {
           setAlertsWatchlistChecking(false);
@@ -3162,6 +3432,7 @@ function App() {
       appendWatchlistAlertEvents,
       loadAlertHistory,
       loadAlertRules,
+      reportOpsError,
       watchlistAlertSymbols,
     ],
   );
@@ -3311,9 +3582,7 @@ function App() {
     }));
   }, [selectedInterval, selectedSymbol]);
 
-  const handleRunStrategyBacktest = useCallback(async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-
+  const runStrategyBacktest = useCallback(async () => {
     const symbol = strategyForm.symbol.trim().toUpperCase();
     const interval = strategyForm.interval.trim().toUpperCase();
     const limit = Number.parseInt(strategyForm.limit, 10);
@@ -3322,42 +3591,44 @@ function App() {
     const fixedPercent = Number(strategyForm.fixedPercent);
     const fastPeriod = Number.parseInt(strategyForm.fastPeriod, 10);
     const slowPeriod = Number.parseInt(strategyForm.slowPeriod, 10);
+    setStrategyRecovery(null);
 
     if (!symbol || !interval) {
       setStrategyError('심볼과 주기를 입력해주세요.');
-      return;
+      return false;
     }
     if (!Number.isInteger(limit) || limit < 50 || limit > 1000) {
       setStrategyError('캔들 개수는 50~1000 사이 정수여야 합니다.');
-      return;
+      return false;
     }
     if (!Number.isFinite(initialCapital) || initialCapital <= 0) {
       setStrategyError('초기 자본은 0보다 커야 합니다.');
-      return;
+      return false;
     }
     if (!Number.isFinite(feeBps) || feeBps < 0 || feeBps > 2000) {
       setStrategyError('수수료(bps)는 0~2000 범위여야 합니다.');
-      return;
+      return false;
     }
     if (!Number.isFinite(fixedPercent) || fixedPercent <= 0 || fixedPercent > 100) {
       setStrategyError('포지션 크기(%)는 0 초과 100 이하로 입력해주세요.');
-      return;
+      return false;
     }
     if (!Number.isInteger(fastPeriod) || fastPeriod < 2 || fastPeriod > 300) {
       setStrategyError('빠른 이동평균 기간은 2~300 정수여야 합니다.');
-      return;
+      return false;
     }
     if (!Number.isInteger(slowPeriod) || slowPeriod < 3 || slowPeriod > 600) {
       setStrategyError('느린 이동평균 기간은 3~600 정수여야 합니다.');
-      return;
+      return false;
     }
     if (fastPeriod >= slowPeriod) {
       setStrategyError('빠른 이동평균 기간은 느린 기간보다 작아야 합니다.');
-      return;
+      return false;
     }
 
     setStrategyLoading(true);
     setStrategyError(null);
+    setStrategyRecovery(null);
 
     try {
       const response = await fetch(`${apiBase}/api/strategy/backtest`, {
@@ -3382,28 +3653,60 @@ function App() {
       });
 
       if (!response.ok) {
-        let message = '전략 백테스트 실행에 실패했습니다.';
+        let payload: unknown;
         try {
-          const payload = (await response.json()) as { error?: string };
-          if (typeof payload.error === 'string' && payload.error.trim().length > 0) {
-            message = payload.error;
-          }
-        } catch (parseError) {
-          void parseError;
+          payload = (await response.json()) as unknown;
+        } catch {
+          payload = undefined;
         }
 
-        throw new Error(message);
+        throw normalizeApiOperationError({
+          fallbackMessage: '전략 백테스트 실행에 실패했습니다.',
+          status: response.status,
+          payload,
+        });
       }
 
       const data = (await response.json()) as StrategyBacktestResult;
       setStrategyResult(data);
+      return true;
     } catch (error) {
-      const message = error instanceof Error && error.message ? error.message : '전략 백테스트 실행에 실패했습니다.';
-      setStrategyError(message);
+      const normalized =
+        typeof error === 'object' && error !== null && 'retryable' in error
+          ? (error as ReturnType<typeof normalizeApiOperationError>)
+          : normalizeApiOperationError({
+              fallbackMessage: '전략 백테스트 실행에 실패했습니다.',
+              error,
+            });
+      setStrategyError(normalized.message);
+      setStrategyRecovery({
+        workflow: 'strategy',
+        message: normalized.message,
+        actionKind: 'retry-backtest',
+      });
+      reportOpsError({
+        source: 'strategy',
+        code: normalized.code ?? 'STRATEGY_BACKTEST_FAILED',
+        message: normalized.message,
+        level: normalized.level,
+        context: {
+          operation: 'runStrategyBacktest',
+          symbol,
+          interval,
+          retryable: normalized.retryable,
+          ...(typeof normalized.status === 'number' ? { status: normalized.status } : {}),
+        },
+      });
+      return false;
     } finally {
       setStrategyLoading(false);
     }
-  }, [strategyForm]);
+  }, [reportOpsError, strategyForm]);
+
+  const handleRunStrategyBacktest = useCallback((event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    void runStrategyBacktest();
+  }, [runStrategyBacktest]);
 
   const handleRefreshTradingState = useCallback(() => {
     void loadTradingState({ silent: hasTradingState });
@@ -3412,6 +3715,7 @@ function App() {
   const handleSubmitTradingOrder = useCallback(
     async (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
+      setTradingRecovery(null);
 
       const qtyInput = tradingOrderForm.qty.trim();
       const notionalInput = tradingOrderForm.notional.trim();
@@ -3435,6 +3739,7 @@ function App() {
 
       setTradingSubmitting(true);
       setTradingFormError(null);
+      setTradingRecovery(null);
 
       try {
         const payload: {
@@ -3462,19 +3767,18 @@ function App() {
         });
 
         if (!response.ok) {
-          let message = '주문 전송에 실패했습니다.';
-
+          let errorPayload: unknown;
           try {
-            const errorPayload = (await response.json()) as unknown;
-            const parsedMessage = readApiErrorMessage(errorPayload);
-            if (parsedMessage) {
-              message = parsedMessage;
-            }
-          } catch (parseError) {
-            void parseError;
+            errorPayload = (await response.json()) as unknown;
+          } catch {
+            errorPayload = undefined;
           }
 
-          throw new Error(message);
+          throw normalizeApiOperationError({
+            fallbackMessage: '주문 전송에 실패했습니다.',
+            status: response.status,
+            payload: errorPayload,
+          });
         }
 
         const data = (await response.json()) as { state?: TradingState };
@@ -3492,17 +3796,42 @@ function App() {
           notional: '',
         }));
       } catch (error) {
-        const message = error instanceof Error && error.message ? error.message : '주문 전송에 실패했습니다.';
-        setTradingFormError(message);
+        const normalized =
+          typeof error === 'object' && error !== null && 'retryable' in error
+            ? (error as ReturnType<typeof normalizeApiOperationError>)
+            : normalizeApiOperationError({
+                fallbackMessage: '주문 전송에 실패했습니다.',
+                error,
+              });
+        setTradingFormError(normalized.message);
+        setTradingRecovery({
+          workflow: 'trading',
+          message: normalized.message,
+          actionKind: 'retry-trading-state',
+        });
+        reportOpsError({
+          source: 'trading',
+          code: normalized.code ?? 'TRADING_ORDER_SUBMIT_FAILED',
+          message: normalized.message,
+          level: normalized.level,
+          context: {
+            operation: 'submitTradingOrder',
+            symbol: selectedSymbol,
+            side: tradingOrderForm.side,
+            retryable: normalized.retryable,
+            ...(typeof normalized.status === 'number' ? { status: normalized.status } : {}),
+          },
+        });
       } finally {
         setTradingSubmitting(false);
       }
     },
-    [loadTradingState, selectedSymbol, tradingOrderForm],
+    [loadTradingState, reportOpsError, selectedSymbol, tradingOrderForm],
   );
 
   const handleCreateAlertRule = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    setAlertsRecovery(null);
 
     const threshold = Number(alertThresholdInput);
     if (!Number.isFinite(threshold)) {
@@ -3572,13 +3901,51 @@ function App() {
         }),
       });
 
-      if (!response.ok) throw new Error('create alert rule failed');
+      if (!response.ok) {
+        let payload: unknown;
+        try {
+          payload = (await response.json()) as unknown;
+        } catch {
+          payload = undefined;
+        }
+
+        throw normalizeApiOperationError({
+          fallbackMessage: '알림 규칙 생성에 실패했습니다.',
+          status: response.status,
+          payload,
+        });
+      }
 
       setAlertThresholdInput('');
       setAlertMessage('알림 규칙이 추가되었습니다.');
+      setAlertsRecovery(null);
       await loadAlertRules();
-    } catch {
-      setAlertMessage('알림 규칙 생성에 실패했습니다.');
+    } catch (error) {
+      const normalized =
+        typeof error === 'object' && error !== null && 'retryable' in error
+          ? (error as ReturnType<typeof normalizeApiOperationError>)
+          : normalizeApiOperationError({
+              fallbackMessage: '알림 규칙 생성에 실패했습니다.',
+              error,
+            });
+      setAlertMessage(normalized.message);
+      setAlertsRecovery({
+        workflow: 'alerts',
+        message: normalized.message,
+        actionKind: 'retry-alerts-refresh',
+      });
+      reportOpsError({
+        source: 'alerts',
+        code: normalized.code ?? 'ALERT_RULE_CREATE_FAILED',
+        message: normalized.message,
+        level: normalized.level,
+        context: {
+          operation: 'handleCreateAlertRule',
+          symbol: selectedSymbol,
+          retryable: normalized.retryable,
+          ...(typeof normalized.status === 'number' ? { status: normalized.status } : {}),
+        },
+      });
     } finally {
       setAlertsSubmitting(false);
     }
@@ -3603,6 +3970,7 @@ function App() {
 
   const handleCheckAlerts = async () => {
     setAlertsChecking(true);
+    setAlertsRecovery(null);
 
     try {
       const body: {
@@ -3631,7 +3999,20 @@ function App() {
         body: JSON.stringify(body),
       });
 
-      if (!response.ok) throw new Error('check alerts failed');
+      if (!response.ok) {
+        let payload: unknown;
+        try {
+          payload = (await response.json()) as unknown;
+        } catch {
+          payload = undefined;
+        }
+
+        throw normalizeApiOperationError({
+          fallbackMessage: '알림 체크에 실패했습니다.',
+          status: response.status,
+          payload,
+        });
+      }
 
       const data = (await response.json()) as {
         evaluatedAt: number;
@@ -3648,10 +4029,37 @@ function App() {
       setAlertMessage(
         `체크 완료: ${data.checkedRuleCount}개 규칙, ${data.triggeredCount}개 트리거, 쿨다운 억제 ${data.suppressedByCooldown}개`,
       );
+      setAlertsRecovery(null);
       await loadAlertRules();
       await loadAlertHistory();
-    } catch {
-      setAlertMessage('알림 체크에 실패했습니다.');
+      return true;
+    } catch (error) {
+      const normalized =
+        typeof error === 'object' && error !== null && 'retryable' in error
+          ? (error as ReturnType<typeof normalizeApiOperationError>)
+          : normalizeApiOperationError({
+              fallbackMessage: '알림 체크에 실패했습니다.',
+              error,
+            });
+      setAlertMessage(normalized.message);
+      setAlertsRecovery({
+        workflow: 'alerts',
+        message: normalized.message,
+        actionKind: 'retry-alerts-refresh',
+      });
+      reportOpsError({
+        source: 'alerts',
+        code: normalized.code ?? 'ALERT_CHECK_FAILED',
+        message: normalized.message,
+        level: normalized.level,
+        context: {
+          operation: 'handleCheckAlerts',
+          symbol: selectedSymbol,
+          retryable: normalized.retryable,
+          ...(typeof normalized.status === 'number' ? { status: normalized.status } : {}),
+        },
+      });
+      return false;
     } finally {
       setAlertsChecking(false);
     }
@@ -3679,6 +4087,76 @@ function App() {
       setAlertsHistoryClearing(false);
     }
   };
+
+  const handleRetryStrategyBacktest = useCallback(async () => {
+    reportOpsRecovery({
+      source: 'strategy',
+      action: 'retry_backtest',
+      status: 'attempted',
+      context: {
+        workflow: 'strategy',
+      },
+    });
+
+    const ok = await runStrategyBacktest();
+
+    reportOpsRecovery({
+      source: 'strategy',
+      action: 'retry_backtest',
+      status: ok ? 'succeeded' : 'failed',
+      ...(ok ? {} : { errorCode: 'STRATEGY_BACKTEST_RETRY_FAILED' }),
+      context: {
+        workflow: 'strategy',
+      },
+    });
+  }, [reportOpsRecovery, runStrategyBacktest]);
+
+  const handleRetryTradingState = useCallback(async () => {
+    reportOpsRecovery({
+      source: 'trading',
+      action: 'retry_load_trading_state',
+      status: 'attempted',
+      context: {
+        workflow: 'trading',
+      },
+    });
+
+    const ok = await loadTradingState({ silent: hasTradingState });
+
+    reportOpsRecovery({
+      source: 'trading',
+      action: 'retry_load_trading_state',
+      status: ok ? 'succeeded' : 'failed',
+      ...(ok ? {} : { errorCode: 'TRADING_STATE_RETRY_FAILED' }),
+      context: {
+        workflow: 'trading',
+      },
+    });
+  }, [hasTradingState, loadTradingState, reportOpsRecovery]);
+
+  const handleRetryAlertsRefresh = useCallback(async () => {
+    reportOpsRecovery({
+      source: 'alerts',
+      action: 'retry_alerts_refresh',
+      status: 'attempted',
+      context: {
+        workflow: 'alerts',
+      },
+    });
+
+    const [rulesOk, historyOk] = await Promise.all([loadAlertRules(), loadAlertHistory()]);
+    const ok = rulesOk && historyOk;
+
+    reportOpsRecovery({
+      source: 'alerts',
+      action: 'retry_alerts_refresh',
+      status: ok ? 'succeeded' : 'failed',
+      ...(ok ? {} : { errorCode: 'ALERTS_REFRESH_RETRY_FAILED' }),
+      context: {
+        workflow: 'alerts',
+      },
+    });
+  }, [loadAlertHistory, loadAlertRules, reportOpsRecovery]);
 
   const getLocalChartPoint = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const area = chartAreaRef.current;
@@ -4785,6 +5263,48 @@ function App() {
     () => (strategyResult ? [...strategyResult.trades].slice(-STRATEGY_RECENT_TRADES_LIMIT).reverse() : []),
     [strategyResult],
   );
+  const opsTimelineItems = useMemo<OpsTimelineItem[]>(() => {
+    const errorItems: OpsTimelineItem[] = opsErrors.map((eventItem) => ({
+      id: `error-${eventItem.id}`,
+      kind: 'error',
+      source: eventItem.source,
+      label: `[${eventItem.level}] ${eventItem.code}`,
+      detail: eventItem.message,
+      occurredAt: eventItem.occurredAt,
+    }));
+
+    const recoveryItems: OpsTimelineItem[] = opsRecoveries.map((eventItem) => ({
+      id: `recovery-${eventItem.id}`,
+      kind: 'recovery',
+      source: eventItem.source,
+      label: `${eventItem.action} · ${eventItem.status}`,
+      detail: eventItem.message ?? eventItem.errorCode ?? '',
+      occurredAt: eventItem.occurredAt,
+    }));
+
+    return [...errorItems, ...recoveryItems]
+      .sort((a, b) => b.occurredAt - a.occurredAt)
+      .slice(0, 8);
+  }, [opsErrors, opsRecoveries]);
+  const hasOpsTimeline = opsTimelineItems.length > 0;
+  const handleRecoveryAction = useCallback(
+    (recovery: WorkflowRecoveryState | null) => {
+      if (!recovery) return;
+
+      if (recovery.actionKind === 'retry-backtest') {
+        void handleRetryStrategyBacktest();
+        return;
+      }
+
+      if (recovery.actionKind === 'retry-trading-state') {
+        void handleRetryTradingState();
+        return;
+      }
+
+      void handleRetryAlertsRefresh();
+    },
+    [handleRetryAlertsRefresh, handleRetryStrategyBacktest, handleRetryTradingState],
+  );
 
   return (
     <div className="tv-app">
@@ -5292,6 +5812,36 @@ function App() {
               </button>
             </div>
 
+            <div className="ops-mini-panel">
+              <div className="ops-mini-head">
+                <strong>운영 로그</strong>
+                <button type="button" onClick={() => void loadOpsTelemetry()} disabled={opsLoading}>
+                  {opsLoading ? '로딩중...' : '새로고침'}
+                </button>
+              </div>
+              {opsPanelError ? <p className="ops-mini-error">{opsPanelError}</p> : null}
+              {!opsPanelError && !hasOpsTimeline ? (
+                <p className="ops-mini-empty">최근 오류/복구 이벤트가 없습니다.</p>
+              ) : null}
+              {hasOpsTimeline ? (
+                <ul className="ops-mini-list">
+                  {opsTimelineItems.map((item) => (
+                    <li key={item.id}>
+                      <div className="ops-mini-row">
+                        <span className={`ops-mini-kind ${item.kind}`}>{item.kind === 'error' ? 'ERR' : 'REC'}</span>
+                        <span className="ops-mini-label">{item.label}</span>
+                      </div>
+                      <div className="ops-mini-sub">
+                        <span>{item.source}</span>
+                        <span>{new Date(item.occurredAt).toLocaleTimeString('ko-KR')}</span>
+                        {item.detail ? <span>{item.detail}</span> : null}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+
             <div className={`right-panel-body${watchTab === 'watchlist' ? ' watchlist-body' : ''}`}>
               {watchTab === 'watchlist' ? (
                 <>
@@ -5445,6 +5995,19 @@ function App() {
                   <h4>
                     {selectedCode} · 알림 규칙
                   </h4>
+
+                  {alertsRecovery ? (
+                    <div className="workflow-recovery-banner">
+                      <span>{alertsRecovery.message}</span>
+                      <button
+                        type="button"
+                        onClick={() => handleRecoveryAction(alertsRecovery)}
+                        disabled={alertsLoading || alertsChecking || alertsWatchlistChecking || alertsSubmitting}
+                      >
+                        다시 시도
+                      </button>
+                    </div>
+                  ) : null}
 
                   <form className="alert-form" onSubmit={handleCreateAlertRule}>
                     <div className="alert-form-row">
@@ -5928,6 +6491,14 @@ function App() {
                   </button>
                 </div>
 
+                {strategyRecovery ? (
+                  <div className="workflow-recovery-banner">
+                    <span>{strategyRecovery.message}</span>
+                    <button type="button" onClick={() => handleRecoveryAction(strategyRecovery)} disabled={strategyLoading}>
+                      다시 시도
+                    </button>
+                  </div>
+                ) : null}
                 {strategyError ? <p className="strategy-error">{strategyError}</p> : null}
               </form>
 
@@ -6047,6 +6618,18 @@ function App() {
                 </div>
               </div>
 
+              {tradingRecovery ? (
+                <div className="workflow-recovery-banner">
+                  <span>{tradingRecovery.message}</span>
+                  <button
+                    type="button"
+                    onClick={() => handleRecoveryAction(tradingRecovery)}
+                    disabled={tradingLoading || tradingRefreshing || tradingSubmitting}
+                  >
+                    다시 시도
+                  </button>
+                </div>
+              ) : null}
               {tradingError ? <p className="trading-error">{tradingError}</p> : null}
 
               {tradingLoading && !tradingState ? (

@@ -120,8 +120,8 @@ Progress note (2026-02-28):
 - M4-1 completed: MA crossover strategy tester runtime is now available via `POST /api/strategy/backtest` with deterministic metrics/trade history/equity-drawdown curves, API validation tests + math utility tests, and a functional `전략 테스터` panel in `apps/web` (inputs, run/loading/error states, summary cards, mini charts, recent trades, localStorage input persistence).
 - M4-2 completed: paper-trading workflows are now available via `GET /api/trading/state`, `POST /api/trading/orders`, and `POST /api/trading/orders/:id/cancel` with runtime-state persistence, deterministic market fills from latest quote, and a functional `트레이딩 패널` UI (order entry, positions, order/fill history, refresh/loading/error states, in-flight submit locking).
 - M4-3 completed: chart/layout UI state now uses unified versioned persistence with migration-safe reads (legacy `tradingservice.chartlayout.v1` -> current schema), explicit schema versioning, and fail-safe fallback to defaults on corrupt/unsupported payloads.
-- Remaining M4 items:
-  - M4-4: Operational hardening (error telemetry and recovery UX).
+- M4-4 completed: operational telemetry + recovery hardening is now in place with strict telemetry ingestion (`GET/POST /api/ops/errors`, `POST /api/ops/recovery`), bounded in-memory/runtime-state retention (latest 500 errors and 500 recovery events), centralized web API error normalization, non-blocking recovery banners + retry actions across alerts/strategy/trading, and a compact right-panel operational log for recent error/recovery inspection.
+- M4 status: complete.
 
 DoD:
 - Strategy outputs are reproducible for same input dataset/config.

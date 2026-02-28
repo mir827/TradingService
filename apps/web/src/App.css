@@ -746,7 +746,7 @@ select {
   min-width: 0;
   overflow: hidden;
   display: grid;
-  grid-template-rows: 44px 36px minmax(0, 1fr);
+  grid-template-rows: 44px 36px auto minmax(0, 1fr);
   position: relative;
   z-index: 2;
 }
@@ -804,6 +804,115 @@ select {
   align-items: center;
   justify-content: center;
   padding: 0 5px;
+}
+
+.ops-mini-panel {
+  border-bottom: 1px solid #273146;
+  background: #101723;
+  padding: 8px 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.ops-mini-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ops-mini-head strong {
+  font-size: 11px;
+  color: #9db5d8;
+}
+
+.ops-mini-head button {
+  border: 1px solid #36557d;
+  background: #16273a;
+  color: #b8d8ff;
+  border-radius: 6px;
+  font-size: 10px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.ops-mini-head button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.ops-mini-error {
+  margin: 0;
+  font-size: 11px;
+  color: #ff9fa6;
+}
+
+.ops-mini-empty {
+  margin: 0;
+  font-size: 11px;
+  color: #8f97a7;
+}
+
+.right-panel .ops-mini-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  max-height: 130px;
+  overflow: auto;
+}
+
+.right-panel .ops-mini-list li {
+  border: 1px solid #2d3750;
+  border-radius: 6px;
+  padding: 6px 7px;
+  background: #131b2a;
+  cursor: default;
+}
+
+.ops-mini-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.ops-mini-kind {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 9px;
+  line-height: 1.3;
+  letter-spacing: 0.2px;
+}
+
+.ops-mini-kind.error {
+  border-color: #76404d;
+  background: #351e25;
+  color: #ffb4bf;
+}
+
+.ops-mini-kind.recovery {
+  border-color: #3a5d80;
+  background: #1a2d44;
+  color: #b8ddff;
+}
+
+.ops-mini-label {
+  color: #d1d8e4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ops-mini-sub {
+  margin-top: 3px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 10px;
+  color: #8892a5;
 }
 
 .watch-search-wrap {
@@ -1223,6 +1332,35 @@ select {
   margin: 0;
   font-size: 11px;
   color: #9fc4ff;
+}
+
+.workflow-recovery-banner {
+  border: 1px solid #6b4634;
+  background: #2d2119;
+  color: #ffd7a6;
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.workflow-recovery-banner button {
+  border: 1px solid #8b603f;
+  background: #3b2b20;
+  color: #ffd7a6;
+  border-radius: 6px;
+  padding: 5px 9px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.workflow-recovery-banner button:disabled {
+  opacity: 0.65;
+  cursor: default;
 }
 
 .alert-empty {

@@ -188,6 +188,35 @@ type TradingErrorCode =
   | 'ORDER_NOT_FOUND'
   | 'ORDER_NOT_CANCELABLE';
 
+type OpsTelemetryLevel = 'recoverable' | 'critical';
+type OpsTelemetrySource = 'web' | 'api' | 'alerts' | 'strategy' | 'trading' | 'chart' | 'watchlist';
+type OpsRecoveryStatus = 'attempted' | 'succeeded' | 'failed';
+type OpsTelemetryContextValue = string | number | boolean | null;
+type OpsTelemetryContext = Record<string, OpsTelemetryContextValue>;
+
+type OpsErrorEvent = {
+  id: string;
+  level: OpsTelemetryLevel;
+  source: OpsTelemetrySource;
+  code: string;
+  message: string;
+  context?: OpsTelemetryContext;
+  occurredAt: number;
+  recordedAt: number;
+};
+
+type OpsRecoveryEvent = {
+  id: string;
+  source: OpsTelemetrySource;
+  action: string;
+  status: OpsRecoveryStatus;
+  message?: string;
+  errorCode?: string;
+  context?: OpsTelemetryContext;
+  occurredAt: number;
+  recordedAt: number;
+};
+
 export const app = Fastify({ logger: true });
 
 await app.register(cors, {
@@ -224,10 +253,12 @@ const quoteCache = new Map<string, { expiresAt: number; value: Quote }>();
 const candleCache = new Map<string, { expiresAt: number; value: Candle[] }>();
 const alertRuleStore = new Map<string, AlertRule>();
 const alertHistoryStore: AlertHistoryEvent[] = [];
+const opsErrorStore: OpsErrorEvent[] = [];
+const opsRecoveryStore: OpsRecoveryEvent[] = [];
 const drawingStore = new Map<string, DrawingItem[]>();
 const watchlistStore = new Map<string, SymbolItem[]>();
 const DEFAULT_RUNTIME_STATE_FILE = './outputs/runtime-state.json';
-const RUNTIME_STATE_VERSION = 3;
+const RUNTIME_STATE_VERSION = 4;
 const PAPER_TRADING_MODE: TradingMode = 'PAPER';
 const PAPER_TRADING_DEFAULT_STARTING_CASH = 100_000;
 const PAPER_TRADING_VALUE_PRECISION = 8;
@@ -243,6 +274,8 @@ const ALERT_MACD_SLOW_DEFAULT_PERIOD = 26;
 const ALERT_MACD_SIGNAL_DEFAULT_PERIOD = 9;
 const ALERT_BOLLINGER_DEFAULT_PERIOD = 20;
 const ALERT_BOLLINGER_DEFAULT_STD_DEV = 2;
+const OPS_ERROR_MAX_EVENTS = 500;
+const OPS_RECOVERY_MAX_EVENTS = 500;
 const paperTradingState = createInitialPaperTradingState();
 
 const cryptoIntervalMap: Record<string, string> = {
@@ -338,6 +371,52 @@ const watchlistPutBodySchema = z.object({
   name: z.string().trim().min(1).optional(),
   items: z.array(symbolItemSchema),
 });
+
+const opsTelemetryLevelSchema = z.enum(['recoverable', 'critical']);
+const opsTelemetrySourceSchema = z.enum(['web', 'api', 'alerts', 'strategy', 'trading', 'chart', 'watchlist']);
+const opsRecoveryStatusSchema = z.enum(['attempted', 'succeeded', 'failed']);
+const opsTelemetryCodeSchema = z
+  .string()
+  .trim()
+  .min(2)
+  .max(64)
+  .regex(/^[A-Z0-9_]+$/);
+const opsTelemetryContextValueSchema = z.union([z.string().max(400), z.number().finite(), z.boolean(), z.null()]);
+const opsTelemetryContextSchema = z
+  .record(z.string().trim().min(1).max(64), opsTelemetryContextValueSchema)
+  .refine((context) => Object.keys(context).length <= 20, {
+    message: 'context must have 20 keys or fewer',
+  });
+
+const opsErrorsQuerySchema = z.object({
+  level: opsTelemetryLevelSchema.optional(),
+  source: opsTelemetrySourceSchema.optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  recoveryLimit: z.coerce.number().int().min(0).max(200).default(20),
+});
+
+const opsErrorCreateBodySchema = z
+  .object({
+    level: opsTelemetryLevelSchema,
+    source: opsTelemetrySourceSchema,
+    code: opsTelemetryCodeSchema,
+    message: z.string().trim().min(1).max(400),
+    context: opsTelemetryContextSchema.optional(),
+    occurredAt: z.coerce.number().int().nonnegative().optional(),
+  })
+  .strict();
+
+const opsRecoveryCreateBodySchema = z
+  .object({
+    source: opsTelemetrySourceSchema,
+    action: z.string().trim().min(1).max(80),
+    status: opsRecoveryStatusSchema,
+    message: z.string().trim().min(1).max(400).optional(),
+    errorCode: opsTelemetryCodeSchema.optional(),
+    context: opsTelemetryContextSchema.optional(),
+    occurredAt: z.coerce.number().int().nonnegative().optional(),
+  })
+  .strict();
 
 const alertQuerySymbolsSchema = z.preprocess((value) => {
   if (typeof value === 'string') {
@@ -644,6 +723,29 @@ const persistedAlertHistoryEventSchema = z.object({
   sourceSymbol: z.string().trim().min(1).optional(),
 });
 
+const persistedOpsErrorEventSchema = z.object({
+  id: z.string().trim().min(1),
+  level: opsTelemetryLevelSchema,
+  source: opsTelemetrySourceSchema,
+  code: opsTelemetryCodeSchema,
+  message: z.string().trim().min(1).max(400),
+  context: opsTelemetryContextSchema.optional(),
+  occurredAt: z.coerce.number().int().nonnegative(),
+  recordedAt: z.coerce.number().int().nonnegative(),
+});
+
+const persistedOpsRecoveryEventSchema = z.object({
+  id: z.string().trim().min(1),
+  source: opsTelemetrySourceSchema,
+  action: z.string().trim().min(1).max(80),
+  status: opsRecoveryStatusSchema,
+  message: z.string().trim().min(1).max(400).optional(),
+  errorCode: opsTelemetryCodeSchema.optional(),
+  context: opsTelemetryContextSchema.optional(),
+  occurredAt: z.coerce.number().int().nonnegative(),
+  recordedAt: z.coerce.number().int().nonnegative(),
+});
+
 const persistedWatchlistEntrySchema = z.object({
   name: z.string().trim().min(1),
   items: z.array(z.unknown()),
@@ -660,6 +762,8 @@ const persistedRuntimeStateSchema = z
     version: z.coerce.number().int().min(1).optional(),
     alertRules: z.array(z.unknown()).optional(),
     alertHistory: z.array(z.unknown()).optional(),
+    opsErrors: z.array(z.unknown()).optional(),
+    opsRecoveries: z.array(z.unknown()).optional(),
     watchlists: z.array(z.unknown()).optional(),
     drawings: z.array(z.unknown()).optional(),
     trading: z.unknown().optional(),
@@ -790,6 +894,123 @@ function trimAlertHistoryOverflow() {
   }
 }
 
+function createOpsErrorEventId() {
+  return `opserr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createOpsRecoveryEventId() {
+  return `opsrec_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function trimOpsErrorOverflow() {
+  const overflow = opsErrorStore.length - OPS_ERROR_MAX_EVENTS;
+  if (overflow > 0) {
+    opsErrorStore.splice(0, overflow);
+  }
+}
+
+function trimOpsRecoveryOverflow() {
+  const overflow = opsRecoveryStore.length - OPS_RECOVERY_MAX_EVENTS;
+  if (overflow > 0) {
+    opsRecoveryStore.splice(0, overflow);
+  }
+}
+
+function cloneOpsContext(context?: OpsTelemetryContext) {
+  return context ? { ...context } : undefined;
+}
+
+function recordOpsErrorEvent(input: {
+  level: OpsTelemetryLevel;
+  source: OpsTelemetrySource;
+  code: string;
+  message: string;
+  context?: OpsTelemetryContext;
+  occurredAt?: number;
+}) {
+  const now = Date.now();
+  const event: OpsErrorEvent = {
+    id: createOpsErrorEventId(),
+    level: input.level,
+    source: input.source,
+    code: input.code,
+    message: input.message,
+    ...(input.context ? { context: cloneOpsContext(input.context) } : {}),
+    occurredAt: input.occurredAt ?? now,
+    recordedAt: now,
+  };
+
+  opsErrorStore.push(event);
+  trimOpsErrorOverflow();
+  return event;
+}
+
+function recordOpsRecoveryEvent(input: {
+  source: OpsTelemetrySource;
+  action: string;
+  status: OpsRecoveryStatus;
+  message?: string;
+  errorCode?: string;
+  context?: OpsTelemetryContext;
+  occurredAt?: number;
+}) {
+  const now = Date.now();
+  const event: OpsRecoveryEvent = {
+    id: createOpsRecoveryEventId(),
+    source: input.source,
+    action: input.action,
+    status: input.status,
+    ...(input.message ? { message: input.message } : {}),
+    ...(input.errorCode ? { errorCode: input.errorCode } : {}),
+    ...(input.context ? { context: cloneOpsContext(input.context) } : {}),
+    occurredAt: input.occurredAt ?? now,
+    recordedAt: now,
+  };
+
+  opsRecoveryStore.push(event);
+  trimOpsRecoveryOverflow();
+  return event;
+}
+
+function getOpsErrorEvents(level: OpsTelemetryLevel | null, source: OpsTelemetrySource | null, limit: number) {
+  const filtered = opsErrorStore.filter((eventItem) => {
+    if (level && eventItem.level !== level) {
+      return false;
+    }
+
+    if (source && eventItem.source !== source) {
+      return false;
+    }
+
+    return true;
+  });
+
+  const total = filtered.length;
+  const start = Math.max(total - limit, 0);
+
+  return {
+    total,
+    events: filtered.slice(start).reverse().map((eventItem) => ({
+      ...eventItem,
+      ...(eventItem.context ? { context: cloneOpsContext(eventItem.context) } : {}),
+    })),
+  };
+}
+
+function getOpsRecoveryEvents(source: OpsTelemetrySource | null, limit: number) {
+  const filtered = source ? opsRecoveryStore.filter((eventItem) => eventItem.source === source) : opsRecoveryStore;
+  const total = filtered.length;
+  const start = Math.max(total - limit, 0);
+
+  return {
+    total,
+    events: filtered.slice(start).reverse().map((eventItem) => ({
+      ...eventItem,
+      ...(eventItem.context ? { context: cloneOpsContext(eventItem.context) } : {}),
+    })),
+  };
+}
+
 function roundTradingValue(value: number, precision = PAPER_TRADING_VALUE_PRECISION) {
   if (!Number.isFinite(value)) return 0;
   return Number(value.toFixed(precision));
@@ -865,6 +1086,22 @@ function sendTradingError(
   reply: FastifyReply,
   statusCode: number,
   code: TradingErrorCode,
+  message: string,
+  detail?: unknown,
+) {
+  return reply.code(statusCode).send({
+    error: {
+      code,
+      message,
+      ...(detail !== undefined ? { detail } : {}),
+    },
+  });
+}
+
+function sendOpsTelemetryError(
+  reply: FastifyReply,
+  statusCode: number,
+  code: 'VALIDATION_ERROR',
   message: string,
   detail?: unknown,
 ) {
@@ -1247,6 +1484,14 @@ function createRuntimeStatePayload() {
     version: RUNTIME_STATE_VERSION,
     alertRules: [...alertRuleStore.values()].map(serializeAlertRule),
     alertHistory: alertHistoryStore.map((eventItem) => ({ ...eventItem })),
+    opsErrors: opsErrorStore.map((eventItem) => ({
+      ...eventItem,
+      ...(eventItem.context ? { context: cloneOpsContext(eventItem.context) } : {}),
+    })),
+    opsRecoveries: opsRecoveryStore.map((eventItem) => ({
+      ...eventItem,
+      ...(eventItem.context ? { context: cloneOpsContext(eventItem.context) } : {}),
+    })),
     watchlists: [...watchlistStore.entries()].map(([name, items]) => ({
       name,
       items: items.map(cloneSymbolItem),
@@ -1328,6 +1573,8 @@ async function loadRuntimeStateFromDisk() {
 
   alertRuleStore.clear();
   alertHistoryStore.length = 0;
+  opsErrorStore.length = 0;
+  opsRecoveryStore.length = 0;
   watchlistStore.clear();
   drawingStore.clear();
   resetPaperTradingState();
@@ -1386,6 +1633,53 @@ async function loadRuntimeStateFromDisk() {
     alertHistoryStore.push(normalizedEvent);
   }
   trimAlertHistoryOverflow();
+
+  let skippedOpsErrors = 0;
+  for (const rawEvent of parsedState.data.opsErrors ?? []) {
+    const parsedEvent = persistedOpsErrorEventSchema.safeParse(rawEvent);
+    if (!parsedEvent.success) {
+      skippedOpsErrors += 1;
+      continue;
+    }
+
+    const normalizedEvent: OpsErrorEvent = {
+      id: parsedEvent.data.id.trim(),
+      level: parsedEvent.data.level,
+      source: parsedEvent.data.source,
+      code: parsedEvent.data.code,
+      message: parsedEvent.data.message,
+      ...(parsedEvent.data.context ? { context: cloneOpsContext(parsedEvent.data.context) } : {}),
+      occurredAt: parsedEvent.data.occurredAt,
+      recordedAt: parsedEvent.data.recordedAt,
+    };
+
+    opsErrorStore.push(normalizedEvent);
+  }
+  trimOpsErrorOverflow();
+
+  let skippedOpsRecoveries = 0;
+  for (const rawEvent of parsedState.data.opsRecoveries ?? []) {
+    const parsedEvent = persistedOpsRecoveryEventSchema.safeParse(rawEvent);
+    if (!parsedEvent.success) {
+      skippedOpsRecoveries += 1;
+      continue;
+    }
+
+    const normalizedEvent: OpsRecoveryEvent = {
+      id: parsedEvent.data.id.trim(),
+      source: parsedEvent.data.source,
+      action: parsedEvent.data.action,
+      status: parsedEvent.data.status,
+      ...(parsedEvent.data.message ? { message: parsedEvent.data.message } : {}),
+      ...(parsedEvent.data.errorCode ? { errorCode: parsedEvent.data.errorCode } : {}),
+      ...(parsedEvent.data.context ? { context: cloneOpsContext(parsedEvent.data.context) } : {}),
+      occurredAt: parsedEvent.data.occurredAt,
+      recordedAt: parsedEvent.data.recordedAt,
+    };
+
+    opsRecoveryStore.push(normalizedEvent);
+  }
+  trimOpsRecoveryOverflow();
 
   let skippedWatchlists = 0;
   let skippedWatchlistItems = 0;
@@ -1446,6 +1740,8 @@ async function loadRuntimeStateFromDisk() {
       restored: {
         alertRules: alertRuleStore.size,
         alertHistoryEvents: alertHistoryStore.length,
+        opsErrors: opsErrorStore.length,
+        opsRecoveries: opsRecoveryStore.length,
         watchlists: watchlistStore.size,
         drawingSets: drawingStore.size,
         tradingPositions: paperTradingState.positions.size,
@@ -1455,6 +1751,8 @@ async function loadRuntimeStateFromDisk() {
       skipped: {
         alertRules: skippedAlertRules,
         alertHistoryEvents: skippedAlertHistoryEvents,
+        opsErrors: skippedOpsErrors,
+        opsRecoveries: skippedOpsRecoveries,
         watchlists: skippedWatchlists,
         watchlistItems: skippedWatchlistItems,
         drawingCollections: skippedDrawingCollections,
@@ -2207,6 +2505,79 @@ app.get('/health', async () => ({
   service: 'tradingservice-api',
   krxSymbolCount: krxSymbols.length,
 }));
+
+app.get('/api/ops/errors', async (request, reply) => {
+  const parsed = opsErrorsQuerySchema.safeParse(request.query);
+
+  if (!parsed.success) {
+    return sendOpsTelemetryError(reply, 400, 'VALIDATION_ERROR', 'Invalid query', parsed.error.format());
+  }
+
+  const level = parsed.data.level ?? null;
+  const source = parsed.data.source ?? null;
+  const errors = getOpsErrorEvents(level, source, parsed.data.limit);
+  const recoveries = getOpsRecoveryEvents(source, parsed.data.recoveryLimit);
+
+  return {
+    total: errors.total,
+    limit: parsed.data.limit,
+    errors: errors.events,
+    recoveryTotal: recoveries.total,
+    recoveryLimit: parsed.data.recoveryLimit,
+    recoveries: recoveries.events,
+  };
+});
+
+app.post('/api/ops/errors', async (request, reply) => {
+  const parsed = opsErrorCreateBodySchema.safeParse(request.body ?? {});
+
+  if (!parsed.success) {
+    return sendOpsTelemetryError(reply, 400, 'VALIDATION_ERROR', 'Invalid body', parsed.error.format());
+  }
+
+  const event = recordOpsErrorEvent({
+    level: parsed.data.level,
+    source: parsed.data.source,
+    code: parsed.data.code,
+    message: parsed.data.message,
+    ...(parsed.data.context ? { context: parsed.data.context } : {}),
+    occurredAt: parsed.data.occurredAt,
+  });
+  await persistRuntimeState();
+
+  return reply.code(201).send({
+    event: {
+      ...event,
+      ...(event.context ? { context: cloneOpsContext(event.context) } : {}),
+    },
+  });
+});
+
+app.post('/api/ops/recovery', async (request, reply) => {
+  const parsed = opsRecoveryCreateBodySchema.safeParse(request.body ?? {});
+
+  if (!parsed.success) {
+    return sendOpsTelemetryError(reply, 400, 'VALIDATION_ERROR', 'Invalid body', parsed.error.format());
+  }
+
+  const event = recordOpsRecoveryEvent({
+    source: parsed.data.source,
+    action: parsed.data.action,
+    status: parsed.data.status,
+    ...(parsed.data.message ? { message: parsed.data.message } : {}),
+    ...(parsed.data.errorCode ? { errorCode: parsed.data.errorCode } : {}),
+    ...(parsed.data.context ? { context: parsed.data.context } : {}),
+    occurredAt: parsed.data.occurredAt,
+  });
+  await persistRuntimeState();
+
+  return reply.code(201).send({
+    event: {
+      ...event,
+      ...(event.context ? { context: cloneOpsContext(event.context) } : {}),
+    },
+  });
+});
 
 app.get('/api/symbols', async () => {
   try {
