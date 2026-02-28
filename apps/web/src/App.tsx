@@ -65,12 +65,12 @@ import {
 import {
   applyLogicalRangeSync,
   createChartRangeSyncState,
-  normalizeChartLayoutMode,
   shouldSkipSyncedRangeEvent,
   type ChartLayoutMode,
   type ChartSyncSource,
   type LogicalRangeLike,
 } from './lib/chartLayout';
+import { readUnifiedLayoutState, writeUnifiedLayoutState } from './lib/layoutPersistence';
 
 type SymbolItem = {
   symbol: string;
@@ -480,7 +480,6 @@ const apiBase = import.meta.env.VITE_API_BASE_URL ?? '';
 const WATCH_PREFS_STORAGE_KEY = 'tradingservice.watchprefs.v1';
 const ALERT_AUTO_CHECK_STORAGE_KEY = 'tradingservice.alerts.autocheck.v1';
 const INDICATOR_PREFS_STORAGE_KEY = 'tradingservice.indicators.v2';
-const CHART_LAYOUT_STORAGE_KEY = 'tradingservice.chartlayout.v1';
 const STRATEGY_TESTER_STORAGE_KEY = 'tradingservice.strategytester.v1';
 const DEFAULT_WATCHLIST_NAME = 'default';
 const ALERT_EVENT_DEDUP_WINDOW_MS = 10_000;
@@ -659,17 +658,6 @@ function getStoredIndicatorPrefs(): IndicatorPrefs {
     };
   } catch {
     return defaults;
-  }
-}
-
-function getStoredChartLayoutMode(): ChartLayoutMode {
-  if (typeof window === 'undefined') return 'single';
-
-  try {
-    const raw = window.localStorage.getItem(CHART_LAYOUT_STORAGE_KEY);
-    return normalizeChartLayoutMode(raw);
-  } catch {
-    return 'single';
   }
 }
 
@@ -958,7 +946,7 @@ function App() {
   const [watchlistSymbols, setWatchlistSymbols] = useState<SymbolItem[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState('BTCUSDT');
   const [selectedInterval, setSelectedInterval] = useState('60');
-  const [chartLayoutMode, setChartLayoutMode] = useState<ChartLayoutMode>(() => getStoredChartLayoutMode());
+  const [chartLayoutMode, setChartLayoutMode] = useState<ChartLayoutMode>(() => readUnifiedLayoutState().chartLayoutMode);
   const [candles, setCandles] = useState<Candle[]>([]);
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
   const [marketStatus, setMarketStatus] = useState<MarketStatus | null>(null);
@@ -1747,7 +1735,7 @@ function App() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    window.localStorage.setItem(CHART_LAYOUT_STORAGE_KEY, chartLayoutMode);
+    writeUnifiedLayoutState({ chartLayoutMode });
   }, [chartLayoutMode]);
 
   useEffect(() => {

@@ -119,8 +119,8 @@ Deliverables:
 Progress note (2026-02-28):
 - M4-1 completed: MA crossover strategy tester runtime is now available via `POST /api/strategy/backtest` with deterministic metrics/trade history/equity-drawdown curves, API validation tests + math utility tests, and a functional `전략 테스터` panel in `apps/web` (inputs, run/loading/error states, summary cards, mini charts, recent trades, localStorage input persistence).
 - M4-2 completed: paper-trading workflows are now available via `GET /api/trading/state`, `POST /api/trading/orders`, and `POST /api/trading/orders/:id/cancel` with runtime-state persistence, deterministic market fills from latest quote, and a functional `트레이딩 패널` UI (order entry, positions, order/fill history, refresh/loading/error states, in-flight submit locking).
+- M4-3 completed: chart/layout UI state now uses unified versioned persistence with migration-safe reads (legacy `tradingservice.chartlayout.v1` -> current schema), explicit schema versioning, and fail-safe fallback to defaults on corrupt/unsupported payloads.
 - Remaining M4 items:
-  - M4-3: Unified chart layout persistence + migration versioning.
   - M4-4: Operational hardening (error telemetry and recovery UX).
 
 DoD:
@@ -133,3 +133,99 @@ DoD:
 - Keep `apps/web/src/App.tsx` changes incremental until chart features are split into modules.
 - Prefer pure math utilities in `apps/web/src/lib` with tests before adding new overlays.
 - Protect existing flows (watchlist, alerts, drawings) with regression checks on every milestone.
+
+## M5 후보 - TradingView 실용 기능 갭 보완 (Sub-agent review)
+
+### P0 (즉시 체감 + 운영 안정성 영향 큼)
+
+1) 
+- 기능명: 차트 작업 Undo/Redo 히스토리 (드로잉/지표/비교/레이아웃)
+- 사용자 가치: 실수 복구가 즉시 가능해져 분석 탐색 속도가 올라가고, 드로잉/지표 실험에 대한 심리적 비용이 크게 줄어듦.
+- 구현 난이도: 중간
+- 선행조건: M4-3(통합 레이아웃 persistence) 완료, 차트 상태 변경 이벤트를 단일 액션 형태로 수집 가능해야 함.
+- 완료기준(DoD):
+  - `Ctrl/Cmd+Z`, `Ctrl/Cmd+Shift+Z` 단축키로 최근 액션 50개 이상 안정 복원.
+  - 드로잉 추가/이동/삭제, 지표 on/off/파라미터 변경, 비교 종목 추가/삭제가 모두 히스토리 대상.
+  - Undo/Redo 수행 후에도 저장 포맷 무결성 유지(새로고침 후 상태 동일).
+  - 주요 액션 시나리오 회귀 테스트 추가.
+
+2) 
+- 기능명: 알림 운영화 v2 (상태 머신 + 중복 억제 + 인앱 알림센터)
+- 사용자 가치: 알림 "왜 안 왔는지/왜 여러 번 왔는지"를 추적 가능하게 만들어 신뢰도를 높이고 실사용 가능성을 크게 개선.
+- 구현 난이도: 중간
+- 선행조건: M3-4(지표 기반 알림) 완료 상태 유지, M4-4(오류 telemetry)와 연동 가능한 이벤트 로깅 경로 필요.
+- 완료기준(DoD):
+  - Alert 상태(`active/triggered/cooldown/error`)와 마지막 트리거 메타데이터 저장.
+  - 동일 조건 연속 발생 시 설정 가능한 cooldown으로 중복 알림 억제.
+  - 우측 패널에 알림센터(최근 이벤트, 상태 필터, 실패 원인) 제공.
+  - 백엔드/프론트 양쪽에서 상태 전이 테스트 통과.
+
+3) 
+- 기능명: 트레이딩 패널 고급 주문 (지정가/스탑 + 브래킷 TP/SL)
+- 사용자 가치: 단순 시장가 중심에서 벗어나 실제 매매 습관에 가까운 리스크 관리(손절/익절) 연습 가능.
+- 구현 난이도: 높음
+- 선행조건: M4-2(주문 상태/체결 엔진) 안정화, 가격 피드 기준 체결 규칙(캔들 high/low 기반) 명세 확정.
+- 완료기준(DoD):
+  - 지정가/스탑 주문 생성/취소/체결 처리 및 브래킷(TP/SL) 연결 지원.
+  - 주문 간 연결관계(OCO 유사) 무결성 유지 및 예외 케이스(갭, 급변) 처리.
+  - UI에서 주문 유형/조건 입력, 주문 리스트 상태 표시, 실패 사유 노출.
+  - 체결 시뮬레이션 회귀 테스트 + API 계약 테스트 추가.
+
+### P1 (분석 생산성/활용도 확장)
+
+4) 
+- 기능명: 드로잉 오브젝트 패널 (목록/잠금/숨김)
+- 사용자 가치: 드로잉이 많아져도 차트 정리와 재사용이 쉬워져 장기 분석 워크플로우가 안정화됨.
+- 구현 난이도: 중간
+- 선행조건: M2 직렬화 포맷에서 엔티티 ID 일관성 확보, 선택 상태 관리 로직 재사용 가능해야 함.
+- 완료기준(DoD):
+  - 오브젝트 목록에서 선택/이름표시/타입표시 지원.
+  - 개별 잠금(lock)/숨김(visibility) 토글 및 상태 persistence.
+  - 잠금된 오브젝트는 드래그/삭제 불가, 숨김 오브젝트는 렌더 제외.
+  - 대량 오브젝트(100개+)에서도 조작 지연이 허용 범위 내 유지.
+
+5) 
+- 기능명: 비교 오버레이 확장 (다중 종목 + 스케일 모드)
+- 사용자 가치: 업종/테마 상대강도 비교가 가능해져 실전 의사결정(무엇이 더 강한가)에 직접 도움.
+- 구현 난이도: 중간
+- 선행조건: M1 비교 오버레이 파이프라인 유지, 색상/범례 시스템 확장 가능해야 함.
+- 완료기준(DoD):
+  - 비교 종목 최대 3개 동시 표시, 개별 on/off/remove 지원.
+  - `% 정규화`와 `절대값` 모드 전환 제공(기준 시점 명확화).
+  - 한 종목 fetch 실패 시 다른 오버레이/기본 차트 영향 없음.
+  - 범례에서 종목별 값/색상 일관성 유지.
+
+6) 
+- 기능명: 백테스트 현실화 옵션 (수수료/슬리피지/포지션 사이징)
+- 사용자 가치: 과최적화된 성과 착시를 줄이고 전략 결과를 실제에 더 가깝게 해석 가능.
+- 구현 난이도: 중간
+- 선행조건: M4-1 전략 엔진의 체결/손익 계산 모듈 분리, 입력 검증 스키마 확장.
+- 완료기준(DoD):
+  - 수수료율, 슬리피지(tick 또는 %) 옵션 입력 및 저장.
+  - 고정 수량/자본 비율 기반 포지션 사이징 선택 가능.
+  - 결과 화면에서 gross vs net 성과를 분리 표시.
+  - 동일 입력 재실행 시 결정론적 결과 보장 테스트 통과.
+
+### P2 (완성도/편의성 보강)
+
+7) 
+- 기능명: Data Window / Crosshair 인스펙터
+- 사용자 가치: 특정 캔들의 OHLCV·지표값을 정밀 확인/복사할 수 있어 리뷰·공유 품질 향상.
+- 구현 난이도: 낮음
+- 선행조건: 현재 crosshair 이벤트에서 시점별 지표 계산값 접근 가능해야 함.
+- 완료기준(DoD):
+  - 커서 위치 기준 OHLCV + 활성 지표값 표시.
+  - 단일 클릭으로 값 복사(클립보드) 지원.
+  - replay/multi-chart 모드에서도 동일 동작.
+  - 렌더 성능 저하 없이 동작(기존 FPS budget 유지).
+
+8) 
+- 기능명: 탐색 속도 개선 UX (타임프레임 즐겨찾기 + 단축키)
+- 사용자 가치: 반복 조회 시 클릭 수를 줄여 분석 리듬을 개선하고 초보자도 빠르게 익숙해짐.
+- 구현 난이도: 낮음
+- 선행조건: 기존 interval state/persistence 재사용, 전역 단축키 충돌 정책 정의.
+- 완료기준(DoD):
+  - 사용자 정의 즐겨찾기 interval 저장/정렬/삭제.
+  - 숫자키 또는 커스텀 단축키로 interval 즉시 전환.
+  - 전환 후 차트/지표/비교 상태가 안정적으로 유지.
+  - 접근성(포커스 상태/툴팁) 및 기본 회귀 테스트 통과.
