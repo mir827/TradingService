@@ -1301,16 +1301,78 @@ select {
   font-size: 12px;
 }
 
-.detail-nxt-section {
+.detail-venue-section {
   margin-top: 12px;
   padding-top: 10px;
   border-top: 1px solid #2b2f3a;
+  display: grid;
+  gap: 8px;
 }
 
-.detail-nxt-section h5 {
-  margin: 0 0 8px;
+.detail-venue-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.detail-venue-section-head h5 {
+  margin: 0;
   font-size: 12px;
   color: #9aa1b1;
+}
+
+.detail-venue-session-list {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.detail-venue-session-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  line-height: 1.2;
+}
+
+.detail-venue-session-badge.open {
+  color: #7df0c4;
+  background: #143127;
+  border-color: #1f5d47;
+}
+
+.detail-venue-session-badge.closed {
+  color: #ffb3b3;
+  background: #3a1f27;
+  border-color: #6f3341;
+}
+
+.detail-venue-session-badge.pending {
+  color: #9fb0ca;
+  background: #20273a;
+  border-color: #34405a;
+}
+
+.detail-venue-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.detail-venue-card {
+  border: 1px solid #2b2f3a;
+  border-radius: 8px;
+  padding: 8px;
+  background: #121722;
+}
+
+.detail-venue-card h6 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: #b4bac7;
 }
 
 .alerts-panel {
@@ -2330,6 +2392,10 @@ select {
   }
 
   .trading-lists-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .detail-venue-card-grid {
     grid-template-columns: 1fr;
   }
 }

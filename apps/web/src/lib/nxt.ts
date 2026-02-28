@@ -13,6 +13,8 @@ export type NxtQuoteInfo = {
 };
 
 type QuoteWithOptionalNxt = {
+  lastPrice?: number;
+  changePercent?: number;
   nxt?: NxtQuoteInfo;
 };
 
@@ -24,6 +26,29 @@ export type NxtDetailInfo = {
   price: number | null;
   changePercent: number | null;
   updatedAt: number | null;
+};
+
+export type VenueCheckedAt = {
+  krx?: number | null;
+  nxt?: number | null;
+};
+
+export type KrxNxtComparisonInfo = {
+  krx: {
+    venue: 'KRX';
+    available: boolean;
+    price: number | null;
+    changePercent: number | null;
+    updatedAt: number | null;
+  };
+  nxt: {
+    venue: 'NXT';
+    available: boolean;
+    price: number | null;
+    changePercent: number | null;
+    updatedAt: number | null;
+    reason: string | null;
+  };
 };
 
 function isFiniteNumber(value: unknown): value is number {
@@ -54,5 +79,37 @@ export function normalizeNxtDetailInfo(market: MarketType, quote?: QuoteWithOpti
     price: isFiniteNumber(nxt?.price) ? nxt.price : null,
     changePercent: isFiniteNumber(nxt?.changePercent) ? nxt.changePercent : null,
     updatedAt: isFiniteNumber(nxt?.updatedAt) ? nxt.updatedAt : null,
+  };
+}
+
+export function normalizeKrxNxtComparisonInfo(
+  market: MarketType,
+  quote?: QuoteWithOptionalNxt,
+  venueCheckedAt?: VenueCheckedAt,
+): KrxNxtComparisonInfo | null {
+  if (market !== 'KOSPI' && market !== 'KOSDAQ') return null;
+
+  const normalizedNxt = normalizeNxtDetailInfo(market, quote);
+  const krxPrice = isFiniteNumber(quote?.lastPrice) ? quote.lastPrice : null;
+  const krxChangePercent = isFiniteNumber(quote?.changePercent) ? quote.changePercent : null;
+  const krxUpdatedAt = isFiniteNumber(venueCheckedAt?.krx) ? venueCheckedAt.krx : null;
+  const nxtVenueUpdatedAt = isFiniteNumber(venueCheckedAt?.nxt) ? venueCheckedAt.nxt : null;
+
+  return {
+    krx: {
+      venue: 'KRX',
+      available: krxPrice !== null && krxChangePercent !== null,
+      price: krxPrice,
+      changePercent: krxChangePercent,
+      updatedAt: krxUpdatedAt,
+    },
+    nxt: {
+      venue: 'NXT',
+      available: normalizedNxt?.status === 'available',
+      price: normalizedNxt?.price ?? null,
+      changePercent: normalizedNxt?.changePercent ?? null,
+      updatedAt: normalizedNxt?.updatedAt ?? nxtVenueUpdatedAt,
+      reason: normalizedNxt?.status === 'unavailable' ? normalizedNxt.reason : null,
+    },
   };
 }

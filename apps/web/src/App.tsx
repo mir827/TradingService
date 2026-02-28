@@ -89,7 +89,13 @@ import {
   type AlertCenterEventType,
   type AlertLifecycleState,
 } from './lib/alertCenter';
-import { normalizeNxtDetailInfo, type NxtQuoteInfo } from './lib/nxt';
+import { normalizeKrxNxtComparisonInfo, type NxtQuoteInfo } from './lib/nxt';
+import {
+  formatMarketStatusReason,
+  normalizeVenueCheckedAt,
+  normalizeVenueSessionBadges,
+  type MarketStatusWithVenues,
+} from './lib/marketStatus';
 
 type SymbolItem = {
   symbol: string;
@@ -118,21 +124,7 @@ type Quote = {
   nxt?: NxtQuoteInfo;
 };
 
-type MarketStatusState = 'OPEN' | 'CLOSED';
-type MarketStatusReason = 'WEEKEND' | 'OUT_OF_SESSION' | 'SESSION_ACTIVE';
-
-type MarketStatus = {
-  market: MarketType;
-  status: MarketStatusState;
-  reason: MarketStatusReason;
-  checkedAt: number;
-  timezone: string;
-  session: {
-    open: string;
-    close: string;
-    text: string;
-  };
-};
+type MarketStatus = MarketStatusWithVenues;
 
 type AlertMetric = 'price' | 'changePercent';
 type AlertOperator = '>=' | '<=' | '>' | '<';
@@ -909,6 +901,11 @@ function formatVolume(value: number) {
   return value.toLocaleString('en-US');
 }
 
+function formatOptionalTimestamp(value: number | null) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '--';
+  return new Date(value).toLocaleString('ko-KR');
+}
+
 function formatAlertMetric(metric: AlertMetric) {
   return metric === 'price' ? '가격' : '변동률';
 }
@@ -959,12 +956,6 @@ function formatAlertTransitionReason(reason?: AlertStateTransitionReason) {
   if (reason === 'cooldownSuppressed') return 'cooldown suppression';
   if (reason === 'evaluationError') return 'evaluation error';
   return 'state update';
-}
-
-function formatMarketStatusReason(reason: MarketStatusReason) {
-  if (reason === 'WEEKEND') return '주말';
-  if (reason === 'OUT_OF_SESSION') return '장외 시간';
-  return '세션 진행중';
 }
 
 function createHorizontalLineId() {
@@ -3715,9 +3706,14 @@ function App() {
     [searchResults, selectedSymbol, watchlistSymbols],
   );
   const selectedMarket = selectedSymbolMeta?.market ?? 'CRYPTO';
-  const selectedNxtInfo = useMemo(
-    () => normalizeNxtDetailInfo(selectedMarket, selectedQuote),
-    [selectedMarket, selectedQuote],
+  const selectedVenueCheckedAt = useMemo(() => normalizeVenueCheckedAt(marketStatus), [marketStatus]);
+  const selectedKrxNxtComparison = useMemo(
+    () => normalizeKrxNxtComparisonInfo(selectedMarket, selectedQuote, selectedVenueCheckedAt),
+    [selectedMarket, selectedQuote, selectedVenueCheckedAt],
+  );
+  const selectedVenueSessionBadges = useMemo(
+    () => normalizeVenueSessionBadges(selectedMarket, marketStatus),
+    [selectedMarket, marketStatus],
   );
 
   useEffect(() => {
@@ -7020,46 +7016,93 @@ function App() {
                       <dd>{selectedQuote ? formatVolume(selectedQuote.volume) : '--'}</dd>
                     </div>
                   </dl>
-                  {selectedNxtInfo ? (
-                    <div className="detail-nxt-section">
-                      <h5>NXT</h5>
-                      <dl>
-                        <div>
-                          <dt>지원 여부</dt>
-                          <dd>{selectedNxtInfo.supportLabel}</dd>
+                  {selectedKrxNxtComparison ? (
+                    <div className="detail-venue-section">
+                      <div className="detail-venue-section-head">
+                        <h5>KRX vs NXT</h5>
+                        <div className="detail-venue-session-list">
+                          {selectedVenueSessionBadges.map((badge) => (
+                            <span key={badge.venue} className={`detail-venue-session-badge ${badge.tone}`}>
+                              {badge.venue} {badge.label}
+                            </span>
+                          ))}
                         </div>
-                        <div>
-                          <dt>상태</dt>
-                          <dd>{selectedNxtInfo.status}</dd>
+                      </div>
+                      <div className="detail-venue-card-grid">
+                        <div className="detail-venue-card">
+                          <h6>KRX</h6>
+                          <dl>
+                            <div>
+                              <dt>가격</dt>
+                              <dd>
+                                {selectedKrxNxtComparison.krx.price !== null
+                                  ? formatPrice(selectedKrxNxtComparison.krx.price)
+                                  : '--'}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt>등락률</dt>
+                              <dd
+                                className={
+                                  selectedKrxNxtComparison.krx.changePercent === null
+                                    ? ''
+                                    : selectedKrxNxtComparison.krx.changePercent >= 0
+                                      ? 'up'
+                                      : 'down'
+                                }
+                              >
+                                {selectedKrxNxtComparison.krx.changePercent !== null
+                                  ? `${selectedKrxNxtComparison.krx.changePercent >= 0 ? '+' : ''}${selectedKrxNxtComparison.krx.changePercent.toFixed(2)}%`
+                                  : '--'}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt>업데이트</dt>
+                              <dd>{formatOptionalTimestamp(selectedKrxNxtComparison.krx.updatedAt)}</dd>
+                            </div>
+                          </dl>
                         </div>
-                        {selectedNxtInfo.reason ? (
-                          <div>
-                            <dt>이유</dt>
-                            <dd>{selectedNxtInfo.reason}</dd>
-                          </div>
-                        ) : null}
-                        {selectedNxtInfo.price !== null ? (
-                          <div>
-                            <dt>NXT 가격</dt>
-                            <dd>{formatPrice(selectedNxtInfo.price)}</dd>
-                          </div>
-                        ) : null}
-                        {selectedNxtInfo.changePercent !== null ? (
-                          <div>
-                            <dt>NXT 등락률</dt>
-                            <dd className={selectedNxtInfo.changePercent >= 0 ? 'up' : 'down'}>
-                              {selectedNxtInfo.changePercent >= 0 ? '+' : ''}
-                              {selectedNxtInfo.changePercent.toFixed(2)}%
-                            </dd>
-                          </div>
-                        ) : null}
-                        {selectedNxtInfo.updatedAt !== null ? (
-                          <div>
-                            <dt>NXT 업데이트</dt>
-                            <dd>{new Date(selectedNxtInfo.updatedAt).toLocaleString('ko-KR')}</dd>
-                          </div>
-                        ) : null}
-                      </dl>
+
+                        <div className="detail-venue-card">
+                          <h6>NXT</h6>
+                          <dl>
+                            <div>
+                              <dt>가격</dt>
+                              <dd>
+                                {selectedKrxNxtComparison.nxt.price !== null
+                                  ? formatPrice(selectedKrxNxtComparison.nxt.price)
+                                  : '--'}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt>등락률</dt>
+                              <dd
+                                className={
+                                  selectedKrxNxtComparison.nxt.changePercent === null
+                                    ? ''
+                                    : selectedKrxNxtComparison.nxt.changePercent >= 0
+                                      ? 'up'
+                                      : 'down'
+                                }
+                              >
+                                {selectedKrxNxtComparison.nxt.changePercent !== null
+                                  ? `${selectedKrxNxtComparison.nxt.changePercent >= 0 ? '+' : ''}${selectedKrxNxtComparison.nxt.changePercent.toFixed(2)}%`
+                                  : '--'}
+                              </dd>
+                            </div>
+                            {selectedKrxNxtComparison.nxt.reason ? (
+                              <div>
+                                <dt>미가용 사유</dt>
+                                <dd>{selectedKrxNxtComparison.nxt.reason}</dd>
+                              </div>
+                            ) : null}
+                            <div>
+                              <dt>업데이트</dt>
+                              <dd>{formatOptionalTimestamp(selectedKrxNxtComparison.nxt.updatedAt)}</dd>
+                            </div>
+                          </dl>
+                        </div>
+                      </div>
                     </div>
                   ) : null}
                 </div>
