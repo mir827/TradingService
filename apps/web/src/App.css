@@ -290,6 +290,85 @@ select {
   gap: 6px;
 }
 
+.chart-inspector {
+  width: min(760px, 100%);
+  border: 1px solid #273247;
+  border-radius: 8px;
+  background: #0f1522;
+  padding: 6px 8px;
+  display: grid;
+  gap: 5px;
+}
+
+.chart-inspector-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chart-inspector-head strong {
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: #b9c5db;
+}
+
+.chart-inspector-mode {
+  border: 1px solid #2e3a52;
+  background: #172033;
+  color: #9eb9df;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10px;
+}
+
+.chart-inspector-mode.crosshair {
+  border-color: #33608d;
+  color: #9fd7ff;
+}
+
+.chart-inspector-mode.latest {
+  border-color: #46536c;
+  color: #bec8da;
+}
+
+.chart-inspector-mode.empty {
+  border-color: #5e4050;
+  color: #e2adbf;
+}
+
+.chart-inspector-grid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px 10px;
+  color: #c8cfdd;
+  font-size: 11px;
+}
+
+.chart-inspector-extra {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.chart-inspector-extra-item {
+  border: 1px solid #2b374c;
+  background: #162033;
+  color: #aec3e4;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 10px;
+}
+
+.chart-inspector-hint {
+  margin: 0;
+  text-align: right;
+  font-size: 10px;
+  color: #8e9ab0;
+}
+
 .chart-legend-row {
   display: flex;
   gap: 8px;
@@ -2563,6 +2642,10 @@ select {
 @media (max-width: 960px) {
   .tv-main {
     grid-template-columns: 52px minmax(0, 1fr) 220px;
+  }
+
+  .chart-inspector {
+    width: 100%;
   }
 
   .watch-tabs button {

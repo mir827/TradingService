@@ -113,6 +113,12 @@ import {
   normalizeVenueSessionBadges,
   type MarketStatusWithVenues,
 } from './lib/marketStatus';
+import {
+  normalizeCrosshairInspectorSnapshot,
+  toInspectorTimeValueMap,
+  type CrosshairInspectorCompareInput,
+  type CrosshairInspectorIndicatorInput,
+} from './lib/crosshairInspector';
 
 type SymbolItem = {
   symbol: string;
@@ -740,6 +746,22 @@ function createIndicatorSeriesRefs(): Record<IndicatorSeriesKey, ISeriesApi<'Lin
   };
 }
 
+function createIndicatorValueLookups(): Record<IndicatorSeriesKey, Map<number, number>> {
+  return {
+    sma20: new Map<number, number>(),
+    sma60: new Map<number, number>(),
+    ema20: new Map<number, number>(),
+    rsi: new Map<number, number>(),
+    macd: new Map<number, number>(),
+    macdSignal: new Map<number, number>(),
+    bbBasis: new Map<number, number>(),
+    bbUpper: new Map<number, number>(),
+    bbLower: new Map<number, number>(),
+  };
+}
+
+const EMPTY_TIME_VALUE_LOOKUP = new Map<number, number>();
+
 function toTimestampValue(value: number) {
   return Math.max(1, Math.floor(value)) as UTCTimestamp;
 }
@@ -1348,6 +1370,7 @@ function App() {
   const [replayVisibleBars, setReplayVisibleBars] = useState(0);
   const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
   const [hoveredPoint, setHoveredPoint] = useState<{ x: number; y: number } | null>(null);
+  const [crosshairInspectorTime, setCrosshairInspectorTime] = useState<number | null>(null);
   const [horizontalLines, setHorizontalLines] = useState<HorizontalLineState[]>([]);
   const [verticalLines, setVerticalLines] = useState<VerticalLineState[]>([]);
   const [trendlines, setTrendlines] = useState<TrendlineState[]>([]);
@@ -1618,6 +1641,7 @@ function App() {
   const clearHoveredCandle = useCallback(() => {
     setHoveredCandle(null);
     setHoveredPoint(null);
+    setCrosshairInspectorTime(null);
   }, []);
 
   useEffect(() => {
@@ -2734,6 +2758,7 @@ function App() {
         x: point.x,
         y: point.y,
       });
+      setCrosshairInspectorTime(rawTime);
     };
 
     const onChartClick = (param: MouseEventParams<Time>) => {
@@ -3025,6 +3050,7 @@ function App() {
       setPendingShapeStart(null);
       setSelectedDrawingId(null);
       setChartReady(false);
+      setCrosshairInspectorTime(null);
     };
   }, [
     captureChartHistorySnapshot,
@@ -3120,6 +3146,19 @@ function App() {
       syncVisibleLogicalRange('secondary', range);
     };
 
+    const onCrosshairMove = (param: MouseEventParams<Time>) => {
+      const rawTime = param.time;
+      const bar = param.seriesData.get(candleSeries) as CandlestickData<Time> | undefined;
+
+      if (typeof rawTime !== 'number' || !bar) {
+        setCrosshairInspectorTime(null);
+        return;
+      }
+
+      setCrosshairInspectorTime(rawTime);
+    };
+
+    chart.subscribeCrosshairMove(onCrosshairMove);
     chart.timeScale().subscribeVisibleLogicalRangeChange(onVisibleLogicalRangeChange);
 
     secondaryChartRef.current = chart;
@@ -3135,12 +3174,14 @@ function App() {
     }
 
     return () => {
+      chart.unsubscribeCrosshairMove(onCrosshairMove);
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(onVisibleLogicalRangeChange);
       chart.remove();
       secondaryChartRef.current = null;
       secondaryCandleSeriesRef.current = null;
       secondaryVolumeSeriesRef.current = null;
       secondaryCloseSeriesRef.current = null;
+      setCrosshairInspectorTime(null);
     };
   }, [chartLayoutMode, syncVisibleLogicalRange]);
 
@@ -3810,6 +3851,59 @@ function App() {
     [activeCandles, compareOverlays, compareScaleMode],
   );
 
+  const indicatorValueLookups = useMemo(() => {
+    const lookups = createIndicatorValueLookups();
+    if (activeCandles.length === 0) return lookups;
+
+    const closeValues = activeCandles.map((candle) => candle.close);
+
+    if (enabledIndicators.sma20) {
+      lookups.sma20 = toInspectorTimeValueMap(activeCandles, calculateSMA(closeValues, 20));
+    }
+    if (enabledIndicators.sma60) {
+      lookups.sma60 = toInspectorTimeValueMap(activeCandles, calculateSMA(closeValues, 60));
+    }
+    if (enabledIndicators.ema20) {
+      lookups.ema20 = toInspectorTimeValueMap(activeCandles, calculateEMA(closeValues, 20));
+    }
+    if (enabledIndicators.rsi) {
+      lookups.rsi = toInspectorTimeValueMap(activeCandles, calculateRSI(closeValues, indicatorSettings.rsi.period));
+    }
+    if (enabledIndicators.macd) {
+      const macd = calculateMACD(
+        closeValues,
+        indicatorSettings.macd.fast,
+        indicatorSettings.macd.slow,
+        indicatorSettings.macd.signal,
+      );
+      lookups.macd = toInspectorTimeValueMap(activeCandles, macd.macdLine);
+      lookups.macdSignal = toInspectorTimeValueMap(activeCandles, macd.signalLine);
+    }
+    if (enabledIndicators.bbands) {
+      const bollinger = calculateBollingerBands(
+        closeValues,
+        indicatorSettings.bollinger.period,
+        indicatorSettings.bollinger.stdDev,
+      );
+      lookups.bbBasis = toInspectorTimeValueMap(activeCandles, bollinger.basis);
+      lookups.bbUpper = toInspectorTimeValueMap(activeCandles, bollinger.upper);
+      lookups.bbLower = toInspectorTimeValueMap(activeCandles, bollinger.lower);
+    }
+
+    return lookups;
+  }, [activeCandles, enabledIndicators, indicatorSettings]);
+
+  const compareValueLookups = useMemo(
+    () =>
+      compareComputedOverlays.map((overlay) =>
+        toInspectorTimeValueMap(
+          overlay.points,
+          overlay.points.map((point) => point.value),
+        ),
+      ),
+    [compareComputedOverlays],
+  );
+
   useEffect(() => {
     for (let slotIndex = 0; slotIndex < MAX_COMPARE_SYMBOLS; slotIndex += 1) {
       const series = compareSeriesRefs.current[slotIndex];
@@ -3883,6 +3977,72 @@ function App() {
   ]);
   const tradingUpdatedAt = tradingState?.updatedAt ?? tradingLastUpdatedAt;
   const latestCandle = activeCandles.at(-1) ?? null;
+  const activeCandleByTime = useMemo(() => new Map(activeCandles.map((candle) => [candle.time, candle])), [activeCandles]);
+  const crosshairInspectorIndicatorInputs = useMemo<CrosshairInspectorIndicatorInput[]>(() => {
+    const inputs: CrosshairInspectorIndicatorInput[] = [];
+
+    if (enabledIndicators.sma20) {
+      inputs.push({ key: 'sma20', label: 'SMA 20', valuesByTime: indicatorValueLookups.sma20 });
+    }
+    if (enabledIndicators.sma60) {
+      inputs.push({ key: 'sma60', label: 'SMA 60', valuesByTime: indicatorValueLookups.sma60 });
+    }
+    if (enabledIndicators.ema20) {
+      inputs.push({ key: 'ema20', label: 'EMA 20', valuesByTime: indicatorValueLookups.ema20 });
+    }
+    if (enabledIndicators.rsi) {
+      inputs.push({ key: 'rsi', label: `RSI ${indicatorSettings.rsi.period}`, valuesByTime: indicatorValueLookups.rsi });
+    }
+    if (enabledIndicators.macd) {
+      inputs.push({ key: 'macd', label: 'MACD', valuesByTime: indicatorValueLookups.macd });
+      inputs.push({ key: 'macdSignal', label: 'MACD Signal', valuesByTime: indicatorValueLookups.macdSignal });
+    }
+    if (enabledIndicators.bbands) {
+      inputs.push({ key: 'bbBasis', label: 'BB Basis', valuesByTime: indicatorValueLookups.bbBasis });
+      inputs.push({ key: 'bbUpper', label: 'BB Upper', valuesByTime: indicatorValueLookups.bbUpper });
+      inputs.push({ key: 'bbLower', label: 'BB Lower', valuesByTime: indicatorValueLookups.bbLower });
+    }
+
+    return inputs;
+  }, [enabledIndicators, indicatorSettings, indicatorValueLookups]);
+  const crosshairInspectorCompareInputs = useMemo<CrosshairInspectorCompareInput[]>(
+    () =>
+      compareOverlays.flatMap((overlay, slotIndex) => {
+        const symbol = overlay.symbol.trim();
+        if (!symbol || !overlay.visible || overlay.loading || overlay.error) {
+          return [];
+        }
+
+        return [
+          {
+            slotIndex,
+            symbol: `비교 ${slotIndex + 1} ${shortTicker(symbol)}`,
+            visible: overlay.visible,
+            valuesByTime: compareValueLookups[slotIndex] ?? EMPTY_TIME_VALUE_LOOKUP,
+          },
+        ];
+      }),
+    [compareOverlays, compareValueLookups],
+  );
+  const crosshairInspectorSnapshot = useMemo(
+    () =>
+      normalizeCrosshairInspectorSnapshot({
+        crosshairTime: crosshairInspectorTime,
+        latestCandle,
+        candlesByTime: activeCandleByTime,
+        indicatorInputs: crosshairInspectorIndicatorInputs,
+        compareInputs: crosshairInspectorCompareInputs,
+      }),
+    [
+      activeCandleByTime,
+      crosshairInspectorCompareInputs,
+      crosshairInspectorIndicatorInputs,
+      crosshairInspectorTime,
+      latestCandle,
+    ],
+  );
+  const crosshairInspectorCandle = crosshairInspectorSnapshot.candle;
+  const crosshairInspectorCompareModeLabel = compareScaleMode === 'normalized' ? '% 정규화' : '절대값';
   const displayCandle = hoveredCandle ?? latestCandle;
   const hoveredCandleDiff = hoveredCandle ? hoveredCandle.close - hoveredCandle.open : 0;
   const hoveredCandleDiffPercent =
@@ -6955,6 +7115,49 @@ function App() {
                   ))}
                 </div>
               ) : null}
+
+              <div className="chart-inspector" aria-live="polite">
+                <div className="chart-inspector-head">
+                  <strong>Data Window</strong>
+                  <span className={`chart-inspector-mode ${crosshairInspectorSnapshot.mode}`}>
+                    {crosshairInspectorSnapshot.mode === 'crosshair'
+                      ? 'Crosshair'
+                      : crosshairInspectorSnapshot.mode === 'latest'
+                        ? 'Latest'
+                        : 'Empty'}
+                  </span>
+                </div>
+                <div className="chart-inspector-grid">
+                  <span>T {crosshairInspectorSnapshot.time ? formatCandleDateTime(crosshairInspectorSnapshot.time) : '--'}</span>
+                  <span>O {crosshairInspectorCandle ? formatPrice(crosshairInspectorCandle.open) : '--'}</span>
+                  <span>H {crosshairInspectorCandle ? formatPrice(crosshairInspectorCandle.high) : '--'}</span>
+                  <span>L {crosshairInspectorCandle ? formatPrice(crosshairInspectorCandle.low) : '--'}</span>
+                  <span>C {crosshairInspectorCandle ? formatPrice(crosshairInspectorCandle.close) : '--'}</span>
+                  <span>Vol {crosshairInspectorCandle ? formatVolume(crosshairInspectorCandle.volume) : '--'}</span>
+                </div>
+
+                {crosshairInspectorSnapshot.indicators.length > 0 ? (
+                  <div className="chart-inspector-extra">
+                    {crosshairInspectorSnapshot.indicators.map((item) => (
+                      <span key={`inspector-indicator-${item.key}`} className="chart-inspector-extra-item">
+                        {item.label} {item.value === null ? '--' : formatPrice(item.value)}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+
+                {crosshairInspectorSnapshot.compares.length > 0 ? (
+                  <div className="chart-inspector-extra">
+                    {crosshairInspectorSnapshot.compares.map((item) => (
+                      <span key={`inspector-compare-${item.slotIndex}`} className="chart-inspector-extra-item">
+                        {item.symbol} ({crosshairInspectorCompareModeLabel}) {item.value === null ? '--' : formatPrice(item.value)}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+
+                <p className="chart-inspector-hint">{crosshairInspectorSnapshot.helperText}</p>
+              </div>
             </div>
           </div>
 
@@ -7273,7 +7476,7 @@ function App() {
             </div>
 
             {chartLayoutMode === 'split' ? (
-              <div className="chart-area chart-area-secondary">
+              <div className="chart-area chart-area-secondary" onMouseLeave={clearHoveredCandle}>
                 <div className="chart-canvas" ref={secondaryContainerRef} />
                 <div className="secondary-chart-badge">보조 차트 · 범위 동기화</div>
               </div>

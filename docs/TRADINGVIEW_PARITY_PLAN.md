@@ -186,7 +186,8 @@ Progress note (2026-02-28):
 - M5 P0 status: complete (P0-1, P0-2, P0-3).
 - M5 progress note (2026-02-28): P1 started, P1-4(드로잉 오브젝트 패널) + P1-5(비교 오버레이 확장) completed.
 - M5 progress note (2026-02-28): P1-6(백테스트 현실화 옵션) completed.
-- M5 remaining items: P2-7, P2-8.
+- M5 progress note (2026-02-28): P2-7(Data Window / Crosshair 인스펙터) completed.
+- M5 remaining items: P2-8 only.
 
 ### P1 (분석 생산성/활용도 확장)
 
@@ -248,6 +249,11 @@ Progress note (2026-02-28):
   - 단일 클릭으로 값 복사(클립보드) 지원.
   - replay/multi-chart 모드에서도 동일 동작.
   - 렌더 성능 저하 없이 동작(기존 FPS budget 유지).
+
+Progress note (2026-02-28):
+- M5 P2-7 completed (incremental): `apps/web` 차트 헤더에 compact Data Window 인스펙터를 추가해 crosshair 시점 OHLCV + 활성 지표값 + 표시 중 비교 오버레이 값을 표시하고, crosshair 데이터가 없을 때는 최신 캔들 fallback + 명시적 안내 문구를 노출하도록 반영함.
+- primary/secondary 차트 모두 crosshair move 구독을 통해 인스펙터 상태를 갱신하고, chart re-init/unmount 시 unsubscribe/cleanup 처리로 안전성을 유지함.
+- 기존 캔들 hover tooltip 동작은 그대로 유지하면서 인스펙터 렌더 경로를 분리해 비차단 업데이트를 보장함.
 
 8) 
 - 기능명: 탐색 속도 개선 UX (타임프레임 즐겨찾기 + 단축키)
