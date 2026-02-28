@@ -62,6 +62,15 @@ import {
   shortTicker,
   type MarketType,
 } from './lib/symbol';
+import {
+  applyLogicalRangeSync,
+  createChartRangeSyncState,
+  normalizeChartLayoutMode,
+  shouldSkipSyncedRangeEvent,
+  type ChartLayoutMode,
+  type ChartSyncSource,
+  type LogicalRangeLike,
+} from './lib/chartLayout';
 
 type SymbolItem = {
   symbol: string;
@@ -291,6 +300,10 @@ type DragState =
     };
 
 const intervals = ['1', '5', '15', '60', '240', '1D', '1W'];
+const chartLayoutOptions: Array<{ key: ChartLayoutMode; label: string }> = [
+  { key: 'single', label: '단일' },
+  { key: 'split', label: '2분할' },
+];
 const leftTools: Array<{ key: ToolKey; icon: string; label: string }> = [
   { key: 'cursor', icon: '↖', label: '커서' },
   { key: 'crosshair', icon: '＋', label: '크로스헤어' },
@@ -327,6 +340,7 @@ const apiBase = import.meta.env.VITE_API_BASE_URL ?? '';
 const WATCH_PREFS_STORAGE_KEY = 'tradingservice.watchprefs.v1';
 const ALERT_AUTO_CHECK_STORAGE_KEY = 'tradingservice.alerts.autocheck.v1';
 const INDICATOR_PREFS_STORAGE_KEY = 'tradingservice.indicators.v2';
+const CHART_LAYOUT_STORAGE_KEY = 'tradingservice.chartlayout.v1';
 const DEFAULT_WATCHLIST_NAME = 'default';
 const ALERT_EVENT_DEDUP_WINDOW_MS = 10_000;
 const ALERT_EVENT_MAX_ITEMS = 20;
@@ -491,6 +505,17 @@ function getStoredIndicatorPrefs(): IndicatorPrefs {
   }
 }
 
+function getStoredChartLayoutMode(): ChartLayoutMode {
+  if (typeof window === 'undefined') return 'single';
+
+  try {
+    const raw = window.localStorage.getItem(CHART_LAYOUT_STORAGE_KEY);
+    return normalizeChartLayoutMode(raw);
+  } catch {
+    return 'single';
+  }
+}
+
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -608,12 +633,18 @@ function formatIndicatorLegend(config: IndicatorConfig, settings: IndicatorSetti
 function App() {
   const chartAreaRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const secondaryContainerRef = useRef<HTMLDivElement | null>(null);
   const verticalOverlayRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  const secondaryChartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const secondaryCandleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  const secondaryVolumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  const secondaryCloseSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const indicatorSeriesRefs = useRef<Record<IndicatorSeriesKey, ISeriesApi<'Line'> | null>>(createIndicatorSeriesRefs());
   const compareSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const chartRangeSyncStateRef = useRef(createChartRangeSyncState());
   const candleMapRef = useRef<Map<number, Candle>>(new Map());
   const activeToolRef = useRef<ToolKey>('cursor');
   const horizontalLinesRef = useRef<HorizontalLine[]>([]);
@@ -632,6 +663,7 @@ function App() {
   const [watchlistSymbols, setWatchlistSymbols] = useState<SymbolItem[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState('BTCUSDT');
   const [selectedInterval, setSelectedInterval] = useState('60');
+  const [chartLayoutMode, setChartLayoutMode] = useState<ChartLayoutMode>(() => getStoredChartLayoutMode());
   const [candles, setCandles] = useState<Candle[]>([]);
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
   const [marketStatus, setMarketStatus] = useState<MarketStatus | null>(null);
@@ -729,6 +761,10 @@ function App() {
   }, [selectedInterval]);
 
   useEffect(() => {
+    chartRangeSyncStateRef.current = createChartRangeSyncState();
+  }, [chartLayoutMode]);
+
+  useEffect(() => {
     setReplayMode(false);
     setReplayPlaying(false);
     setReplayStartBars(0);
@@ -816,6 +852,21 @@ function App() {
 
   const refreshDrawingOverlay = useCallback(() => {
     setOverlayTick((previous) => previous + 1);
+  }, []);
+
+  const syncVisibleLogicalRange = useCallback((source: ChartSyncSource, sourceRange: LogicalRangeLike) => {
+    const targetChart = source === 'primary' ? secondaryChartRef.current : chartRef.current;
+    if (!targetChart) return;
+
+    applyLogicalRangeSync({
+      state: chartRangeSyncStateRef.current,
+      source,
+      sourceRange,
+      getTargetRange: () => targetChart.timeScale().getVisibleLogicalRange(),
+      setTargetRange: (nextRange) => {
+        targetChart.timeScale().setVisibleLogicalRange(nextRange);
+      },
+    });
   }, []);
 
   const toHorizontalLineState = useCallback((line: { id?: string; price: number }) => {
@@ -1367,6 +1418,11 @@ function App() {
   }, [enabledIndicators, indicatorSettings]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(CHART_LAYOUT_STORAGE_KEY, chartLayoutMode);
+  }, [chartLayoutMode]);
+
+  useEffect(() => {
     let canceled = false;
 
     const applyWatchlist = (nextSymbols: SymbolItem[]) => {
@@ -1808,9 +1864,13 @@ function App() {
       );
     };
 
-    const onVisibleLogicalRangeChange = () => {
+    const onVisibleLogicalRangeChange = (range: LogicalRangeLike) => {
       syncVerticalLinePositions();
       refreshDrawingOverlay();
+      if (shouldSkipSyncedRangeEvent(chartRangeSyncStateRef.current, 'primary', range)) {
+        return;
+      }
+      syncVisibleLogicalRange('primary', range);
     };
 
     chart.subscribeCrosshairMove(onCrosshairMove);
@@ -1892,8 +1952,105 @@ function App() {
     snapshotRectangles,
     snapshotTrendlines,
     snapshotVerticalLines,
+    syncVisibleLogicalRange,
     syncVerticalLinePositions,
   ]);
+
+  useEffect(() => {
+    if (chartLayoutMode !== 'split') return;
+    if (!secondaryContainerRef.current) return;
+
+    const chart = createChart(secondaryContainerRef.current, {
+      autoSize: true,
+      layout: {
+        background: { type: ColorType.Solid, color: '#131722' },
+        textColor: '#B2B5BE',
+        fontFamily: 'Inter, Pretendard, Apple SD Gothic Neo, sans-serif',
+      },
+      grid: {
+        vertLines: { color: '#1F2433' },
+        horzLines: { color: '#1F2433' },
+      },
+      rightPriceScale: {
+        borderColor: '#2B2F3A',
+      },
+      timeScale: {
+        borderColor: '#2B2F3A',
+        timeVisible: true,
+        secondsVisible: false,
+      },
+      crosshair: {
+        vertLine: { color: '#758696', width: 1, style: 3 },
+        horzLine: { color: '#758696', width: 1, style: 3 },
+      },
+      localization: {
+        locale: 'ko-KR',
+      },
+    });
+
+    const candleSeries = chart.addSeries(CandlestickSeries, {
+      upColor: '#26A69A',
+      downColor: '#EF5350',
+      wickUpColor: '#26A69A',
+      wickDownColor: '#EF5350',
+      borderVisible: false,
+      priceLineVisible: true,
+      lastValueVisible: true,
+    });
+
+    const volumeSeries = chart.addSeries(HistogramSeries, {
+      priceScaleId: '',
+      priceFormat: {
+        type: 'volume',
+      },
+      color: '#2962FF66',
+    });
+    volumeSeries.priceScale().applyOptions({
+      scaleMargins: {
+        top: 0.9,
+        bottom: 0,
+      },
+    });
+
+    const closeSeries = chart.addSeries(LineSeries, {
+      color: '#7ba7ff',
+      lineWidth: 1,
+      lineStyle: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+
+    const onVisibleLogicalRangeChange = (range: LogicalRangeLike) => {
+      if (shouldSkipSyncedRangeEvent(chartRangeSyncStateRef.current, 'secondary', range)) {
+        return;
+      }
+      syncVisibleLogicalRange('secondary', range);
+    };
+
+    chart.timeScale().subscribeVisibleLogicalRangeChange(onVisibleLogicalRangeChange);
+
+    secondaryChartRef.current = chart;
+    secondaryCandleSeriesRef.current = candleSeries;
+    secondaryVolumeSeriesRef.current = volumeSeries;
+    secondaryCloseSeriesRef.current = closeSeries;
+
+    const primaryRange = chartRef.current?.timeScale().getVisibleLogicalRange();
+    if (primaryRange) {
+      chart.timeScale().setVisibleLogicalRange(primaryRange);
+    } else {
+      chart.timeScale().fitContent();
+    }
+
+    return () => {
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(onVisibleLogicalRangeChange);
+      chart.remove();
+      secondaryChartRef.current = null;
+      secondaryCandleSeriesRef.current = null;
+      secondaryVolumeSeriesRef.current = null;
+      secondaryCloseSeriesRef.current = null;
+    };
+  }, [chartLayoutMode, syncVisibleLogicalRange]);
 
   useEffect(() => {
     if (!chartReady) return;
@@ -2180,10 +2337,18 @@ function App() {
   useEffect(() => {
     candleMapRef.current = new Map(activeCandles.map((candle) => [candle.time, candle]));
     if (!candleSeriesRef.current || !volumeSeriesRef.current || !chartRef.current) return;
+    const secondaryCandleSeries = secondaryCandleSeriesRef.current;
+    const secondaryVolumeSeries = secondaryVolumeSeriesRef.current;
+    const secondaryCloseSeries = secondaryCloseSeriesRef.current;
 
     if (!activeCandles.length) {
       candleSeriesRef.current.setData([]);
       volumeSeriesRef.current.setData([]);
+      if (secondaryCandleSeries && secondaryVolumeSeries && secondaryCloseSeries) {
+        secondaryCandleSeries.setData([]);
+        secondaryVolumeSeries.setData([]);
+        secondaryCloseSeries.setData([]);
+      }
       chartRef.current.timeScale().fitContent();
       syncVerticalLinePositions();
       refreshDrawingOverlay();
@@ -2203,13 +2368,22 @@ function App() {
       value: candle.volume,
       color: candle.close >= candle.open ? '#26A69A66' : '#EF535066',
     }));
+    const closeLineData: LineData[] = activeCandles.map((candle) => ({
+      time: candle.time as UTCTimestamp,
+      value: candle.close,
+    }));
 
     candleSeriesRef.current.setData(candleData);
     volumeSeriesRef.current.setData(volumeData);
+    if (secondaryCandleSeries && secondaryVolumeSeries && secondaryCloseSeries) {
+      secondaryCandleSeries.setData(candleData);
+      secondaryVolumeSeries.setData(volumeData);
+      secondaryCloseSeries.setData(closeLineData);
+    }
     chartRef.current.timeScale().fitContent();
     syncVerticalLinePositions();
     refreshDrawingOverlay();
-  }, [activeCandles, refreshDrawingOverlay, syncVerticalLinePositions]);
+  }, [activeCandles, chartLayoutMode, refreshDrawingOverlay, syncVerticalLinePositions]);
 
   useEffect(() => {
     const seriesMap = indicatorSeriesRefs.current;
@@ -3967,6 +4141,19 @@ function App() {
             ))}
           </div>
 
+          <div className="layout-modes" aria-label="차트 레이아웃">
+            {chartLayoutOptions.map((layout) => (
+              <button
+                key={layout.key}
+                type="button"
+                className={chartLayoutMode === layout.key ? 'active' : ''}
+                onClick={() => setChartLayoutMode(layout.key)}
+              >
+                {layout.label}
+              </button>
+            ))}
+          </div>
+
           <div className="top-actions">
             {topActions.map((action) => (
               <button
@@ -4239,15 +4426,16 @@ function App() {
             </div>
           ) : null}
 
-          <div
-            ref={chartAreaRef}
-            className={`chart-area${isDraggingDrawing ? ' is-dragging' : ''}`}
-            onMouseLeave={clearHoveredCandle}
-            onPointerDown={handleChartPointerDown}
-            onPointerMove={handleChartPointerMove}
-            onPointerUp={handleChartPointerUpOrCancel}
-            onPointerCancel={handleChartPointerUpOrCancel}
-          >
+          <div className={`chart-layout ${chartLayoutMode === 'split' ? 'split' : 'single'}`}>
+            <div
+              ref={chartAreaRef}
+              className={`chart-area chart-area-primary${isDraggingDrawing ? ' is-dragging' : ''}`}
+              onMouseLeave={clearHoveredCandle}
+              onPointerDown={handleChartPointerDown}
+              onPointerMove={handleChartPointerMove}
+              onPointerUp={handleChartPointerUpOrCancel}
+              onPointerCancel={handleChartPointerUpOrCancel}
+            >
             <div className="chart-canvas" ref={containerRef} />
             <div className="vertical-lines-overlay" ref={verticalOverlayRef} />
             {drawingOverlayGeometry.width > 0 && drawingOverlayGeometry.height > 0 ? (
@@ -4322,6 +4510,14 @@ function App() {
                   {hoveredCandleDiff.toFixed(2)} ({hoveredCandleDiffPercent.toFixed(2)}%)
                 </div>
                 <div className="candle-hover-tooltip-volume">거래량 Vol {formatVolume(hoveredCandle.volume)}</div>
+              </div>
+            ) : null}
+            </div>
+
+            {chartLayoutMode === 'split' ? (
+              <div className="chart-area chart-area-secondary">
+                <div className="chart-canvas" ref={secondaryContainerRef} />
+                <div className="secondary-chart-badge">보조 차트 · 범위 동기화</div>
               </div>
             ) : null}
           </div>

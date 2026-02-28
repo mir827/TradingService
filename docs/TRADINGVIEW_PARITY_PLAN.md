@@ -97,7 +97,8 @@ Progress note (2026-02-27):
 - M3-1 completed: replay runtime is now functional in `apps/web` with top-action entry (`리플레이`), bounded historical subset start, play/pause/+1 bar progression, speed options (`x1/x2/x4`), explicit replay status (mode/step/speed), and clean exit back to full chart state.
 - Replay integration is wired through chart candle slicing so existing overlays/drawings/indicator/compare interactions continue operating on the active visible range without introducing separate rendering paths.
 - M3-2 completed: indicator catalog depth now includes RSI(14), MACD(12/26/9), and Bollinger Bands(20, 2) with lightweight parameter controls, safe input normalization/clamping, persisted enable-state/settings via localStorage (`tradingservice.indicators.v2`), and reactive chart-series updates without chart reset.
-- Remaining M3 scope: multi-chart layout skeleton/synchronization (M3-3), and extended alert model/filters for indicator-aware conditions (M3-4).
+- M3-3 completed: multi-chart layout skeleton now supports persisted single/split mode toggling, shared global symbol/interval controls, a secondary candle/volume chart fed by the same symbol/interval dataset, and deterministic cross-chart visible-range synchronization with loop guards.
+- Remaining M3 scope: extended alert model/filters for indicator-aware conditions (M3-4).
 
 DoD:
 - Replay runs from historical candles and can be exited without full chart reset.

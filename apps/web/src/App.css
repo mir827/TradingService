@@ -66,6 +66,7 @@ select {
 
 .top-controls select,
 .intervals button,
+.layout-modes button,
 .top-actions button,
 .tv-bottom-panel button,
 .panel-toggle,
@@ -91,18 +92,25 @@ select {
 }
 
 .intervals button,
+.layout-modes button,
 .top-actions button {
   padding: 6px 10px;
   cursor: pointer;
 }
 
 .intervals button.active,
+.layout-modes button.active,
 .top-actions button.active,
 .watch-tabs button.active,
 .bottom-tabs button.active {
   background: #2962ff;
   border-color: #2962ff;
   color: #fff;
+}
+
+.layout-modes {
+  display: flex;
+  gap: 6px;
 }
 
 .top-actions {
@@ -460,11 +468,31 @@ select {
   font-size: 11px;
 }
 
+.chart-layout {
+  min-height: 0;
+  min-width: 0;
+  display: grid;
+}
+
+.chart-layout.single {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.chart-layout.split {
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px;
+}
+
 .chart-area {
   min-height: 0;
   min-width: 0;
   overflow: hidden;
   position: relative;
+}
+
+.chart-area-secondary {
+  border-top: 1px solid #202a3b;
+  background: #111827;
 }
 
 .chart-area.is-dragging {
@@ -474,6 +502,20 @@ select {
 .chart-canvas {
   position: absolute;
   inset: 0;
+}
+
+.secondary-chart-badge {
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  z-index: 2;
+  pointer-events: none;
+  font-size: 10px;
+  color: #9eb0cb;
+  border: 1px solid #2f3a53;
+  background: rgb(12 18 30 / 75%);
+  border-radius: 999px;
+  padding: 2px 8px;
 }
 
 .vertical-lines-overlay {
