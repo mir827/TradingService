@@ -11,6 +11,13 @@ import {
   type DrawingInputItem,
   type DrawingItem,
 } from './drawings.js';
+import {
+  calculateBollingerBands,
+  calculateMACD,
+  calculateRSI,
+  type BollingerBandsValues,
+  type MacdValues,
+} from './indicatorMath.js';
 
 type MarketType = 'CRYPTO' | 'KOSPI' | 'KOSDAQ';
 
@@ -42,6 +49,35 @@ type Quote = {
 
 type AlertMetric = 'price' | 'changePercent';
 type AlertOperator = '>=' | '<=' | '>' | '<';
+type AlertIndicatorComparator = '>=' | '<=';
+
+type AlertIndicatorCondition =
+  | {
+      type: 'rsiThreshold';
+      operator: AlertIndicatorComparator;
+      threshold: number;
+      period: number;
+    }
+  | {
+      type: 'macdCrossSignal';
+      signal: 'bullish' | 'bearish';
+      fastPeriod: number;
+      slowPeriod: number;
+      signalPeriod: number;
+    }
+  | {
+      type: 'macdHistogramSign';
+      sign: 'positive' | 'negative';
+      fastPeriod: number;
+      slowPeriod: number;
+      signalPeriod: number;
+    }
+  | {
+      type: 'bollingerBandPosition';
+      position: 'aboveUpper' | 'belowLower';
+      period: number;
+      stdDev: number;
+    };
 
 type AlertRule = {
   id: string;
@@ -50,6 +86,7 @@ type AlertRule = {
   operator: AlertOperator;
   threshold: number;
   cooldownSec: number;
+  indicatorConditions?: AlertIndicatorCondition[];
   createdAt: number;
   lastTriggeredAt: number | null;
 };
@@ -63,6 +100,7 @@ type AlertCheckEvent = {
   currentValue: number;
   triggeredAt: number;
   cooldownSec: number;
+  indicatorConditions?: AlertIndicatorCondition[];
 };
 
 type AlertHistoryEventSource = 'manual' | 'watchlist';
@@ -127,8 +165,16 @@ const alertHistoryStore: AlertHistoryEvent[] = [];
 const drawingStore = new Map<string, DrawingItem[]>();
 const watchlistStore = new Map<string, SymbolItem[]>();
 const DEFAULT_RUNTIME_STATE_FILE = './outputs/runtime-state.json';
-const RUNTIME_STATE_VERSION = 1;
+const RUNTIME_STATE_VERSION = 2;
 const ALERT_HISTORY_MAX_EVENTS = 500;
+const ALERT_INDICATOR_INTERVAL = '60';
+const ALERT_INDICATOR_CANDLE_LIMIT = 200;
+const ALERT_RSI_DEFAULT_PERIOD = 14;
+const ALERT_MACD_FAST_DEFAULT_PERIOD = 12;
+const ALERT_MACD_SLOW_DEFAULT_PERIOD = 26;
+const ALERT_MACD_SIGNAL_DEFAULT_PERIOD = 9;
+const ALERT_BOLLINGER_DEFAULT_PERIOD = 20;
+const ALERT_BOLLINGER_DEFAULT_STD_DEV = 2;
 
 const cryptoIntervalMap: Record<string, string> = {
   '1': '1m',
@@ -224,8 +270,35 @@ const watchlistPutBodySchema = z.object({
   items: z.array(symbolItemSchema),
 });
 
+const alertQuerySymbolsSchema = z.preprocess((value) => {
+  if (typeof value === 'string') {
+    return value
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => String(entry).trim()).filter((entry) => entry.length > 0);
+  }
+
+  return value;
+}, z.array(z.string().trim().min(1)).min(1).max(40).optional());
+
+const alertQueryIndicatorAwareOnlySchema = z.preprocess((value) => {
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1') return true;
+    if (normalized === 'false' || normalized === '0') return false;
+  }
+
+  return value;
+}, z.boolean().optional());
+
 const alertRuleQuerySchema = z.object({
   symbol: z.string().optional(),
+  symbols: alertQuerySymbolsSchema,
+  indicatorAwareOnly: alertQueryIndicatorAwareOnlySchema,
 });
 
 const drawingsQuerySchema = z.object({
@@ -294,12 +367,52 @@ const drawingsPutBodySchema = z
     path: ['drawings'],
   });
 
+const alertIndicatorConditionSchema: z.ZodType<AlertIndicatorCondition> = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('rsiThreshold'),
+    operator: z.enum(['>=', '<=']),
+    threshold: z.number().finite().min(0).max(100),
+    period: z.coerce.number().int().min(2).max(100).default(ALERT_RSI_DEFAULT_PERIOD),
+  }),
+  z
+    .object({
+      type: z.literal('macdCrossSignal'),
+      signal: z.enum(['bullish', 'bearish']),
+      fastPeriod: z.coerce.number().int().min(2).max(100).default(ALERT_MACD_FAST_DEFAULT_PERIOD),
+      slowPeriod: z.coerce.number().int().min(3).max(200).default(ALERT_MACD_SLOW_DEFAULT_PERIOD),
+      signalPeriod: z.coerce.number().int().min(2).max(100).default(ALERT_MACD_SIGNAL_DEFAULT_PERIOD),
+    })
+    .refine((data) => data.fastPeriod < data.slowPeriod, {
+      message: 'fastPeriod must be less than slowPeriod',
+      path: ['fastPeriod'],
+    }),
+  z
+    .object({
+      type: z.literal('macdHistogramSign'),
+      sign: z.enum(['positive', 'negative']),
+      fastPeriod: z.coerce.number().int().min(2).max(100).default(ALERT_MACD_FAST_DEFAULT_PERIOD),
+      slowPeriod: z.coerce.number().int().min(3).max(200).default(ALERT_MACD_SLOW_DEFAULT_PERIOD),
+      signalPeriod: z.coerce.number().int().min(2).max(100).default(ALERT_MACD_SIGNAL_DEFAULT_PERIOD),
+    })
+    .refine((data) => data.fastPeriod < data.slowPeriod, {
+      message: 'fastPeriod must be less than slowPeriod',
+      path: ['fastPeriod'],
+    }),
+  z.object({
+    type: z.literal('bollingerBandPosition'),
+    position: z.enum(['aboveUpper', 'belowLower']),
+    period: z.coerce.number().int().min(2).max(200).default(ALERT_BOLLINGER_DEFAULT_PERIOD),
+    stdDev: z.coerce.number().finite().min(0.1).max(6).default(ALERT_BOLLINGER_DEFAULT_STD_DEV),
+  }),
+]);
+
 const alertRuleCreateSchema = z.object({
   symbol: z.string().min(1),
   metric: z.enum(['price', 'changePercent']),
   operator: z.enum(['>=', '<=', '>', '<']),
   threshold: z.number().finite(),
   cooldownSec: z.coerce.number().int().min(0).max(86400).default(0),
+  indicatorConditions: z.array(alertIndicatorConditionSchema).max(4).optional(),
 });
 
 const alertRuleDeleteParamSchema = z.object({
@@ -308,6 +421,9 @@ const alertRuleDeleteParamSchema = z.object({
 
 const alertCheckBodySchema = z.object({
   symbol: z.string().optional(),
+  symbols: z.array(z.string().trim().min(1)).min(1).max(40).optional(),
+  source: z.enum(['manual', 'watchlist']).optional(),
+  indicatorAwareOnly: z.boolean().optional(),
   values: z
     .object({
       symbol: z.string().optional(),
@@ -319,13 +435,17 @@ const alertCheckBodySchema = z.object({
 
 const alertCheckWatchlistBodySchema = z.object({
   symbols: z.array(z.string().trim().min(1)).min(1).max(40),
+  source: z.enum(['manual', 'watchlist']).optional(),
+  indicatorAwareOnly: z.boolean().optional(),
 });
 
 const alertHistoryQuerySchema = z.object({
   symbol: z.string().optional(),
+  symbols: alertQuerySymbolsSchema,
   fromTs: z.coerce.number().int().nonnegative().optional(),
   toTs: z.coerce.number().int().nonnegative().optional(),
   source: z.enum(['manual', 'watchlist']).optional(),
+  indicatorAwareOnly: alertQueryIndicatorAwareOnlySchema,
   limit: z.coerce.number().int().min(1).default(50).transform((value) => Math.min(value, 200)),
 })
   .refine(
@@ -343,8 +463,9 @@ const persistedAlertRuleSchema = z.object({
   operator: z.enum(['>=', '<=', '>', '<']),
   threshold: z.coerce.number().finite(),
   cooldownSec: z.coerce.number().int().min(0).max(86400),
+  indicatorConditions: z.array(alertIndicatorConditionSchema).max(4).optional(),
   createdAt: z.coerce.number().int().nonnegative(),
-  lastTriggeredAt: z.union([z.coerce.number().int().nonnegative(), z.null()]),
+  lastTriggeredAt: z.union([z.null(), z.coerce.number().int().nonnegative()]),
 });
 
 const persistedAlertHistoryEventSchema = z.object({
@@ -356,6 +477,7 @@ const persistedAlertHistoryEventSchema = z.object({
   currentValue: z.coerce.number().finite(),
   triggeredAt: z.coerce.number().int().nonnegative(),
   cooldownSec: z.coerce.number().int().min(0).max(86400),
+  indicatorConditions: z.array(alertIndicatorConditionSchema).max(4).optional(),
   source: z.enum(['manual', 'watchlist']).optional(),
   sourceSymbol: z.string().trim().min(1).optional(),
 });
@@ -608,6 +730,9 @@ async function loadRuntimeStateFromDisk() {
       operator: parsedRule.data.operator,
       threshold: parsedRule.data.threshold,
       cooldownSec: parsedRule.data.cooldownSec,
+      ...(parsedRule.data.indicatorConditions?.length
+        ? { indicatorConditions: parsedRule.data.indicatorConditions.map((condition) => ({ ...condition })) }
+        : {}),
       createdAt: parsedRule.data.createdAt,
       lastTriggeredAt: parsedRule.data.lastTriggeredAt,
     };
@@ -632,6 +757,9 @@ async function loadRuntimeStateFromDisk() {
       currentValue: parsedEvent.data.currentValue,
       triggeredAt: parsedEvent.data.triggeredAt,
       cooldownSec: parsedEvent.data.cooldownSec,
+      ...(parsedEvent.data.indicatorConditions?.length
+        ? { indicatorConditions: parsedEvent.data.indicatorConditions.map((condition) => ({ ...condition })) }
+        : {}),
       ...(parsedEvent.data.source ? { source: parsedEvent.data.source } : {}),
       ...(parsedEvent.data.sourceSymbol
         ? { sourceSymbol: normalizeSymbol(parsedEvent.data.sourceSymbol) }
@@ -759,9 +887,164 @@ function getMarketStatus(market: MarketType, checkedAt = Date.now()): MarketStat
   };
 }
 
+type AlertIndicatorEvaluationCache = {
+  closeValues: number[];
+  rsiByPeriod: Map<number, Array<number | null>>;
+  macdByPeriod: Map<string, MacdValues>;
+  bollingerByPeriod: Map<string, BollingerBandsValues>;
+};
+
+function cloneIndicatorConditions(conditions?: AlertIndicatorCondition[]) {
+  if (!conditions?.length) return undefined;
+  return conditions.map((condition) => ({ ...condition }));
+}
+
+function hasIndicatorConditions(rule: Pick<AlertRule, 'indicatorConditions'>) {
+  return Boolean(rule.indicatorConditions?.length);
+}
+
+function isIndicatorAwareEvent(eventItem: Pick<AlertCheckEvent, 'indicatorConditions'>) {
+  return Boolean(eventItem.indicatorConditions?.length);
+}
+
+function createMacdPeriodKey(fastPeriod: number, slowPeriod: number, signalPeriod: number) {
+  return `${fastPeriod}:${slowPeriod}:${signalPeriod}`;
+}
+
+function createBollingerPeriodKey(period: number, stdDev: number) {
+  return `${period}:${stdDev}`;
+}
+
+function collectScopedSymbols(symbol?: string | null, symbols?: string[] | null) {
+  const scopedSymbols = new Set<string>();
+
+  if (typeof symbol === 'string' && symbol.trim().length > 0) {
+    scopedSymbols.add(normalizeSymbol(symbol));
+  }
+
+  for (const rawSymbol of symbols ?? []) {
+    if (!rawSymbol?.trim()) continue;
+    scopedSymbols.add(normalizeSymbol(rawSymbol));
+  }
+
+  return scopedSymbols.size > 0 ? scopedSymbols : null;
+}
+
+function createIndicatorEvaluationCache(candles: Candle[]) {
+  const closeValues = candles
+    .map((candle) => Number(candle.close))
+    .filter((value) => Number.isFinite(value));
+
+  if (closeValues.length < 2) {
+    return null;
+  }
+
+  return {
+    closeValues,
+    rsiByPeriod: new Map(),
+    macdByPeriod: new Map(),
+    bollingerByPeriod: new Map(),
+  } satisfies AlertIndicatorEvaluationCache;
+}
+
+function getLastNumber(values: Array<number | null>) {
+  if (!values.length) return null;
+  const lastValue = values[values.length - 1];
+  return typeof lastValue === 'number' && Number.isFinite(lastValue) ? lastValue : null;
+}
+
+function evaluateIndicatorCondition(
+  condition: AlertIndicatorCondition,
+  cache: AlertIndicatorEvaluationCache,
+  quoteValues: { lastPrice: number; changePercent: number },
+) {
+  if (condition.type === 'rsiThreshold') {
+    const cached = cache.rsiByPeriod.get(condition.period) ?? calculateRSI(cache.closeValues, condition.period);
+    cache.rsiByPeriod.set(condition.period, cached);
+    const latestRsi = getLastNumber(cached);
+    if (latestRsi === null) return false;
+    return compareWithOperator(latestRsi, condition.operator, condition.threshold);
+  }
+
+  if (condition.type === 'macdCrossSignal' || condition.type === 'macdHistogramSign') {
+    const cacheKey = createMacdPeriodKey(condition.fastPeriod, condition.slowPeriod, condition.signalPeriod);
+    const cached =
+      cache.macdByPeriod.get(cacheKey) ??
+      calculateMACD(cache.closeValues, condition.fastPeriod, condition.slowPeriod, condition.signalPeriod);
+    cache.macdByPeriod.set(cacheKey, cached);
+
+    if (condition.type === 'macdHistogramSign') {
+      const latestHistogram = getLastNumber(cached.histogram);
+      if (latestHistogram === null) return false;
+      return condition.sign === 'positive' ? latestHistogram > 0 : latestHistogram < 0;
+    }
+
+    const lastIndex = cached.macdLine.length - 1;
+    if (lastIndex < 1) return false;
+
+    const previousMacd = cached.macdLine[lastIndex - 1];
+    const previousSignal = cached.signalLine[lastIndex - 1];
+    const currentMacd = cached.macdLine[lastIndex];
+    const currentSignal = cached.signalLine[lastIndex];
+
+    if (
+      typeof previousMacd !== 'number' ||
+      typeof previousSignal !== 'number' ||
+      typeof currentMacd !== 'number' ||
+      typeof currentSignal !== 'number' ||
+      !Number.isFinite(previousMacd) ||
+      !Number.isFinite(previousSignal) ||
+      !Number.isFinite(currentMacd) ||
+      !Number.isFinite(currentSignal)
+    ) {
+      return false;
+    }
+
+    if (condition.signal === 'bullish') {
+      return previousMacd <= previousSignal && currentMacd > currentSignal;
+    }
+
+    return previousMacd >= previousSignal && currentMacd < currentSignal;
+  }
+
+  const cacheKey = createBollingerPeriodKey(condition.period, condition.stdDev);
+  const cached =
+    cache.bollingerByPeriod.get(cacheKey) ??
+    calculateBollingerBands(cache.closeValues, condition.period, condition.stdDev);
+  cache.bollingerByPeriod.set(cacheKey, cached);
+
+  const latestUpper = getLastNumber(cached.upper);
+  const latestLower = getLastNumber(cached.lower);
+  if (latestUpper === null || latestLower === null) return false;
+
+  if (condition.position === 'aboveUpper') {
+    return quoteValues.lastPrice > latestUpper;
+  }
+
+  return quoteValues.lastPrice < latestLower;
+}
+
+function evaluateRuleIndicatorConditions(
+  rule: AlertRule,
+  quoteValues: { lastPrice: number; changePercent: number },
+  indicatorCacheBySymbol: Map<string, AlertIndicatorEvaluationCache>,
+) {
+  if (!hasIndicatorConditions(rule)) {
+    return true;
+  }
+
+  const symbolCache = indicatorCacheBySymbol.get(rule.symbol);
+  if (!symbolCache) return false;
+
+  return rule.indicatorConditions!.every((condition) =>
+    evaluateIndicatorCondition(condition, symbolCache, quoteValues),
+  );
+}
+
 function serializeAlertRule(rule: AlertRule) {
   return {
     ...rule,
+    ...(rule.indicatorConditions?.length ? { indicatorConditions: cloneIndicatorConditions(rule.indicatorConditions) } : {}),
   };
 }
 
@@ -788,6 +1071,9 @@ function appendAlertHistoryEvents(
   for (const eventItem of events) {
     alertHistoryStore.push({
       ...eventItem,
+      ...(eventItem.indicatorConditions?.length
+        ? { indicatorConditions: cloneIndicatorConditions(eventItem.indicatorConditions) }
+        : {}),
       source,
       ...(normalizedSourceSymbol ? { sourceSymbol: normalizedSourceSymbol } : {}),
     });
@@ -797,19 +1083,23 @@ function appendAlertHistoryEvents(
 }
 
 function getAlertHistory(
-  symbol: string | null,
+  symbols: Set<string> | null,
   source: AlertHistoryEventSource | null,
   fromTs: number | null,
   toTs: number | null,
   limit: number,
+  indicatorAwareOnly: boolean,
 ) {
-  const normalizedSymbol = symbol ? normalizeSymbol(symbol) : null;
   const filtered = alertHistoryStore.filter((eventItem) => {
-    if (normalizedSymbol && eventItem.symbol !== normalizedSymbol) {
+    if (symbols && !symbols.has(eventItem.symbol)) {
       return false;
     }
 
     if (source && eventItem.source !== source) {
+      return false;
+    }
+
+    if (indicatorAwareOnly && !isIndicatorAwareEvent(eventItem)) {
       return false;
     }
 
@@ -828,7 +1118,12 @@ function getAlertHistory(
 
   return {
     total,
-    events: filtered.slice(start).reverse().map((eventItem) => ({ ...eventItem })),
+    events: filtered.slice(start).reverse().map((eventItem) => ({
+      ...eventItem,
+      ...(eventItem.indicatorConditions?.length
+        ? { indicatorConditions: cloneIndicatorConditions(eventItem.indicatorConditions) }
+        : {}),
+    })),
   };
 }
 
@@ -842,6 +1137,7 @@ function evaluateAlertRules(
   rules: AlertRule[],
   quoteBySymbol: Map<string, { lastPrice: number; changePercent: number }>,
   evaluatedAt: number,
+  indicatorCacheBySymbol: Map<string, AlertIndicatorEvaluationCache>,
 ) {
   const triggered: AlertCheckEvent[] = [];
   let suppressedByCooldown = 0;
@@ -854,6 +1150,7 @@ function evaluateAlertRules(
     const met = compareWithOperator(currentValue, rule.operator, rule.threshold);
 
     if (!met) continue;
+    if (!evaluateRuleIndicatorConditions(rule, values, indicatorCacheBySymbol)) continue;
 
     const cooldownMs = rule.cooldownSec * 1000;
     const inCooldown =
@@ -876,6 +1173,9 @@ function evaluateAlertRules(
       currentValue,
       triggeredAt: evaluatedAt,
       cooldownSec: rule.cooldownSec,
+      ...(rule.indicatorConditions?.length
+        ? { indicatorConditions: cloneIndicatorConditions(rule.indicatorConditions) }
+        : {}),
     });
   }
 
@@ -883,6 +1183,24 @@ function evaluateAlertRules(
     triggered,
     suppressedByCooldown,
   };
+}
+
+function filterAlertRulesByScope(
+  rules: AlertRule[],
+  scopedSymbols: Set<string> | null,
+  indicatorAwareOnly: boolean,
+) {
+  return rules.filter((rule) => {
+    if (scopedSymbols && !scopedSymbols.has(rule.symbol)) {
+      return false;
+    }
+
+    if (indicatorAwareOnly && !hasIndicatorConditions(rule)) {
+      return false;
+    }
+
+    return true;
+  });
 }
 
 async function refreshKrxSymbols(force = false, signal?: AbortSignal) {
@@ -1202,6 +1520,42 @@ async function fetchLiveQuote(symbol: string) {
   return quote;
 }
 
+async function fetchCandlesForIndicatorCheck(symbol: string) {
+  const cacheKey = `${symbol}:${ALERT_INDICATOR_INTERVAL}:${ALERT_INDICATOR_CANDLE_LIMIT}`;
+  const cached = getCachedCandles(cacheKey);
+  if (cached) return cached;
+
+  const candles = isKrxSymbol(symbol)
+    ? await fetchKrxCandles(symbol, ALERT_INDICATOR_INTERVAL, ALERT_INDICATOR_CANDLE_LIMIT)
+    : await fetchCryptoCandles(symbol, ALERT_INDICATOR_INTERVAL, ALERT_INDICATOR_CANDLE_LIMIT);
+
+  setCachedCandles(cacheKey, candles);
+  return candles;
+}
+
+async function loadIndicatorEvaluationCache(
+  rules: AlertRule[],
+): Promise<Map<string, AlertIndicatorEvaluationCache>> {
+  const symbolSet = new Set(
+    rules.filter((rule) => hasIndicatorConditions(rule)).map((rule) => rule.symbol),
+  );
+
+  const cacheBySymbol = new Map<string, AlertIndicatorEvaluationCache>();
+  if (!symbolSet.size) return cacheBySymbol;
+
+  await Promise.all(
+    [...symbolSet].map(async (symbol) => {
+      const candles = await fetchCandlesForIndicatorCheck(symbol);
+      const cache = createIndicatorEvaluationCache(candles);
+      if (cache) {
+        cacheBySymbol.set(symbol, cache);
+      }
+    }),
+  );
+
+  return cacheBySymbol;
+}
+
 try {
   await loadRuntimeStateFromDisk();
 } catch (error) {
@@ -1414,9 +1768,9 @@ app.get('/api/alerts/rules', async (request, reply) => {
     return reply.code(400).send({ error: 'Invalid query', detail: parsed.error.format() });
   }
 
-  const symbol = parsed.data.symbol ? normalizeSymbol(parsed.data.symbol) : null;
-  const rules = [...alertRuleStore.values()]
-    .filter((rule) => (symbol ? rule.symbol === symbol : true))
+  const scopedSymbols = collectScopedSymbols(parsed.data.symbol, parsed.data.symbols);
+  const indicatorAwareOnly = parsed.data.indicatorAwareOnly === true;
+  const rules = filterAlertRulesByScope([...alertRuleStore.values()], scopedSymbols, indicatorAwareOnly)
     .sort((a, b) => b.createdAt - a.createdAt)
     .map(serializeAlertRule);
 
@@ -1438,6 +1792,9 @@ app.post('/api/alerts/rules', async (request, reply) => {
     operator: parsed.data.operator,
     threshold: parsed.data.threshold,
     cooldownSec: parsed.data.cooldownSec,
+    ...(parsed.data.indicatorConditions?.length
+      ? { indicatorConditions: cloneIndicatorConditions(parsed.data.indicatorConditions) }
+      : {}),
     createdAt: now,
     lastTriggeredAt: null,
   };
@@ -1472,9 +1829,12 @@ app.post('/api/alerts/check', async (request, reply) => {
     return reply.code(400).send({ error: 'Invalid body', detail: parsed.error.format() });
   }
 
-  const requestedSymbol = parsed.data.symbol ? normalizeSymbol(parsed.data.symbol) : null;
-  const rules = [...alertRuleStore.values()].filter((rule) =>
-    requestedSymbol ? rule.symbol === requestedSymbol : true,
+  const source = parsed.data.source ?? 'manual';
+  const scopedSymbols = collectScopedSymbols(parsed.data.symbol, parsed.data.symbols);
+  const rules = filterAlertRulesByScope(
+    [...alertRuleStore.values()],
+    scopedSymbols,
+    parsed.data.indicatorAwareOnly === true,
   );
 
   if (!rules.length) {
@@ -1488,8 +1848,9 @@ app.post('/api/alerts/check', async (request, reply) => {
   }
 
   const quoteBySymbol = new Map<string, { lastPrice: number; changePercent: number }>();
+  const singleScopedSymbol = scopedSymbols?.size === 1 ? [...scopedSymbols][0] : null;
   const fallbackProvidedSymbol =
-    requestedSymbol ??
+    singleScopedSymbol ??
     (rules.every((rule) => rule.symbol === rules[0].symbol) ? rules[0].symbol : null);
   const providedSymbolRaw = parsed.data.values?.symbol ?? fallbackProvidedSymbol;
   const providedSymbol = providedSymbolRaw ? normalizeSymbol(providedSymbolRaw) : null;
@@ -1520,10 +1881,18 @@ app.post('/api/alerts/check', async (request, reply) => {
     return reply.code(502).send({ error: 'Failed to evaluate alert rules due to quote fetch failure' });
   }
 
+  let indicatorCacheBySymbol = new Map<string, AlertIndicatorEvaluationCache>();
+  try {
+    indicatorCacheBySymbol = await loadIndicatorEvaluationCache(rules);
+  } catch (error) {
+    app.log.error({ error }, 'Failed to fetch candles for indicator alert checks');
+    return reply.code(502).send({ error: 'Failed to evaluate indicator conditions due to candle fetch failure' });
+  }
+
   const now = Date.now();
-  const { triggered, suppressedByCooldown } = evaluateAlertRules(rules, quoteBySymbol, now);
+  const { triggered, suppressedByCooldown } = evaluateAlertRules(rules, quoteBySymbol, now, indicatorCacheBySymbol);
   if (triggered.length > 0) {
-    appendAlertHistoryEvents(triggered, 'manual', requestedSymbol);
+    appendAlertHistoryEvents(triggered, source, singleScopedSymbol);
     await persistRuntimeState();
   }
 
@@ -1543,7 +1912,23 @@ app.post('/api/alerts/check-watchlist', async (request, reply) => {
     return reply.code(400).send({ error: 'Invalid body', detail: parsed.error.format() });
   }
 
+  const source = parsed.data.source ?? 'watchlist';
   const checkedSymbols = [...new Set(parsed.data.symbols.map((symbol) => normalizeSymbol(symbol)))];
+  const checkedSet = new Set(checkedSymbols);
+  const rules = filterAlertRulesByScope(
+    [...alertRuleStore.values()],
+    checkedSet,
+    parsed.data.indicatorAwareOnly === true,
+  );
+
+  if (!rules.length) {
+    return {
+      checkedAt: Date.now(),
+      checkedSymbols,
+      events: [],
+    };
+  }
+
   const quoteBySymbol = new Map<string, { lastPrice: number; changePercent: number }>();
 
   try {
@@ -1561,12 +1946,18 @@ app.post('/api/alerts/check-watchlist', async (request, reply) => {
     return reply.code(502).send({ error: 'Failed to evaluate watchlist alert rules due to quote fetch failure' });
   }
 
-  const checkedSet = new Set(checkedSymbols);
-  const rules = [...alertRuleStore.values()].filter((rule) => checkedSet.has(rule.symbol));
+  let indicatorCacheBySymbol = new Map<string, AlertIndicatorEvaluationCache>();
+  try {
+    indicatorCacheBySymbol = await loadIndicatorEvaluationCache(rules);
+  } catch (error) {
+    app.log.error({ error }, 'Failed to fetch candles for watchlist indicator alert checks');
+    return reply.code(502).send({ error: 'Failed to evaluate indicator conditions due to candle fetch failure' });
+  }
+
   const checkedAt = Date.now();
-  const { triggered } = evaluateAlertRules(rules, quoteBySymbol, checkedAt);
+  const { triggered } = evaluateAlertRules(rules, quoteBySymbol, checkedAt, indicatorCacheBySymbol);
   if (triggered.length > 0) {
-    appendAlertHistoryEvents(triggered, 'watchlist');
+    appendAlertHistoryEvents(triggered, source);
     await persistRuntimeState();
   }
 
@@ -1584,11 +1975,20 @@ app.get('/api/alerts/history', async (request, reply) => {
     return reply.code(400).send({ error: 'Invalid query', detail: parsed.error.format() });
   }
 
+  const symbols = collectScopedSymbols(parsed.data.symbol, parsed.data.symbols);
   const symbol = parsed.data.symbol ? normalizeSymbol(parsed.data.symbol) : null;
   const source = parsed.data.source ?? null;
   const fromTs = parsed.data.fromTs ?? null;
   const toTs = parsed.data.toTs ?? null;
-  const { total, events } = getAlertHistory(symbol, source, fromTs, toTs, parsed.data.limit);
+  const indicatorAwareOnly = parsed.data.indicatorAwareOnly === true;
+  const { total, events } = getAlertHistory(
+    symbols,
+    source,
+    fromTs,
+    toTs,
+    parsed.data.limit,
+    indicatorAwareOnly,
+  );
 
   return {
     symbol,

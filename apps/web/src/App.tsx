@@ -116,6 +116,36 @@ type MarketStatus = {
 
 type AlertMetric = 'price' | 'changePercent';
 type AlertOperator = '>=' | '<=' | '>' | '<';
+type AlertIndicatorComparator = '>=' | '<=';
+type AlertIndicatorType = 'rsiThreshold' | 'macdCrossSignal' | 'macdHistogramSign' | 'bollingerBandPosition';
+
+type AlertIndicatorCondition =
+  | {
+      type: 'rsiThreshold';
+      operator: AlertIndicatorComparator;
+      threshold: number;
+      period?: number;
+    }
+  | {
+      type: 'macdCrossSignal';
+      signal: 'bullish' | 'bearish';
+      fastPeriod?: number;
+      slowPeriod?: number;
+      signalPeriod?: number;
+    }
+  | {
+      type: 'macdHistogramSign';
+      sign: 'positive' | 'negative';
+      fastPeriod?: number;
+      slowPeriod?: number;
+      signalPeriod?: number;
+    }
+  | {
+      type: 'bollingerBandPosition';
+      position: 'aboveUpper' | 'belowLower';
+      period?: number;
+      stdDev?: number;
+    };
 
 type AlertRule = {
   id: string;
@@ -124,6 +154,7 @@ type AlertRule = {
   operator: AlertOperator;
   threshold: number;
   cooldownSec: number;
+  indicatorConditions?: AlertIndicatorCondition[];
   createdAt: number;
   lastTriggeredAt: number | null;
 };
@@ -137,6 +168,7 @@ type AlertCheckEvent = {
   currentValue: number;
   triggeredAt: number;
   cooldownSec: number;
+  indicatorConditions?: AlertIndicatorCondition[];
 };
 
 type AlertHistorySource = 'manual' | 'watchlist';
@@ -554,6 +586,27 @@ function formatAlertValue(metric: AlertMetric, value: number) {
   return `${value.toFixed(2)}%`;
 }
 
+function formatAlertIndicatorCondition(condition: AlertIndicatorCondition) {
+  if (condition.type === 'rsiThreshold') {
+    return `RSI${condition.period ? `(${condition.period})` : ''} ${condition.operator} ${condition.threshold.toFixed(2)}`;
+  }
+
+  if (condition.type === 'macdCrossSignal') {
+    return `MACD cross ${condition.signal === 'bullish' ? 'bullish' : 'bearish'}`;
+  }
+
+  if (condition.type === 'macdHistogramSign') {
+    return `MACD hist ${condition.sign === 'positive' ? '> 0' : '< 0'}`;
+  }
+
+  return `BB ${condition.position === 'aboveUpper' ? 'price > upper' : 'price < lower'}`;
+}
+
+function formatAlertIndicatorSummary(conditions?: AlertIndicatorCondition[]) {
+  if (!conditions?.length) return null;
+  return conditions.map(formatAlertIndicatorCondition).join(' · ');
+}
+
 function formatMarketStatusReason(reason: MarketStatusReason) {
   if (reason === 'WEEKEND') return '주말';
   if (reason === 'OUT_OF_SESSION') return '장외 시간';
@@ -730,12 +783,22 @@ function App() {
   const [alertOperator, setAlertOperator] = useState<AlertOperator>('>=');
   const [alertThresholdInput, setAlertThresholdInput] = useState('');
   const [alertCooldownInput, setAlertCooldownInput] = useState('60');
+  const [alertIndicatorEnabled, setAlertIndicatorEnabled] = useState(false);
+  const [alertIndicatorType, setAlertIndicatorType] = useState<AlertIndicatorType>('rsiThreshold');
+  const [alertRsiOperator, setAlertRsiOperator] = useState<AlertIndicatorComparator>('>=');
+  const [alertRsiThresholdInput, setAlertRsiThresholdInput] = useState('70');
+  const [alertMacdCrossSignal, setAlertMacdCrossSignal] = useState<'bullish' | 'bearish'>('bullish');
+  const [alertMacdHistogramSign, setAlertMacdHistogramSign] = useState<'positive' | 'negative'>('positive');
+  const [alertBollingerPosition, setAlertBollingerPosition] = useState<'aboveUpper' | 'belowLower'>('aboveUpper');
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
   const [alertTriggeredEvents, setAlertTriggeredEvents] = useState<AlertCheckEvent[]>([]);
   const [alertLastCheckedAt, setAlertLastCheckedAt] = useState<number | null>(null);
+  const [alertRuleSymbolFilter, setAlertRuleSymbolFilter] = useState('BTCUSDT');
+  const [alertRuleIndicatorAwareOnly, setAlertRuleIndicatorAwareOnly] = useState(false);
   const [alertHistoryEvents, setAlertHistoryEvents] = useState<AlertHistoryEvent[]>([]);
   const [alertHistorySymbolFilter, setAlertHistorySymbolFilter] = useState('');
   const [alertHistorySourceFilter, setAlertHistorySourceFilter] = useState<AlertHistorySourceFilter>('all');
+  const [alertHistoryIndicatorAwareOnly, setAlertHistoryIndicatorAwareOnly] = useState(false);
   const [alertsHistoryLoading, setAlertsHistoryLoading] = useState(false);
   const [alertsHistoryClearing, setAlertsHistoryClearing] = useState(false);
 
@@ -754,6 +817,10 @@ function App() {
 
   useEffect(() => {
     selectedSymbolRef.current = selectedSymbol;
+  }, [selectedSymbol]);
+
+  useEffect(() => {
+    setAlertRuleSymbolFilter(selectedSymbol);
   }, [selectedSymbol]);
 
   useEffect(() => {
@@ -2276,25 +2343,33 @@ function App() {
     };
   }, [watchQuery]);
 
-  const loadAlertRules = useCallback(
-    async (symbol: string) => {
-      setAlertsLoading(true);
+  const loadAlertRules = useCallback(async () => {
+    setAlertsLoading(true);
 
-      try {
-        const response = await fetch(`${apiBase}/api/alerts/rules?symbol=${encodeURIComponent(symbol)}`);
-        if (!response.ok) throw new Error('alert rules fetch failed');
+    try {
+      const params = new URLSearchParams();
+      const normalizedSymbol = alertRuleSymbolFilter.trim().toUpperCase();
 
-        const data = (await response.json()) as { rules: AlertRule[] };
-        setAlertRules(data.rules ?? []);
-      } catch {
-        setAlertRules([]);
-        setAlertMessage('알림 규칙을 불러오지 못했습니다.');
-      } finally {
-        setAlertsLoading(false);
+      if (normalizedSymbol) {
+        params.set('symbol', normalizedSymbol);
       }
-    },
-    [],
-  );
+      if (alertRuleIndicatorAwareOnly) {
+        params.set('indicatorAwareOnly', 'true');
+      }
+
+      const query = params.toString();
+      const response = await fetch(`${apiBase}/api/alerts/rules${query ? `?${query}` : ''}`);
+      if (!response.ok) throw new Error('alert rules fetch failed');
+
+      const data = (await response.json()) as { rules: AlertRule[] };
+      setAlertRules(data.rules ?? []);
+    } catch {
+      setAlertRules([]);
+      setAlertMessage('알림 규칙을 불러오지 못했습니다.');
+    } finally {
+      setAlertsLoading(false);
+    }
+  }, [alertRuleIndicatorAwareOnly, alertRuleSymbolFilter]);
 
   const loadAlertHistory = useCallback(async () => {
     setAlertsHistoryLoading(true);
@@ -2310,6 +2385,9 @@ function App() {
       if (alertHistorySourceFilter !== 'all') {
         params.set('source', alertHistorySourceFilter);
       }
+      if (alertHistoryIndicatorAwareOnly) {
+        params.set('indicatorAwareOnly', 'true');
+      }
 
       const response = await fetch(`${apiBase}/api/alerts/history?${params.toString()}`);
       if (!response.ok) throw new Error('alert history fetch failed');
@@ -2322,12 +2400,12 @@ function App() {
     } finally {
       setAlertsHistoryLoading(false);
     }
-  }, [alertHistorySourceFilter, alertHistorySymbolFilter]);
+  }, [alertHistoryIndicatorAwareOnly, alertHistorySourceFilter, alertHistorySymbolFilter]);
 
   useEffect(() => {
     setAlertMessage(null);
-    void loadAlertRules(selectedSymbol);
-  }, [loadAlertRules, selectedSymbol]);
+    void loadAlertRules();
+  }, [loadAlertRules]);
 
   useEffect(() => {
     if (watchTab !== 'alerts') return;
@@ -2713,6 +2791,7 @@ function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             symbols: watchlistAlertSymbols,
+            ...(alertRuleIndicatorAwareOnly ? { indicatorAwareOnly: true } : {}),
           }),
         });
         if (!response.ok) throw new Error('check watchlist alerts failed');
@@ -2731,7 +2810,7 @@ function App() {
         } else if (events.length > 0) {
           setAlertMessage(`자동 체크 트리거 ${events.length}건`);
         }
-        await loadAlertRules(selectedSymbol);
+        await loadAlertRules();
         await loadAlertHistory();
       } catch {
         setAlertMessage(
@@ -2746,7 +2825,13 @@ function App() {
         watchlistAlertCheckInFlightRef.current = false;
       }
     },
-    [appendWatchlistAlertEvents, loadAlertHistory, loadAlertRules, selectedSymbol, watchlistAlertSymbols],
+    [
+      alertRuleIndicatorAwareOnly,
+      appendWatchlistAlertEvents,
+      loadAlertHistory,
+      loadAlertRules,
+      watchlistAlertSymbols,
+    ],
   );
 
   useEffect(() => {
@@ -2892,6 +2977,46 @@ function App() {
       return;
     }
 
+    let indicatorConditions: AlertIndicatorCondition[] | undefined;
+    if (alertIndicatorEnabled) {
+      if (alertIndicatorType === 'rsiThreshold') {
+        const rsiThreshold = Number(alertRsiThresholdInput);
+        if (!Number.isFinite(rsiThreshold) || rsiThreshold < 0 || rsiThreshold > 100) {
+          setAlertMessage('RSI 기준값은 0~100 사이 숫자여야 합니다.');
+          return;
+        }
+
+        indicatorConditions = [
+          {
+            type: 'rsiThreshold',
+            operator: alertRsiOperator,
+            threshold: rsiThreshold,
+          },
+        ];
+      } else if (alertIndicatorType === 'macdCrossSignal') {
+        indicatorConditions = [
+          {
+            type: 'macdCrossSignal',
+            signal: alertMacdCrossSignal,
+          },
+        ];
+      } else if (alertIndicatorType === 'macdHistogramSign') {
+        indicatorConditions = [
+          {
+            type: 'macdHistogramSign',
+            sign: alertMacdHistogramSign,
+          },
+        ];
+      } else {
+        indicatorConditions = [
+          {
+            type: 'bollingerBandPosition',
+            position: alertBollingerPosition,
+          },
+        ];
+      }
+    }
+
     setAlertsSubmitting(true);
 
     try {
@@ -2904,6 +3029,7 @@ function App() {
           operator: alertOperator,
           threshold,
           cooldownSec,
+          ...(indicatorConditions ? { indicatorConditions } : {}),
         }),
       });
 
@@ -2911,7 +3037,7 @@ function App() {
 
       setAlertThresholdInput('');
       setAlertMessage('알림 규칙이 추가되었습니다.');
-      await loadAlertRules(selectedSymbol);
+      await loadAlertRules();
     } catch {
       setAlertMessage('알림 규칙 생성에 실패했습니다.');
     } finally {
@@ -2943,9 +3069,14 @@ function App() {
       const body: {
         symbol: string;
         values?: { symbol: string; lastPrice: number; changePercent: number };
+        indicatorAwareOnly?: boolean;
       } = {
         symbol: selectedSymbol,
       };
+
+      if (alertRuleIndicatorAwareOnly) {
+        body.indicatorAwareOnly = true;
+      }
 
       if (selectedQuote) {
         body.values = {
@@ -2978,7 +3109,7 @@ function App() {
       setAlertMessage(
         `체크 완료: ${data.checkedRuleCount}개 규칙, ${data.triggeredCount}개 트리거, 쿨다운 억제 ${data.suppressedByCooldown}개`,
       );
-      await loadAlertRules(selectedSymbol);
+      await loadAlertRules();
       await loadAlertHistory();
     } catch {
       setAlertMessage('알림 체크에 실패했습니다.');
@@ -4820,6 +4951,100 @@ function App() {
                       </label>
                     </div>
 
+                    <div className="alert-indicator-controls">
+                      <label className="alert-inline-toggle">
+                        <input
+                          type="checkbox"
+                          checked={alertIndicatorEnabled}
+                          onChange={(event) => setAlertIndicatorEnabled(event.target.checked)}
+                        />
+                        <span>지표 조건 추가</span>
+                      </label>
+
+                      {alertIndicatorEnabled ? (
+                        <>
+                          <label>
+                            <span>조건 타입</span>
+                            <select
+                              value={alertIndicatorType}
+                              onChange={(event) => setAlertIndicatorType(event.target.value as AlertIndicatorType)}
+                            >
+                              <option value="rsiThreshold">RSI threshold</option>
+                              <option value="macdCrossSignal">MACD cross</option>
+                              <option value="macdHistogramSign">MACD histogram sign</option>
+                              <option value="bollingerBandPosition">Bollinger position</option>
+                            </select>
+                          </label>
+
+                          {alertIndicatorType === 'rsiThreshold' ? (
+                            <div className="alert-form-row">
+                              <label>
+                                <span>RSI 연산자</span>
+                                <select
+                                  value={alertRsiOperator}
+                                  onChange={(event) => setAlertRsiOperator(event.target.value as AlertIndicatorComparator)}
+                                >
+                                  <option value=">=">{'>='}</option>
+                                  <option value="<=">{'<='}</option>
+                                </select>
+                              </label>
+                              <label>
+                                <span>RSI 기준값</span>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={100}
+                                  step="0.1"
+                                  value={alertRsiThresholdInput}
+                                  onChange={(event) => setAlertRsiThresholdInput(event.target.value)}
+                                  placeholder="예: 70"
+                                />
+                              </label>
+                            </div>
+                          ) : null}
+
+                          {alertIndicatorType === 'macdCrossSignal' ? (
+                            <label>
+                              <span>MACD cross</span>
+                              <select
+                                value={alertMacdCrossSignal}
+                                onChange={(event) => setAlertMacdCrossSignal(event.target.value as 'bullish' | 'bearish')}
+                              >
+                                <option value="bullish">bullish</option>
+                                <option value="bearish">bearish</option>
+                              </select>
+                            </label>
+                          ) : null}
+
+                          {alertIndicatorType === 'macdHistogramSign' ? (
+                            <label>
+                              <span>MACD histogram sign</span>
+                              <select
+                                value={alertMacdHistogramSign}
+                                onChange={(event) => setAlertMacdHistogramSign(event.target.value as 'positive' | 'negative')}
+                              >
+                                <option value="positive">positive (&gt; 0)</option>
+                                <option value="negative">negative (&lt; 0)</option>
+                              </select>
+                            </label>
+                          ) : null}
+
+                          {alertIndicatorType === 'bollingerBandPosition' ? (
+                            <label>
+                              <span>Bollinger position</span>
+                              <select
+                                value={alertBollingerPosition}
+                                onChange={(event) => setAlertBollingerPosition(event.target.value as 'aboveUpper' | 'belowLower')}
+                              >
+                                <option value="aboveUpper">price above upper</option>
+                                <option value="belowLower">price below lower</option>
+                              </select>
+                            </label>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </div>
+
                     <div className="alert-actions">
                       <button type="submit" disabled={alertsSubmitting}>
                         {alertsSubmitting ? '추가 중...' : '규칙 추가'}
@@ -4873,10 +5098,33 @@ function App() {
                     </p>
                   ) : null}
 
+                  <div className="alert-rule-filters">
+                    <label>
+                      <span>규칙 심볼</span>
+                      <input
+                        type="text"
+                        value={alertRuleSymbolFilter}
+                        onChange={(event) => setAlertRuleSymbolFilter(event.target.value.toUpperCase())}
+                        placeholder="비우면 전체"
+                      />
+                    </label>
+                    <label className="alert-inline-toggle">
+                      <input
+                        type="checkbox"
+                        checked={alertRuleIndicatorAwareOnly}
+                        onChange={(event) => setAlertRuleIndicatorAwareOnly(event.target.checked)}
+                      />
+                      <span>지표 조건 규칙만</span>
+                    </label>
+                    <button type="button" onClick={() => void loadAlertRules()} disabled={alertsLoading}>
+                      새로고침
+                    </button>
+                  </div>
+
                   {alertsLoading ? (
                     <p className="alert-empty">규칙을 불러오는 중...</p>
                   ) : alertRules.length === 0 ? (
-                    <p className="alert-empty">현재 심볼의 알림 규칙이 없습니다.</p>
+                    <p className="alert-empty">현재 필터에 맞는 알림 규칙이 없습니다.</p>
                   ) : (
                     <ul className="alert-list">
                       {alertRules.map((rule) => (
@@ -4892,6 +5140,9 @@ function App() {
                           <div className="alert-rule-sub">
                             <span>심볼: {rule.symbol}</span>
                             <span>쿨다운: {rule.cooldownSec}s</span>
+                            {formatAlertIndicatorSummary(rule.indicatorConditions) ? (
+                              <span>지표: {formatAlertIndicatorSummary(rule.indicatorConditions)}</span>
+                            ) : null}
                             <span>
                               마지막 트리거:{' '}
                               {typeof rule.lastTriggeredAt === 'number'
@@ -4919,6 +5170,9 @@ function App() {
                             </div>
                             <div className="alert-rule-sub">
                               <span>현재값: {formatAlertValue(eventItem.metric, eventItem.currentValue)}</span>
+                              {formatAlertIndicatorSummary(eventItem.indicatorConditions) ? (
+                                <span>지표: {formatAlertIndicatorSummary(eventItem.indicatorConditions)}</span>
+                              ) : null}
                               <span>트리거: {new Date(eventItem.triggeredAt).toLocaleTimeString('ko-KR')}</span>
                             </div>
                           </li>
@@ -4968,6 +5222,17 @@ function App() {
                           <option value="watchlist">watchlist</option>
                         </select>
                       </label>
+                      <div className="alert-history-toggle">
+                        <span>조건</span>
+                        <label className="alert-inline-toggle">
+                          <input
+                            type="checkbox"
+                            checked={alertHistoryIndicatorAwareOnly}
+                            onChange={(event) => setAlertHistoryIndicatorAwareOnly(event.target.checked)}
+                          />
+                          <span>지표 조건만</span>
+                        </label>
+                      </div>
                     </div>
                     {alertsHistoryLoading ? (
                       <p className="alert-empty">히스토리를 불러오는 중...</p>
@@ -4991,6 +5256,9 @@ function App() {
                             </div>
                             <div className="alert-rule-sub">
                               <span>현재값: {formatAlertValue(eventItem.metric, eventItem.currentValue)}</span>
+                              {formatAlertIndicatorSummary(eventItem.indicatorConditions) ? (
+                                <span>지표: {formatAlertIndicatorSummary(eventItem.indicatorConditions)}</span>
+                              ) : null}
                               <span>시간: {new Date(eventItem.triggeredAt).toLocaleString('ko-KR')}</span>
                             </div>
                           </li>

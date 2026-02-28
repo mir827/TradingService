@@ -1,14 +1,64 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { calculateMACD } from './indicatorMath.js';
 
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
     status,
     headers: { 'Content-Type': 'application/json' },
   });
+}
+
+function toBinanceKlines(closes: number[]) {
+  const startTimeMs = 1_700_000_000_000;
+  const intervalMs = 60_000;
+
+  return closes.map((close, index) => {
+    const open = index > 0 ? closes[index - 1] : close;
+    const high = Math.max(open, close) + 1;
+    const low = Math.min(open, close) - 1;
+
+    return [
+      startTimeMs + index * intervalMs,
+      open.toFixed(4),
+      high.toFixed(4),
+      low.toFixed(4),
+      close.toFixed(4),
+      '100',
+      startTimeMs + (index + 1) * intervalMs,
+      '1000',
+      10,
+      '50',
+      '500',
+      '0',
+    ] as const;
+  });
+}
+
+function pickMacdHistogramSeries() {
+  const candidates: number[][] = [
+    Array.from({ length: 80 }, (_, index) => 100 + index * 1.3),
+    Array.from({ length: 80 }, (_, index) => 150 + index * 0.8 + Math.sin(index / 3) * 6),
+    Array.from({ length: 80 }, (_, index) => 220 - index * 1.1 + Math.cos(index / 2.4) * 7),
+  ];
+
+  for (const closes of candidates) {
+    const latest = calculateMACD(closes, 12, 26, 9).histogram.at(-1);
+    if (typeof latest === 'number' && Number.isFinite(latest) && Math.abs(latest) > 0.0001) {
+      return {
+        closes,
+        sign: latest > 0 ? 'positive' : 'negative',
+      } as const;
+    }
+  }
+
+  return {
+    closes: candidates[0],
+    sign: 'positive' as const,
+  };
 }
 
 let app!: FastifyInstance;
@@ -580,6 +630,399 @@ describe('api alerts rules', () => {
     expect(listResponse.statusCode).toBe(200);
     const listedRule = (listResponse.json() as { rules: Array<{ lastTriggeredAt: number | null }> }).rules[0];
     expect(listedRule.lastTriggeredAt).toBe(firstBody.evaluatedAt);
+  });
+});
+
+describe('api alerts indicator-aware rules', () => {
+  it('creates indicator-aware rules and supports scoped rule filtering', async () => {
+    const createLegacyRule = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'BTCUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 100,
+      },
+    });
+
+    const createRsiRule = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'BTCUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 100,
+        indicatorConditions: [
+          {
+            type: 'rsiThreshold',
+            operator: '<=',
+            threshold: 30,
+          },
+        ],
+      },
+    });
+
+    const createMacdCrossRule = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'ETHUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 100,
+        indicatorConditions: [
+          {
+            type: 'macdCrossSignal',
+            signal: 'bullish',
+          },
+        ],
+      },
+    });
+
+    expect(createLegacyRule.statusCode).toBe(201);
+    expect(createRsiRule.statusCode).toBe(201);
+    expect(createMacdCrossRule.statusCode).toBe(201);
+
+    const filteredRules = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/rules?symbols=BTCUSDT,ETHUSDT&indicatorAwareOnly=true',
+    });
+
+    expect(filteredRules.statusCode).toBe(200);
+    const body = filteredRules.json() as {
+      rules: Array<{
+        symbol: string;
+        indicatorConditions?: Array<{ type: string; period?: number }>;
+      }>;
+    };
+
+    expect(body.rules).toHaveLength(2);
+    expect(body.rules.every((rule) => (rule.indicatorConditions?.length ?? 0) > 0)).toBe(true);
+
+    const rsiRule = body.rules.find((rule) => rule.symbol === 'BTCUSDT');
+    expect(rsiRule?.indicatorConditions?.[0]).toMatchObject({
+      type: 'rsiThreshold',
+      period: 14,
+    });
+  });
+
+  it('persists indicator-aware rule fields across app recreation', async () => {
+    const createRule = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'ETHUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 2000,
+        indicatorConditions: [
+          {
+            type: 'bollingerBandPosition',
+            position: 'aboveUpper',
+          },
+        ],
+      },
+    });
+    expect(createRule.statusCode).toBe(201);
+
+    await restartAppInstance();
+
+    const listedRules = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/rules?symbol=ETHUSDT',
+    });
+
+    expect(listedRules.statusCode).toBe(200);
+    expect((listedRules.json() as { rules: Array<{ indicatorConditions?: Array<{ type: string }> }> }).rules).toMatchObject([
+      {
+        indicatorConditions: [{ type: 'bollingerBandPosition' }],
+      },
+    ]);
+  });
+
+  it('evaluates RSI indicator rules and keeps cooldown semantics unchanged', async () => {
+    const nowSpy = vi.spyOn(Date, 'now');
+    nowSpy.mockReturnValue(1_750_020_000_000);
+
+    const descendingCloses = Array.from({ length: 40 }, (_, index) => 200 - index);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const rawUrl =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const url = new URL(rawUrl);
+
+      if (url.hostname === 'api.binance.com' && url.pathname === '/api/v3/klines' && url.searchParams.get('symbol') === 'BTCUSDT') {
+        return jsonResponse(toBinanceKlines(descendingCloses));
+      }
+
+      return jsonResponse({ error: 'unexpected request' }, 404);
+    });
+
+    const createRule = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'BTCUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 100,
+        cooldownSec: 120,
+        indicatorConditions: [
+          {
+            type: 'rsiThreshold',
+            operator: '<=',
+            threshold: 30,
+          },
+        ],
+      },
+    });
+
+    expect(createRule.statusCode).toBe(201);
+
+    const firstCheck = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check',
+      payload: {
+        symbol: 'BTCUSDT',
+        values: {
+          symbol: 'BTCUSDT',
+          lastPrice: 150,
+          changePercent: -1,
+        },
+        indicatorAwareOnly: true,
+      },
+    });
+
+    expect(firstCheck.statusCode).toBe(200);
+    const firstBody = firstCheck.json() as {
+      triggeredCount: number;
+      suppressedByCooldown: number;
+      triggered: Array<{ indicatorConditions?: Array<{ type: string }> }>;
+    };
+
+    expect(firstBody.triggeredCount).toBe(1);
+    expect(firstBody.suppressedByCooldown).toBe(0);
+    expect(firstBody.triggered[0].indicatorConditions?.[0]?.type).toBe('rsiThreshold');
+
+    nowSpy.mockReturnValue(1_750_020_030_000);
+    const secondCheck = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check',
+      payload: {
+        symbols: ['BTCUSDT'],
+        values: {
+          symbol: 'BTCUSDT',
+          lastPrice: 150,
+          changePercent: -1,
+        },
+        indicatorAwareOnly: true,
+      },
+    });
+
+    expect(secondCheck.statusCode).toBe(200);
+    const secondBody = secondCheck.json() as {
+      checkedRuleCount: number;
+      triggeredCount: number;
+      suppressedByCooldown: number;
+    };
+
+    expect(secondBody.checkedRuleCount).toBe(1);
+    expect(secondBody.triggeredCount).toBe(0);
+    expect(secondBody.suppressedByCooldown).toBe(1);
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it('evaluates MACD/Bollinger conditions and supports scoped check filters', async () => {
+    const macdSeries = pickMacdHistogramSeries();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const rawUrl =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const url = new URL(rawUrl);
+      const symbol = url.searchParams.get('symbol');
+
+      if (url.hostname === 'api.binance.com' && url.pathname === '/api/v3/ticker/24hr' && symbol === 'ETHUSDT') {
+        return jsonResponse({
+          lastPrice: '210',
+          priceChangePercent: '1.2',
+          highPrice: '220',
+          lowPrice: '180',
+          volume: '500',
+        });
+      }
+
+      if (url.hostname === 'api.binance.com' && url.pathname === '/api/v3/ticker/24hr' && symbol === 'BTCUSDT') {
+        return jsonResponse({
+          lastPrice: '150',
+          priceChangePercent: '0.8',
+          highPrice: '155',
+          lowPrice: '140',
+          volume: '600',
+        });
+      }
+
+      if (url.hostname === 'api.binance.com' && url.pathname === '/api/v3/klines' && symbol === 'ETHUSDT') {
+        return jsonResponse(toBinanceKlines(macdSeries.closes));
+      }
+
+      return jsonResponse({ error: 'unexpected request' }, 404);
+    });
+
+    const createBtcLegacy = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'BTCUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 100,
+      },
+    });
+
+    const createMacdRule = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'ETHUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 100,
+        indicatorConditions: [
+          {
+            type: 'macdHistogramSign',
+            sign: macdSeries.sign,
+          },
+        ],
+      },
+    });
+
+    const createBollingerRule = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'ETHUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 100,
+        indicatorConditions: [
+          {
+            type: 'bollingerBandPosition',
+            position: 'belowLower',
+          },
+        ],
+      },
+    });
+
+    expect(createBtcLegacy.statusCode).toBe(201);
+    expect(createMacdRule.statusCode).toBe(201);
+    expect(createBollingerRule.statusCode).toBe(201);
+
+    const watchlistCheck = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check-watchlist',
+      payload: {
+        symbols: ['BTCUSDT', 'ETHUSDT'],
+        indicatorAwareOnly: true,
+      },
+    });
+
+    expect(watchlistCheck.statusCode).toBe(200);
+    const watchlistBody = watchlistCheck.json() as {
+      checkedSymbols: string[];
+      events: Array<{ symbol: string; indicatorConditions?: Array<{ type: string }> }>;
+    };
+
+    expect(watchlistBody.checkedSymbols).toEqual(['BTCUSDT', 'ETHUSDT']);
+    expect(watchlistBody.events).toHaveLength(1);
+    expect(watchlistBody.events[0].symbol).toBe('ETHUSDT');
+    expect(watchlistBody.events[0].indicatorConditions?.[0]).toMatchObject({
+      type: 'macdHistogramSign',
+    });
+
+    const historyFiltered = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?symbols=ETHUSDT&indicatorAwareOnly=true&limit=10',
+    });
+
+    expect(historyFiltered.statusCode).toBe(200);
+    expect(historyFiltered.json()).toMatchObject({
+      symbol: null,
+      limit: 10,
+      total: 1,
+      events: [{ symbol: 'ETHUSDT' }],
+    });
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it('applies requested source scope for watchlist checks', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const rawUrl =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const url = new URL(rawUrl);
+      const symbol = url.searchParams.get('symbol');
+
+      if (url.hostname === 'api.binance.com' && url.pathname === '/api/v3/ticker/24hr' && symbol === 'BTCUSDT') {
+        return jsonResponse({
+          lastPrice: '120',
+          priceChangePercent: '0.2',
+          highPrice: '130',
+          lowPrice: '115',
+          volume: '100',
+        });
+      }
+
+      return jsonResponse({ error: 'unexpected request' }, 404);
+    });
+
+    const createRule = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/rules',
+      payload: {
+        symbol: 'BTCUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 100,
+      },
+    });
+    expect(createRule.statusCode).toBe(201);
+
+    const check = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check-watchlist',
+      payload: {
+        symbols: ['BTCUSDT'],
+        source: 'manual',
+      },
+    });
+
+    expect(check.statusCode).toBe(200);
+    expect((check.json() as { events: unknown[] }).events).toHaveLength(1);
+
+    const manualHistory = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?source=manual&limit=10',
+    });
+    expect(manualHistory.statusCode).toBe(200);
+    expect((manualHistory.json() as { total: number }).total).toBe(1);
+
+    const watchlistHistory = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/history?source=watchlist&limit=10',
+    });
+    expect(watchlistHistory.statusCode).toBe(200);
+    expect((watchlistHistory.json() as { total: number }).total).toBe(0);
   });
 });
 
@@ -1189,6 +1632,68 @@ describe('api alerts history', () => {
       total: 0,
       events: [],
     });
+  });
+});
+
+describe('api alerts backward compatibility', () => {
+  it('loads and evaluates legacy persisted rules without indicator fields', async () => {
+    const legacyState = {
+      version: 1,
+      alertRules: [
+        {
+          id: 'legacy-rule-1',
+          symbol: 'btcusdt',
+          metric: 'price',
+          operator: '>=',
+          threshold: 100,
+          cooldownSec: 0,
+          createdAt: 1_750_030_000_000,
+          lastTriggeredAt: null,
+        },
+      ],
+      alertHistory: [],
+      watchlists: [],
+      drawings: [],
+    };
+
+    await writeFile(stateFile, `${JSON.stringify(legacyState, null, 2)}\n`, 'utf8');
+    await restartAppInstance();
+
+    const listedRules = await app.inject({
+      method: 'GET',
+      url: '/api/alerts/rules?symbol=BTCUSDT',
+    });
+
+    expect(listedRules.statusCode).toBe(200);
+    expect((listedRules.json() as { rules: Array<{ id: string; indicatorConditions?: unknown[] }> }).rules).toEqual([
+      {
+        id: 'legacy-rule-1',
+        symbol: 'BTCUSDT',
+        metric: 'price',
+        operator: '>=',
+        threshold: 100,
+        cooldownSec: 0,
+        createdAt: 1_750_030_000_000,
+        lastTriggeredAt: null,
+      },
+    ]);
+
+    const check = await app.inject({
+      method: 'POST',
+      url: '/api/alerts/check',
+      payload: {
+        symbol: 'BTCUSDT',
+        values: {
+          symbol: 'BTCUSDT',
+          lastPrice: 120,
+          changePercent: 0.3,
+        },
+      },
+    });
+
+    expect(check.statusCode).toBe(200);
+    expect((check.json() as { checkedRuleCount: number; triggeredCount: number }).checkedRuleCount).toBe(1);
+    expect((check.json() as { checkedRuleCount: number; triggeredCount: number }).triggeredCount).toBe(1);
   });
 });
 
