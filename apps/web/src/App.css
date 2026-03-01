@@ -1055,7 +1055,15 @@ select {
   white-space: nowrap;
 }
 
-.drawing-objects-panel .drawing-objects-detail {
+.drawing-objects-panel .drawing-objects-anchor {
+  font-size: 10px;
+  color: #9bb0cc;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawing-objects-panel .drawing-objects-context {
   font-size: 10px;
   color: #7f8ea5;
   overflow: hidden;
@@ -1082,6 +1090,17 @@ select {
   border-color: #4b6f40;
   background: #213922;
   color: #c3f0a8;
+}
+
+.drawing-objects-panel .drawing-objects-actions button.delete {
+  border-color: #6d3d47;
+  background: #341a21;
+  color: #ffc0cb;
+}
+
+.drawing-objects-panel .drawing-objects-actions button.delete:hover {
+  border-color: #8a4e5a;
+  background: #422029;
 }
 
 .watch-tabs {

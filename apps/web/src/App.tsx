@@ -148,6 +148,7 @@ import {
   type CrosshairInspectorCompareInput,
   type CrosshairInspectorIndicatorInput,
 } from './lib/crosshairInspector';
+import { buildDrawingOverlayGeometry } from './lib/drawingOverlay';
 
 type SymbolItem = {
   symbol: string;
@@ -5732,7 +5733,7 @@ function App() {
 
       let best: DrawingHit | null = null;
       const upsertHit = (id: string, kind: DrawingKind, distance: number) => {
-        if (distance > DRAWING_HIT_TOLERANCE_PX) return;
+        if (!Number.isFinite(distance) || distance > DRAWING_HIT_TOLERANCE_PX) return;
         const score = distance + (id === selectedDrawingId ? -0.75 : 0);
 
         if (!best || score < best.score) {
@@ -6600,6 +6601,19 @@ function App() {
     return deleteDrawingById(selectedDrawingId);
   }, [deleteDrawingById, isDrawingLocked, selectedDrawingId]);
 
+  const deleteDrawingFromObjectsPanel = useCallback(
+    (id: string) => {
+      setSelectedDrawingId(id);
+      if (isDrawingLocked(id)) {
+        setTopActionFeedback('잠금된 도형은 삭제할 수 없습니다.');
+        return;
+      }
+
+      deleteDrawingById(id);
+    },
+    [deleteDrawingById, isDrawingLocked],
+  );
+
   const switchInterval = useCallback((interval: string) => {
     setSelectedInterval((previous) => (previous === interval ? previous : interval));
   }, []);
@@ -7069,42 +7083,48 @@ function App() {
       ...horizontalLines.map((line) => ({
         id: line.id,
         kind: 'horizontal' as const,
-        detail: formatPrice(line.price),
+        anchor: `가격 ${formatPrice(line.price)}`,
+        context: '기준점: 가격',
         visible: line.visible,
         locked: line.locked,
       })),
       ...verticalLines.map((line) => ({
         id: line.id,
         kind: 'vertical' as const,
-        detail: formatDrawingTime(line.time),
+        anchor: `시간 ${formatDrawingTime(line.time)}`,
+        context: '기준점: 시간',
         visible: line.visible,
         locked: line.locked,
       })),
       ...trendlines.map((line) => ({
         id: line.id,
         kind: 'trendline' as const,
-        detail: `${formatDrawingTime(line.startTime)}→${formatDrawingTime(line.endTime)}`,
+        anchor: `시작 ${formatDrawingTime(line.startTime)} · ${formatPrice(line.startPrice)}`,
+        context: `끝 ${formatDrawingTime(line.endTime)} · ${formatPrice(line.endPrice)}`,
         visible: line.visible,
         locked: line.locked,
       })),
       ...rays.map((line) => ({
         id: line.id,
         kind: 'ray' as const,
-        detail: `${formatDrawingTime(line.startTime)}→${formatDrawingTime(line.endTime)}`,
+        anchor: `시작 ${formatDrawingTime(line.startTime)} · ${formatPrice(line.startPrice)}`,
+        context: `끝 ${formatDrawingTime(line.endTime)} · ${formatPrice(line.endPrice)}`,
         visible: line.visible,
         locked: line.locked,
       })),
       ...rectangles.map((line) => ({
         id: line.id,
         kind: 'rectangle' as const,
-        detail: `${formatDrawingTime(line.startTime)}→${formatDrawingTime(line.endTime)}`,
+        anchor: `시작 ${formatDrawingTime(line.startTime)} · ${formatPrice(line.startPrice)}`,
+        context: `끝 ${formatDrawingTime(line.endTime)} · ${formatPrice(line.endPrice)}`,
         visible: line.visible,
         locked: line.locked,
       })),
       ...notes.map((note) => ({
         id: note.id,
         kind: 'note' as const,
-        detail: summarizeNoteText(note.text),
+        anchor: `위치 ${formatDrawingTime(note.time)} · ${formatPrice(note.price)}`,
+        context: `메모 ${summarizeNoteText(note.text)}`,
         visible: note.visible,
         locked: note.locked,
       })),
@@ -7116,109 +7136,24 @@ function App() {
     const chart = chartRef.current;
     const series = candleSeriesRef.current;
     const container = containerRef.current;
+    return buildDrawingOverlayGeometry({
+      width: container?.clientWidth ?? 0,
+      height: container?.clientHeight ?? 0,
+      trendlines,
+      rays,
+      rectangles,
+      notes,
+      toCoordinate: (time, price) => {
+        if (!chart || !series) return null;
+        const x = chart.timeScale().timeToCoordinate(time as Time);
+        const y = series.priceToCoordinate(price);
+        if (x === null || y === null || !Number.isFinite(x) || !Number.isFinite(y)) {
+          return null;
+        }
 
-    const width = container?.clientWidth ?? 0;
-    const height = container?.clientHeight ?? 0;
-
-    if (!chart || !series || width <= 0 || height <= 0) {
-      return { width, height, trendlines: [], rays: [], rectangles: [], notes: [] };
-    }
-
-    const toCoordinate = (time: UTCTimestamp, price: number) => {
-      const x = chart.timeScale().timeToCoordinate(time as Time);
-      const y = series.priceToCoordinate(price);
-      if (x === null || y === null || !Number.isFinite(x) || !Number.isFinite(y)) {
-        return null;
-      }
-
-      return { x, y };
-    };
-
-    const trendlineShapes: Array<{ id: string; x1: number; y1: number; x2: number; y2: number }> = [];
-    for (const shape of trendlines) {
-      if (!shape.visible) continue;
-      const start = toCoordinate(shape.startTime, shape.startPrice);
-      const end = toCoordinate(shape.endTime, shape.endPrice);
-      if (!start || !end) continue;
-
-      trendlineShapes.push({
-        id: shape.id,
-        x1: Number(start.x),
-        y1: Number(start.y),
-        x2: Number(end.x),
-        y2: Number(end.y),
-      });
-    }
-
-    const rectangleShapes: Array<{ id: string; x: number; y: number; width: number; height: number }> = [];
-    for (const shape of rectangles) {
-      if (!shape.visible) continue;
-      const start = toCoordinate(shape.startTime, shape.startPrice);
-      const end = toCoordinate(shape.endTime, shape.endPrice);
-      if (!start || !end) continue;
-
-      const startX = Number(start.x);
-      const endX = Number(end.x);
-      const startY = Number(start.y);
-      const endY = Number(end.y);
-
-      rectangleShapes.push({
-        id: shape.id,
-        x: Math.min(startX, endX),
-        y: Math.min(startY, endY),
-        width: Math.abs(endX - startX),
-        height: Math.abs(endY - startY),
-      });
-    }
-
-    const rayShapes: Array<{ id: string; x1: number; y1: number; x2: number; y2: number }> = [];
-    for (const shape of rays) {
-      if (!shape.visible) continue;
-      const start = toCoordinate(shape.startTime, shape.startPrice);
-      const end = toCoordinate(shape.endTime, shape.endPrice);
-      if (!start || !end) continue;
-
-      const x1 = Number(start.x);
-      const y1 = Number(start.y);
-      const x2 = Number(end.x);
-      const y2 = Number(end.y);
-      const dx = x2 - x1;
-      const dy = y2 - y1;
-      const length = Math.hypot(dx, dy);
-      if (length <= 1e-6) continue;
-
-      const extendDistance = Math.max(width, height) * 2;
-      rayShapes.push({
-        id: shape.id,
-        x1,
-        y1,
-        x2: x2 + (dx / length) * extendDistance,
-        y2: y2 + (dy / length) * extendDistance,
-      });
-    }
-
-    const noteShapes: Array<{ id: string; x: number; y: number; text: string }> = [];
-    for (const note of notes) {
-      if (!note.visible) continue;
-      const point = toCoordinate(note.time, note.price);
-      if (!point) continue;
-
-      noteShapes.push({
-        id: note.id,
-        x: Number(point.x),
-        y: Number(point.y),
-        text: note.text,
-      });
-    }
-
-    return {
-      width,
-      height,
-      trendlines: trendlineShapes,
-      rays: rayShapes,
-      rectangles: rectangleShapes,
-      notes: noteShapes,
-    };
+        return { x: Number(x), y: Number(y) };
+      },
+    });
   }, [notes, overlayTick, rays, rectangles, trendlines]);
   const activeIndicatorConfigs = indicatorConfigs.filter((config) => enabledIndicators[config.key]);
   const activeIndicatorLegends = activeIndicatorConfigs.map((config) => ({
@@ -9601,7 +9536,8 @@ function App() {
                         >
                           <span className="drawing-objects-type">{formatDrawingKindLabel(drawing.kind)}</span>
                           <span className="drawing-objects-id">{drawing.id}</span>
-                          <span className="drawing-objects-detail">{drawing.detail}</span>
+                          <span className="drawing-objects-anchor">{drawing.anchor}</span>
+                          {drawing.context ? <span className="drawing-objects-context">{drawing.context}</span> : null}
                         </button>
                         <div className="drawing-objects-actions">
                           <button
@@ -9625,6 +9561,16 @@ function App() {
                             }}
                           >
                             표시
+                          </button>
+                          <button
+                            type="button"
+                            className="delete"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              deleteDrawingFromObjectsPanel(drawing.id);
+                            }}
+                          >
+                            삭제
                           </button>
                         </div>
                       </li>
