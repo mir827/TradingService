@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { formatNxtUnavailableReason, normalizeKrxNxtComparisonInfo, normalizeNxtDetailInfo } from './nxt';
+import {
+  formatNxtUnavailableReason,
+  normalizeKrxNxtComparisonInfo,
+  normalizeNxtDetailInfo,
+  normalizeQuoteDisplayBasis,
+} from './nxt';
 
 describe('nxt detail helpers', () => {
   it('returns null for non-KOSPI/KOSDAQ markets', () => {
@@ -154,5 +159,31 @@ describe('nxt detail helpers', () => {
         reason: 'NXT 시세 미제공',
       },
     });
+  });
+
+  it('normalizes display basis labels from quote venue metadata', () => {
+    expect(normalizeQuoteDisplayBasis('CRYPTO')).toBeNull();
+
+    expect(
+      normalizeQuoteDisplayBasis('KOSPI', {
+        requestedVenue: 'COMBINED',
+        effectiveVenue: 'KRX',
+      }),
+    ).toBe('KRX');
+
+    expect(
+      normalizeQuoteDisplayBasis('KOSPI', {
+        requestedVenue: 'NXT',
+        effectiveVenue: 'NXT',
+      }),
+    ).toBe('NXT');
+
+    expect(
+      normalizeQuoteDisplayBasis('KOSPI', {
+        requestedVenue: 'NXT',
+        effectiveVenue: 'KRX',
+        venueFallback: 'NXT_UNAVAILABLE_FALLBACK_TO_KRX',
+      }),
+    ).toBe('NXT 요청 → KRX 대체');
   });
 });

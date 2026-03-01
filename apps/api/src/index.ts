@@ -47,6 +47,7 @@ type NxtQuoteUnavailableReason =
   | 'NXT_SYMBOL_NOT_SUPPORTED'
   | 'NXT_UPSTREAM_ERROR'
   | 'NXT_QUOTE_MISSING';
+type QuoteRequestedVenue = KrVenue | 'COMBINED';
 
 type NxtQuoteInfo = {
   supported: boolean;
@@ -66,6 +67,9 @@ type Quote = {
   lowPrice: number;
   volume: number;
   nxt?: NxtQuoteInfo;
+  requestedVenue?: QuoteRequestedVenue;
+  effectiveVenue?: KrVenue;
+  venueFallback?: string;
 };
 
 type AlertMetric = 'price' | 'changePercent';
@@ -331,6 +335,8 @@ await app.register(cors, {
 const KRX_LIST_URL = 'https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13';
 const KRX_REFRESH_MS = 1000 * 60 * 60 * 12;
 const KRX_STARTUP_PRELOAD_TIMEOUT_MS = 2000;
+const NAVER_REALTIME_QUOTE_URL = 'https://polling.finance.naver.com/api/realtime';
+const NXT_QUOTE_ENABLED = process.env.TRADINGSERVICE_ENABLE_NXT_QUOTE !== '0';
 
 const cryptoSymbols: SymbolItem[] = [
   { symbol: 'BTCUSDT', name: 'Bitcoin / USDT', market: 'CRYPTO', exchange: 'BINANCE' },
@@ -454,6 +460,15 @@ const candleQuerySchema = z.object({
 
 const quoteQuerySchema = z.object({
   symbol: z.string().default('BTCUSDT'),
+  venue: z
+    .preprocess((value) => {
+      if (typeof value === 'string') {
+        return value.trim().toUpperCase();
+      }
+
+      return value;
+    }, z.enum(['KRX', 'NXT']))
+    .optional(),
 });
 
 const marketStatusQuerySchema = z.object({
@@ -1260,18 +1275,34 @@ function isVenueFilterMatch(symbol: string, venue: KrVenue | undefined, requeste
   return !venue || venue === requestedVenue;
 }
 
-function getCachedQuote(symbol: string) {
-  const cache = quoteCache.get(symbol);
+function resolveRequestedQuoteVenue(symbol: string, requestedVenue?: KrVenue): QuoteRequestedVenue {
+  if (!isKrxSymbol(symbol)) {
+    return 'COMBINED';
+  }
+
+  return requestedVenue ?? 'COMBINED';
+}
+
+function createQuoteCacheKey(symbol: string, requestedVenue: QuoteRequestedVenue) {
+  if (!isKrxSymbol(symbol)) {
+    return symbol;
+  }
+
+  return `${symbol}:${requestedVenue}`;
+}
+
+function getCachedQuote(cacheKey: string) {
+  const cache = quoteCache.get(cacheKey);
   if (!cache) return null;
   if (cache.expiresAt < Date.now()) {
-    quoteCache.delete(symbol);
+    quoteCache.delete(cacheKey);
     return null;
   }
   return cache.value;
 }
 
-function setCachedQuote(symbol: string, value: Quote, ttlMs = 8000) {
-  quoteCache.set(symbol, { expiresAt: Date.now() + ttlMs, value });
+function setCachedQuote(cacheKey: string, value: Quote, ttlMs = 8000) {
+  quoteCache.set(cacheKey, { expiresAt: Date.now() + ttlMs, value });
 }
 
 function getCachedCandles(key: string) {
@@ -3853,6 +3884,344 @@ function createUnavailableNxtQuoteInfo(reason: NxtQuoteUnavailableReason): NxtQu
   };
 }
 
+function extractKrxCode(symbol: string) {
+  const match = symbol.match(/^(\d{6})\.K[QS]$/i);
+  return match?.[1] ?? null;
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().replace(/,/g, '').replace(/%/g, '');
+    if (!normalized || normalized === '-' || normalized === '--') {
+      return null;
+    }
+
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function toEpochMs(value: unknown): number | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+
+    if (!/^\d+$/.test(trimmed)) {
+      const parsedDate = Date.parse(trimmed);
+      return Number.isFinite(parsedDate) ? parsedDate : null;
+    }
+  }
+
+  const numeric = toFiniteNumber(value);
+  if (numeric === null) {
+    return null;
+  }
+
+  if (numeric >= 1_000_000_000_000) {
+    return Math.floor(numeric);
+  }
+
+  if (numeric >= 1_000_000_000) {
+    return Math.floor(numeric * 1000);
+  }
+
+  return null;
+}
+
+function collectObjectRecords(value: unknown, bucket: Array<Record<string, unknown>>, depth = 0) {
+  if (depth > 8 || value === null || value === undefined) return;
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectObjectRecords(entry, bucket, depth + 1);
+    }
+    return;
+  }
+
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    bucket.push(record);
+    for (const entry of Object.values(record)) {
+      collectObjectRecords(entry, bucket, depth + 1);
+    }
+  }
+}
+
+function pickNumberByKeyCandidates(record: Record<string, unknown>, keyCandidates: string[]) {
+  const normalizedEntries = new Map(
+    Object.entries(record).map(([key, value]) => [key.trim().toLowerCase(), value]),
+  );
+
+  for (const candidate of keyCandidates) {
+    const value = normalizedEntries.get(candidate);
+    const parsed = toFiniteNumber(value);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function pickNumberByPredicate(record: Record<string, unknown>, predicate: (key: string) => boolean) {
+  for (const [rawKey, rawValue] of Object.entries(record)) {
+    const key = rawKey.trim().toLowerCase();
+    if (!predicate(key)) continue;
+    const parsed = toFiniteNumber(rawValue);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function pickTimestampByKeyCandidates(record: Record<string, unknown>, keyCandidates: string[]) {
+  const normalizedEntries = new Map(
+    Object.entries(record).map(([key, value]) => [key.trim().toLowerCase(), value]),
+  );
+
+  for (const candidate of keyCandidates) {
+    const value = normalizedEntries.get(candidate);
+    const parsed = toEpochMs(value);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function parseNxtQuoteRecord(record: Record<string, unknown>, nowMs: number) {
+  const nxtPrice = pickNumberByKeyCandidates(record, [
+    'nxt_price',
+    'nxtprice',
+    'nxt_last_price',
+    'nxtlastprice',
+    'nxt_last',
+    'nxtlast',
+    'nxt_nv',
+    'nxtnv',
+    'nxt_close',
+    'nxtclose',
+    'nxt_current_price',
+    'nxtcurrentprice',
+    'price',
+    'lastprice',
+    'last',
+    'nv',
+    'close',
+  ]);
+  const fallbackPrice = pickNumberByPredicate(
+    record,
+    (key) =>
+      key.includes('nxt') &&
+      (key.includes('price') || key.includes('last') || key.includes('close') || key.endsWith('nv') || key.includes('_nv')),
+  );
+  const price = nxtPrice ?? fallbackPrice;
+
+  if (price === null) {
+    return null;
+  }
+
+  const directChangePercent = pickNumberByKeyCandidates(record, [
+    'nxt_change_percent',
+    'nxtchangepercent',
+    'nxt_change_rate',
+    'nxtchangerate',
+    'nxt_cr',
+    'nxtcr',
+    'changepercent',
+    'changerate',
+    'cr',
+  ]);
+  const fallbackChangePercent = pickNumberByPredicate(
+    record,
+    (key) => key.includes('nxt') && (key.includes('rate') || key.includes('percent') || key.endsWith('cr')),
+  );
+
+  let changePercent = directChangePercent ?? fallbackChangePercent;
+  if (changePercent === null) {
+    const changeValue =
+      pickNumberByKeyCandidates(record, ['nxt_change', 'nxtchange', 'nxt_cv', 'nxtcv', 'change', 'cv']) ??
+      pickNumberByPredicate(record, (key) => key.includes('nxt') && (key.includes('change') || key.endsWith('cv')));
+    const previousClose =
+      pickNumberByKeyCandidates(record, [
+        'nxt_prev_close',
+        'nxtprevclose',
+        'nxt_previous_close',
+        'nxtpreviousclose',
+        'prevclose',
+        'previousclose',
+        'pcv',
+      ]) ??
+      pickNumberByPredicate(record, (key) => key.includes('prev') || key.includes('previous'));
+
+    if (changeValue !== null && previousClose !== null && previousClose !== 0) {
+      changePercent = (changeValue / previousClose) * 100;
+    }
+  }
+
+  const directUpdatedAt = pickTimestampByKeyCandidates(record, [
+    'nxt_updated_at',
+    'nxtupdatedat',
+    'nxt_timestamp',
+    'nxttimestamp',
+    'nxt_time',
+    'nxttime',
+    'nxt_tt',
+    'nxttt',
+    'updatedat',
+    'timestamp',
+    'time',
+    'tt',
+  ]);
+  const fallbackUpdatedAt =
+    pickNumberByPredicate(
+      record,
+      (key) => key.includes('nxt') && (key.includes('time') || key.includes('date') || key.includes('ts') || key.includes('update')),
+    ) ?? null;
+  const updatedAt = directUpdatedAt ?? toEpochMs(fallbackUpdatedAt) ?? nowMs;
+
+  return {
+    price,
+    changePercent: changePercent ?? 0,
+    updatedAt,
+  };
+}
+
+function parseNxtQuoteFromNaverPayload(payload: unknown, nowMs: number) {
+  const records: Array<Record<string, unknown>> = [];
+  collectObjectRecords(payload, records);
+
+  const candidates: Array<Record<string, unknown>> = [];
+  const pushCandidate = (value: unknown) => {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      candidates.push(value as Record<string, unknown>);
+    }
+  };
+
+  for (const record of records) {
+    pushCandidate(record.nxt);
+
+    const hasNxtKey = Object.keys(record).some((key) => key.toLowerCase().includes('nxt'));
+    if (hasNxtKey) {
+      candidates.push(record);
+      continue;
+    }
+
+    const marketLabel = [record.market, record.venue, record.exchange, record.ms]
+      .map((value) => String(value ?? '').toUpperCase())
+      .join(' ');
+    if (marketLabel.includes('NXT')) {
+      candidates.push(record);
+    }
+  }
+
+  const seen = new Set<Record<string, unknown>>();
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
+    const parsed = parseNxtQuoteRecord(candidate, nowMs);
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+async function fetchBestEffortNxtQuote(symbol: string): Promise<NxtQuoteInfo> {
+  if (!NXT_QUOTE_ENABLED) {
+    return createUnavailableNxtQuoteInfo('NXT_FEED_NOT_CONFIGURED');
+  }
+
+  const code = extractKrxCode(symbol);
+  if (!code) {
+    return createUnavailableNxtQuoteInfo('NXT_SYMBOL_NOT_SUPPORTED');
+  }
+
+  const query = encodeURIComponent(`SERVICE_ITEM:${code}|SERVICE_RECENT_ITEM:${code}`);
+  const url = `${NAVER_REALTIME_QUOTE_URL}?query=${query}`;
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+        Referer: `https://finance.naver.com/item/main.naver?code=${code}`,
+      },
+    });
+
+    if (!response.ok) {
+      return createUnavailableNxtQuoteInfo('NXT_UPSTREAM_ERROR');
+    }
+
+    const payload = (await response.json()) as unknown;
+    const nowMs = Date.now();
+    const parsed = parseNxtQuoteFromNaverPayload(payload, nowMs);
+    if (!parsed) {
+      return createUnavailableNxtQuoteInfo('NXT_QUOTE_MISSING');
+    }
+
+    return {
+      supported: true,
+      available: true,
+      status: 'available',
+      price: parsed.price,
+      changePercent: parsed.changePercent,
+      updatedAt: parsed.updatedAt,
+    };
+  } catch (error) {
+    app.log.warn({ error, symbol }, 'Failed to fetch NXT quote');
+    return createUnavailableNxtQuoteInfo('NXT_UPSTREAM_ERROR');
+  }
+}
+
+function isAvailableNxtQuote(nxt?: NxtQuoteInfo): nxt is NxtQuoteInfo & { price: number } {
+  return (
+    nxt?.supported === true &&
+    nxt.available === true &&
+    nxt.status === 'available' &&
+    typeof nxt.price === 'number' &&
+    Number.isFinite(nxt.price)
+  );
+}
+
+function applyKrxVenueSelection(quote: Quote, requestedVenue: QuoteRequestedVenue): Quote {
+  const base: Quote = {
+    ...quote,
+    requestedVenue,
+    effectiveVenue: 'KRX',
+  };
+
+  if (requestedVenue !== 'NXT') {
+    return base;
+  }
+
+  if (!isAvailableNxtQuote(quote.nxt)) {
+    return {
+      ...base,
+      venueFallback: 'NXT_UNAVAILABLE_FALLBACK_TO_KRX',
+    };
+  }
+
+  return {
+    ...base,
+    lastPrice: quote.nxt.price,
+    changePercent:
+      typeof quote.nxt.changePercent === 'number' && Number.isFinite(quote.nxt.changePercent)
+        ? quote.nxt.changePercent
+        : quote.changePercent,
+    effectiveVenue: 'NXT',
+  };
+}
+
 async function fetchKrxQuote(symbol: string): Promise<Quote> {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=1d`;
   const response = await fetch(url, {
@@ -3885,6 +4254,7 @@ async function fetchKrxQuote(symbol: string): Promise<Quote> {
 
   const lastPrice = Number(meta.regularMarketPrice ?? meta.previousClose ?? 0);
   const previousClose = Number(meta.previousClose ?? 0);
+  const nxtQuote = await fetchBestEffortNxtQuote(symbol);
 
   return {
     symbol,
@@ -3893,22 +4263,25 @@ async function fetchKrxQuote(symbol: string): Promise<Quote> {
     highPrice: Number(meta.regularMarketDayHigh ?? lastPrice),
     lowPrice: Number(meta.regularMarketDayLow ?? lastPrice),
     volume: Number(meta.regularMarketVolume ?? 0),
-    nxt: createUnavailableNxtQuoteInfo('NXT_FEED_NOT_CONFIGURED'),
+    nxt: nxtQuote,
   };
 }
 
-async function fetchLiveQuote(symbol: string, options?: { skipCache?: boolean }) {
+async function fetchLiveQuote(symbol: string, options?: { skipCache?: boolean; requestedVenue?: KrVenue }) {
   const skipCache = options?.skipCache === true;
+  const requestedVenue = resolveRequestedQuoteVenue(symbol, options?.requestedVenue);
+  const cacheKey = createQuoteCacheKey(symbol, requestedVenue);
+
   if (!skipCache) {
-    const cached = getCachedQuote(symbol);
+    const cached = getCachedQuote(cacheKey);
     if (cached) return cached;
   }
 
   const quote = isKrxSymbol(symbol)
-    ? await fetchKrxQuote(symbol)
+    ? applyKrxVenueSelection(await fetchKrxQuote(symbol), requestedVenue)
     : await fetchCryptoQuote(symbol);
 
-  setCachedQuote(symbol, quote);
+  setCachedQuote(cacheKey, quote);
   return quote;
 }
 
@@ -4246,8 +4619,9 @@ app.get('/api/quote', async (request, reply) => {
   }
 
   const symbol = parsed.data.symbol.toUpperCase();
+  const requestedVenue = resolveVenueForSymbol(symbol, parsed.data.venue);
   try {
-    const quote = await fetchLiveQuote(symbol);
+    const quote = await fetchLiveQuote(symbol, { requestedVenue });
     const matchResult = evaluatePendingPaperOrdersForSymbol(symbol, quote.lastPrice, Date.now());
     if (matchResult.filledCount > 0 || matchResult.rejectedCount > 0 || matchResult.autoCanceledCount > 0) {
       await persistRuntimeState();

@@ -431,15 +431,15 @@ describe('api market status', () => {
 });
 
 describe('api quote', () => {
-  it('returns KOSPI quote with NXT metadata when NXT quote is unavailable', async () => {
+  function toUrl(input: string | URL | Request) {
+    if (typeof input === 'string') return new URL(input);
+    if (input instanceof URL) return input;
+    return new URL(input.url);
+  }
+
+  it('returns KR quote venue metadata and keeps legacy fields stable', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-      const rawUrl =
-        typeof input === 'string'
-          ? input
-          : input instanceof URL
-            ? input.toString()
-            : input.url;
-      const url = new URL(rawUrl);
+      const url = toUrl(input);
 
       if (url.hostname === 'query1.finance.yahoo.com' && url.pathname === '/v8/finance/chart/005930.KS') {
         return jsonResponse({
@@ -459,7 +459,24 @@ describe('api quote', () => {
         });
       }
 
-      return jsonResponse({ error: 'unexpected request' }, 404);
+      if (url.hostname === 'polling.finance.naver.com' && url.pathname === '/api/realtime') {
+        return jsonResponse({
+          result: {
+            areas: [
+              {
+                datas: [
+                  {
+                    itemCode: '005930',
+                    market: 'KOSPI',
+                  },
+                ],
+              },
+            ],
+          },
+        });
+      }
+
+      return jsonResponse({ error: 'unexpected request', url: url.toString() }, 404);
     });
 
     const response = await app.inject({
@@ -475,6 +492,9 @@ describe('api quote', () => {
       highPrice: number;
       lowPrice: number;
       volume: number;
+      requestedVenue?: string;
+      effectiveVenue?: string;
+      venueFallback?: string;
       nxt?: {
         supported: boolean;
         available: boolean;
@@ -485,19 +505,207 @@ describe('api quote', () => {
     expect(body).toMatchObject({
       symbol: '005930.KS',
       lastPrice: 71500,
+      changePercent: (71500 - 70000) / 70000 * 100,
       highPrice: 71800,
       lowPrice: 69800,
       volume: 1234567,
+      requestedVenue: 'COMBINED',
+      effectiveVenue: 'KRX',
+      nxt: {
+        supported: true,
+        available: false,
+        status: 'unavailable',
+        reason: 'NXT_QUOTE_MISSING',
+      },
     });
+    expect(body.venueFallback).toBeUndefined();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('falls back to KRX when venue=NXT cannot be honored', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = toUrl(input);
+
+      if (url.hostname === 'query1.finance.yahoo.com' && url.pathname === '/v8/finance/chart/005930.KS') {
+        return jsonResponse({
+          chart: {
+            result: [
+              {
+                meta: {
+                  regularMarketPrice: 71500,
+                  previousClose: 70000,
+                  regularMarketDayHigh: 71800,
+                  regularMarketDayLow: 69800,
+                  regularMarketVolume: 1234567,
+                },
+              },
+            ],
+          },
+        });
+      }
+
+      if (url.hostname === 'polling.finance.naver.com' && url.pathname === '/api/realtime') {
+        return jsonResponse({ error: 'upstream unavailable' }, 503);
+      }
+
+      return jsonResponse({ error: 'unexpected request', url: url.toString() }, 404);
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/quote?symbol=005930.KS&venue=NXT',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      lastPrice: number;
+      changePercent: number;
+      requestedVenue?: string;
+      effectiveVenue?: string;
+      venueFallback?: string;
+      nxt?: {
+        reason?: string;
+      };
+    };
+    expect(body.lastPrice).toBe(71500);
+    expect(body.changePercent).toBeCloseTo((71500 - 70000) / 70000 * 100, 10);
+    expect(body.requestedVenue).toBe('NXT');
+    expect(body.effectiveVenue).toBe('KRX');
+    expect(body.venueFallback).toBe('NXT_UNAVAILABLE_FALLBACK_TO_KRX');
+    expect(body.nxt?.reason).toBe('NXT_UPSTREAM_ERROR');
+  });
+
+  it('maps NXT adapter missing-data and upstream-error to stable reasons', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = toUrl(input);
+
+      if (url.hostname === 'query1.finance.yahoo.com' && url.pathname === '/v8/finance/chart/005930.KS') {
+        return jsonResponse({
+          chart: {
+            result: [{ meta: { regularMarketPrice: 71500, previousClose: 70000 } }],
+          },
+        });
+      }
+
+      if (url.hostname === 'query1.finance.yahoo.com' && url.pathname === '/v8/finance/chart/000660.KS') {
+        return jsonResponse({
+          chart: {
+            result: [{ meta: { regularMarketPrice: 120000, previousClose: 119000 } }],
+          },
+        });
+      }
+
+      if (
+        url.hostname === 'polling.finance.naver.com' &&
+        url.pathname === '/api/realtime' &&
+        url.search.includes('SERVICE_ITEM%3A005930')
+      ) {
+        return jsonResponse({
+          result: {
+            areas: [{ datas: [{ itemCode: '005930', market: 'KOSPI' }] }],
+          },
+        });
+      }
+
+      if (
+        url.hostname === 'polling.finance.naver.com' &&
+        url.pathname === '/api/realtime' &&
+        url.search.includes('SERVICE_ITEM%3A000660')
+      ) {
+        return jsonResponse({ error: 'upstream failed' }, 502);
+      }
+
+      return jsonResponse({ error: 'unexpected request', url: url.toString() }, 404);
+    });
+
+    const missingResponse = await app.inject({
+      method: 'GET',
+      url: '/api/quote?symbol=005930.KS',
+    });
+    expect(missingResponse.statusCode).toBe(200);
+    expect((missingResponse.json() as { nxt?: { reason?: string } }).nxt?.reason).toBe('NXT_QUOTE_MISSING');
+
+    const upstreamResponse = await app.inject({
+      method: 'GET',
+      url: '/api/quote?symbol=000660.KS',
+    });
+    expect(upstreamResponse.statusCode).toBe(200);
+    expect((upstreamResponse.json() as { nxt?: { reason?: string } }).nxt?.reason).toBe('NXT_UPSTREAM_ERROR');
+  });
+
+  it('uses NXT as effective venue when NXT quote is available', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = toUrl(input);
+
+      if (url.hostname === 'query1.finance.yahoo.com' && url.pathname === '/v8/finance/chart/005930.KS') {
+        return jsonResponse({
+          chart: {
+            result: [
+              {
+                meta: {
+                  regularMarketPrice: 71500,
+                  previousClose: 70000,
+                  regularMarketDayHigh: 71800,
+                  regularMarketDayLow: 69800,
+                  regularMarketVolume: 1234567,
+                },
+              },
+            ],
+          },
+        });
+      }
+
+      if (url.hostname === 'polling.finance.naver.com' && url.pathname === '/api/realtime') {
+        return jsonResponse({
+          result: {
+            areas: [
+              {
+                datas: [
+                  {
+                    nxt: {
+                      price: 71520,
+                      changePercent: 2.17,
+                      updatedAt: 1_762_281_260_000,
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        });
+      }
+
+      return jsonResponse({ error: 'unexpected request', url: url.toString() }, 404);
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/quote?symbol=005930.KS&venue=NXT',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      lastPrice: number;
+      changePercent: number;
+      requestedVenue?: string;
+      effectiveVenue?: string;
+      venueFallback?: string;
+      nxt?: {
+        available?: boolean;
+        status?: string;
+        price?: number;
+      };
+    };
+    expect(body.lastPrice).toBe(71520);
+    expect(body.changePercent).toBe(2.17);
+    expect(body.requestedVenue).toBe('NXT');
+    expect(body.effectiveVenue).toBe('NXT');
+    expect(body.venueFallback).toBeUndefined();
     expect(body.nxt).toMatchObject({
-      supported: true,
-      available: false,
-      status: 'unavailable',
-      reason: 'NXT_FEED_NOT_CONFIGURED',
+      available: true,
+      status: 'available',
+      price: 71520,
     });
-    expect((body as { error?: unknown }).error).toBeUndefined();
-    expect(typeof body.nxt?.reason).toBe('string');
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it('keeps non-KOSPI/KOSDAQ quote payload backward-compatible', async () => {

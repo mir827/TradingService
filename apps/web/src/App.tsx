@@ -130,7 +130,7 @@ import {
   type AlertCenterEventType,
   type AlertLifecycleState,
 } from './lib/alertCenter';
-import { normalizeKrxNxtComparisonInfo, type NxtQuoteInfo } from './lib/nxt';
+import { normalizeKrxNxtComparisonInfo, normalizeQuoteDisplayBasis, type NxtQuoteInfo } from './lib/nxt';
 import {
   formatMarketStatusReason,
   normalizeVenueCheckedAt,
@@ -175,6 +175,9 @@ type Quote = {
   highPrice: number;
   lowPrice: number;
   volume: number;
+  requestedVenue?: KrVenue | 'COMBINED';
+  effectiveVenue?: KrVenue;
+  venueFallback?: string;
   nxt?: NxtQuoteInfo;
 };
 
@@ -3335,30 +3338,53 @@ function App() {
     };
   }, [compareSymbolSignature, selectedInterval, selectedSymbol]);
 
-  const quoteTargetSymbols = useMemo(() => {
-    const set = new Set<string>();
+  const quoteTargets = useMemo(() => {
+    const bySymbol = new Map<string, { symbol: string; venue?: KrVenue }>();
 
-    watchlistSymbols.forEach((item) => {
-      set.add(item.symbol);
-    });
+    for (const item of watchlistSymbols) {
+      const symbol = item.symbol.trim().toUpperCase();
+      if (!symbol) continue;
 
-    if (selectedSymbol) {
-      set.add(selectedSymbol);
+      const normalizedVenue = normalizeVenueForSymbol(item, item.venue);
+      const existing = bySymbol.get(symbol);
+      if (!existing) {
+        bySymbol.set(symbol, normalizedVenue ? { symbol, venue: normalizedVenue } : { symbol });
+        continue;
+      }
+
+      if (!existing.venue && normalizedVenue) {
+        bySymbol.set(symbol, { symbol, venue: normalizedVenue });
+      }
     }
 
-    return [...set].slice(0, 40);
-  }, [selectedSymbol, watchlistSymbols]);
+    if (selectedSymbol) {
+      const selected = selectedSymbol.trim().toUpperCase();
+      const selectedMeta =
+        watchlistSymbols.find((item) => item.symbol === selected) ?? searchResults.find((item) => item.symbol === selected);
+      const selectedVenue = selectedMeta ? normalizeVenueForSymbol(selectedMeta, selectedMeta.venue) : undefined;
+      const existing = bySymbol.get(selected);
+
+      if (!existing) {
+        bySymbol.set(selected, selectedVenue ? { symbol: selected, venue: selectedVenue } : { symbol: selected });
+      } else if (!existing.venue && selectedVenue) {
+        bySymbol.set(selected, { symbol: selected, venue: selectedVenue });
+      }
+    }
+
+    return [...bySymbol.values()].slice(0, 40);
+  }, [searchResults, selectedSymbol, watchlistSymbols]);
 
   useEffect(() => {
-    if (!quoteTargetSymbols.length) return;
+    if (!quoteTargets.length) return;
 
     let canceled = false;
 
     const pullQuotes = async () => {
       try {
         const entries = await Promise.all(
-          quoteTargetSymbols.map(async (symbol) => {
-            const res = await fetch(`${apiBase}/api/quote?symbol=${encodeURIComponent(symbol)}`);
+          quoteTargets.map(async ({ symbol, venue }) => {
+            const venueQuery = venue ? `&venue=${encodeURIComponent(venue)}` : '';
+            const res = await fetch(`${apiBase}/api/quote?symbol=${encodeURIComponent(symbol)}${venueQuery}`);
             if (!res.ok) throw new Error(symbol);
             const quote = (await res.json()) as Quote;
             return [symbol, quote] as const;
@@ -3382,7 +3408,7 @@ function App() {
       canceled = true;
       window.clearInterval(timer);
     };
-  }, [quoteTargetSymbols]);
+  }, [quoteTargets]);
 
   useEffect(() => {
     const query = watchQuery.trim();
@@ -4106,6 +4132,10 @@ function App() {
   const selectedKrxNxtComparison = useMemo(
     () => normalizeKrxNxtComparisonInfo(selectedMarket, selectedQuote, selectedVenueCheckedAt),
     [selectedMarket, selectedQuote, selectedVenueCheckedAt],
+  );
+  const selectedQuoteDisplayBasis = useMemo(
+    () => normalizeQuoteDisplayBasis(selectedMarket, selectedQuote),
+    [selectedMarket, selectedQuote],
   );
   const selectedVenueSessionBadges = useMemo(
     () => normalizeVenueSessionBadges(selectedMarket, marketStatus),
@@ -8176,6 +8206,9 @@ function App() {
                           ))}
                         </div>
                       </div>
+                      {selectedQuoteDisplayBasis ? (
+                        <p className="detail-venue-basis">표시 기준: {selectedQuoteDisplayBasis}</p>
+                      ) : null}
                       <div className="detail-venue-card-grid">
                         <div className="detail-venue-card">
                           <h6>KRX</h6>

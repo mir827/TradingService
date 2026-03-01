@@ -12,9 +12,15 @@ export type NxtQuoteInfo = {
   updatedAt?: number;
 };
 
+type QuoteRequestedVenue = 'KRX' | 'NXT' | 'COMBINED';
+type QuoteEffectiveVenue = 'KRX' | 'NXT';
+
 type QuoteWithOptionalNxt = {
   lastPrice?: number;
   changePercent?: number;
+  requestedVenue?: QuoteRequestedVenue;
+  effectiveVenue?: QuoteEffectiveVenue;
+  venueFallback?: string;
   nxt?: NxtQuoteInfo;
 };
 
@@ -80,6 +86,35 @@ export function normalizeNxtDetailInfo(market: MarketType, quote?: QuoteWithOpti
     changePercent: isFiniteNumber(nxt?.changePercent) ? nxt.changePercent : null,
     updatedAt: isFiniteNumber(nxt?.updatedAt) ? nxt.updatedAt : null,
   };
+}
+
+export function normalizeQuoteDisplayBasis(market: MarketType, quote?: QuoteWithOptionalNxt) {
+  if (market !== 'KOSPI' && market !== 'KOSDAQ') return null;
+
+  const requestedVenue = quote?.requestedVenue;
+  const effectiveVenue = quote?.effectiveVenue;
+
+  if (requestedVenue === 'NXT' && effectiveVenue !== 'NXT') {
+    return 'NXT 요청 → KRX 대체';
+  }
+
+  if (effectiveVenue === 'NXT') {
+    return 'NXT';
+  }
+
+  if (effectiveVenue === 'KRX') {
+    return 'KRX';
+  }
+
+  if (requestedVenue === 'NXT') {
+    return 'NXT 요청 → KRX 대체';
+  }
+
+  if (requestedVenue === 'KRX') {
+    return 'KRX';
+  }
+
+  return 'KRX';
 }
 
 export function normalizeKrxNxtComparisonInfo(

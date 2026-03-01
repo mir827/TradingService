@@ -76,7 +76,11 @@ async function run() {
     assert.equal(quoteBody.nxt?.supported, true);
     assert.equal(quoteBody.nxt?.available, false);
     assert.equal(quoteBody.nxt?.status, 'unavailable');
-    assert.equal(quoteBody.nxt?.reason, 'NXT_FEED_NOT_CONFIGURED');
+    assert.ok(
+      quoteBody.nxt?.reason === 'NXT_UPSTREAM_ERROR' ||
+        quoteBody.nxt?.reason === 'NXT_QUOTE_MISSING' ||
+        quoteBody.nxt?.reason === 'NXT_FEED_NOT_CONFIGURED',
+    );
 
     const marketStatusResponse = await app.inject({
       method: 'GET',
