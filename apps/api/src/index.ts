@@ -447,8 +447,12 @@ const KRX_TIMEZONE = 'Asia/Seoul';
 const KRX_SESSION_OPEN = '09:00';
 const KRX_SESSION_CLOSE = '15:30';
 const KRX_SESSION_TEXT = `${KRX_SESSION_OPEN}-${KRX_SESSION_CLOSE} KST`;
+const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 const KRX_SESSION_OPEN_MINUTE = 9 * 60;
 const KRX_SESSION_CLOSE_MINUTE = 15 * 60 + 30;
+const COMBINED_NXT_PREMARKET_START_MINUTE = 8 * 60;
+const COMBINED_NXT_PREMARKET_END_MINUTE = 8 * 60 + 50;
+const COMBINED_NXT_AFTERMARKET_END_MINUTE = 20 * 60;
 
 const krxTimeFormatter = new Intl.DateTimeFormat('en-US', {
   timeZone: KRX_TIMEZONE,
@@ -2942,13 +2946,22 @@ type KrxStatusSnapshot = Omit<MarketStatusPayload, 'market' | 'checkedAt' | 'ven
   phase: Exclude<MarketVenuePhase, 'UNAVAILABLE'>;
 };
 
-function getKrxStatus(checkedAt: number): KrxStatusSnapshot {
+function getKrxClockContext(checkedAt: number) {
   const parts = krxTimeFormatter.formatToParts(new Date(checkedAt));
   const weekday = parts.find((part) => part.type === 'weekday')?.value ?? '';
-  const hour = Number(parts.find((part) => part.type === 'hour')?.value ?? '0');
-  const minute = Number(parts.find((part) => part.type === 'minute')?.value ?? '0');
-  const currentMinute = hour * 60 + minute;
-  const weekend = weekday === 'Sat' || weekday === 'Sun';
+  const parsedHour = Number(parts.find((part) => part.type === 'hour')?.value ?? '0');
+  const parsedMinute = Number(parts.find((part) => part.type === 'minute')?.value ?? '0');
+  const hour = Number.isFinite(parsedHour) ? ((parsedHour % 24) + 24) % 24 : 0;
+  const minute = Number.isFinite(parsedMinute) ? Math.min(Math.max(parsedMinute, 0), 59) : 0;
+
+  return {
+    weekend: weekday === 'Sat' || weekday === 'Sun',
+    currentMinute: hour * 60 + minute,
+  };
+}
+
+function getKrxStatus(checkedAt: number): KrxStatusSnapshot {
+  const { weekend, currentMinute } = getKrxClockContext(checkedAt);
 
   let status: MarketStatusState = 'CLOSED';
   let reason: MarketStatusReason = 'OUT_OF_SESSION';
@@ -4319,13 +4332,8 @@ function isAvailableNxtQuote(nxt?: NxtQuoteInfo): nxt is NxtQuoteInfo & { price:
   );
 }
 
-function shouldPreferNxtForCombined(nowMs: number, nxt?: NxtQuoteInfo) {
+function isRecentNxtQuote(nowMs: number, nxt?: NxtQuoteInfo) {
   if (!isAvailableNxtQuote(nxt)) {
-    return false;
-  }
-
-  const krxStatus = getKrxStatus(nowMs);
-  if (krxStatus.status === 'OPEN') {
     return false;
   }
 
@@ -4340,15 +4348,96 @@ function shouldPreferNxtForCombined(nowMs: number, nxt?: NxtQuoteInfo) {
   return true;
 }
 
-function applyNxtPriceToCandles(candles: Candle[], nxtPrice: number) {
+function shouldPreferNxtForCombined(nowMs: number, nxt?: NxtQuoteInfo) {
+  if (!isRecentNxtQuote(nowMs, nxt)) {
+    return false;
+  }
+
+  const { weekend, currentMinute } = getKrxClockContext(nowMs);
+  if (!weekend) {
+    if (
+      currentMinute >= COMBINED_NXT_PREMARKET_START_MINUTE &&
+      currentMinute < COMBINED_NXT_PREMARKET_END_MINUTE
+    ) {
+      return true;
+    }
+
+    if (currentMinute >= COMBINED_NXT_PREMARKET_END_MINUTE && currentMinute <= KRX_SESSION_CLOSE_MINUTE) {
+      return false;
+    }
+
+    if (currentMinute > KRX_SESSION_CLOSE_MINUTE && currentMinute <= COMBINED_NXT_AFTERMARKET_END_MINUTE) {
+      return true;
+    }
+  }
+
+  return true;
+}
+
+function getKrxIntradayIntervalMinutes(interval: string) {
+  const normalizedInterval = normalizeInterval(interval);
+  const mappedInterval = krxIntervalMap[normalizedInterval] ?? '60m';
+  if (!mappedInterval.endsWith('m')) {
+    return null;
+  }
+
+  const minutes = Number(mappedInterval.slice(0, -1));
+  return Number.isInteger(minutes) && minutes > 0 ? minutes : null;
+}
+
+function toKstIntervalBucketStartEpochSec(timestampMs: number, intervalMinutes: number) {
+  const intervalMs = intervalMinutes * 60 * 1000;
+  const shiftedMs = timestampMs + KST_OFFSET_MS;
+  const bucketStartMs = Math.floor(shiftedMs / intervalMs) * intervalMs - KST_OFFSET_MS;
+  return Math.floor(bucketStartMs / 1000);
+}
+
+function applyNxtPriceToCandles(
+  candles: Candle[],
+  nxtPrice: number,
+  interval: string,
+  limit: number,
+  nxtUpdatedAt?: number,
+) {
   if (!candles.length) {
     return candles;
   }
 
-  const next = candles.slice();
-  const last = next[next.length - 1];
   const normalizedPrice = Number(nxtPrice);
+  if (!Number.isFinite(normalizedPrice)) {
+    return candles;
+  }
 
+  const next = candles.slice();
+  const intradayMinutes = getKrxIntradayIntervalMinutes(interval);
+  if (
+    intradayMinutes !== null &&
+    typeof nxtUpdatedAt === 'number' &&
+    Number.isFinite(nxtUpdatedAt)
+  ) {
+    const nxtBucketTime = toKstIntervalBucketStartEpochSec(nxtUpdatedAt, intradayMinutes);
+    const last = next[next.length - 1];
+    const lastBucketTime = toKstIntervalBucketStartEpochSec(last.time * 1000, intradayMinutes);
+
+    if (nxtBucketTime > lastBucketTime) {
+      const syntheticOpen = Number(last.close);
+      next.push({
+        time: nxtBucketTime,
+        open: syntheticOpen,
+        high: Math.max(syntheticOpen, normalizedPrice),
+        low: Math.min(syntheticOpen, normalizedPrice),
+        close: normalizedPrice,
+        volume: 0,
+      });
+
+      if (limit > 0 && next.length > limit) {
+        return next.slice(-limit);
+      }
+      return next;
+    }
+  }
+
+  const last = next[next.length - 1];
   next[next.length - 1] = {
     ...last,
     high: Math.max(last.high, normalizedPrice),
@@ -4363,6 +4452,8 @@ function applyKrxCandleVenueSelection(
   candles: Candle[],
   nxt: NxtQuoteInfo | undefined,
   requestedVenue: QuoteRequestedVenue,
+  interval: string,
+  limit: number,
   nowMs = Date.now(),
 ): { candles: Candle[]; effectiveVenue: KrVenue; venueFallback?: string } {
   if (requestedVenue === 'KRX') {
@@ -4389,7 +4480,7 @@ function applyKrxCandleVenueSelection(
   }
 
   return {
-    candles: applyNxtPriceToCandles(candles, nxt.price),
+    candles: applyNxtPriceToCandles(candles, nxt.price, interval, limit, nxt.updatedAt),
     effectiveVenue: 'NXT',
   };
 }
@@ -4730,9 +4821,7 @@ app.get('/api/candles', async (request, reply) => {
   const normalizedSymbol = symbol.toUpperCase();
   const requestedVenueHint = resolveVenueForSymbol(normalizedSymbol, parsed.data.venue);
   const requestedVenue = resolveRequestedQuoteVenue(normalizedSymbol, requestedVenueHint);
-  const cacheKey = isKrxSymbol(normalizedSymbol)
-    ? `${normalizedSymbol}:${interval}:${limit}:${requestedVenue}`
-    : `${normalizedSymbol}:${interval}:${limit}`;
+  const cacheKey = `${normalizedSymbol}:${interval}:${limit}`;
   const cached = getCachedCandles(cacheKey);
 
   if (cached) {
@@ -4745,7 +4834,7 @@ app.get('/api/candles', async (request, reply) => {
     }
 
     const nxtQuote = requestedVenue === 'KRX' ? undefined : await fetchBestEffortNxtQuote(normalizedSymbol);
-    const selected = applyKrxCandleVenueSelection(cached, nxtQuote, requestedVenue);
+    const selected = applyKrxCandleVenueSelection(cached, nxtQuote, requestedVenue, interval, limit);
 
     return {
       symbol: normalizedSymbol,
@@ -4766,9 +4855,9 @@ app.get('/api/candles', async (request, reply) => {
 
     const baseCandles = await fetchKrxCandles(normalizedSymbol, interval, limit);
     const nxtQuote = requestedVenue === 'KRX' ? undefined : await fetchBestEffortNxtQuote(normalizedSymbol);
-    const selected = applyKrxCandleVenueSelection(baseCandles, nxtQuote, requestedVenue);
+    const selected = applyKrxCandleVenueSelection(baseCandles, nxtQuote, requestedVenue, interval, limit);
 
-    setCachedCandles(cacheKey, requestedVenue === 'COMBINED' ? baseCandles : selected.candles);
+    setCachedCandles(cacheKey, baseCandles);
 
     return {
       symbol: normalizedSymbol,

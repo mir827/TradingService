@@ -712,7 +712,7 @@ describe('api quote', () => {
     });
   });
 
-  it('uses NXT as combined venue outside KRX session but keeps KRX during open session', async () => {
+  it('applies COMBINED venue policy by weekday time window and keeps explicit KRX deterministic', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = toUrl(input);
 
@@ -745,7 +745,7 @@ describe('api quote', () => {
                     nxtOverMarketPriceInfo: {
                       overPrice: '71,520',
                       fluctuationsRatio: '2.17',
-                      localTradedAt: '2026-02-27T20:00:00.000000+09:00',
+                      localTradedAt: '2026-03-01T19:59:00.000000+09:00',
                     },
                   },
                 ],
@@ -759,38 +759,38 @@ describe('api quote', () => {
     });
 
     const nowSpy = vi.spyOn(Date, 'now');
-    nowSpy.mockReturnValue(new Date('2026-03-01T09:10:00+09:00').getTime());
+    nowSpy.mockReturnValue(new Date('2026-03-02T08:30:00+09:00').getTime());
 
-    const closedResponse = await app.inject({
+    const preOpenResponse = await app.inject({
       method: 'GET',
       url: '/api/quote?symbol=005930.KS',
     });
-    expect(closedResponse.statusCode).toBe(200);
-    const closedBody = closedResponse.json() as {
+    expect(preOpenResponse.statusCode).toBe(200);
+    const preOpenBody = preOpenResponse.json() as {
       requestedVenue?: string;
       effectiveVenue?: string;
       lastPrice: number;
     };
-    expect(closedBody.requestedVenue).toBe('COMBINED');
-    expect(closedBody.effectiveVenue).toBe('NXT');
-    expect(closedBody.lastPrice).toBe(71520);
+    expect(preOpenBody.requestedVenue).toBe('COMBINED');
+    expect(preOpenBody.effectiveVenue).toBe('NXT');
+    expect(preOpenBody.lastPrice).toBe(71520);
 
-    const closedKrxResponse = await app.inject({
+    nowSpy.mockReturnValue(new Date('2026-03-02T08:55:00+09:00').getTime());
+    const preSessionBaselineResponse = await app.inject({
       method: 'GET',
-      url: '/api/quote?symbol=005930.KS&venue=KRX',
+      url: '/api/quote?symbol=005930.KS',
     });
-    expect(closedKrxResponse.statusCode).toBe(200);
-    const closedKrxBody = closedKrxResponse.json() as {
+    expect(preSessionBaselineResponse.statusCode).toBe(200);
+    const preSessionBaselineBody = preSessionBaselineResponse.json() as {
       requestedVenue?: string;
       effectiveVenue?: string;
       lastPrice: number;
     };
-    expect(closedKrxBody.requestedVenue).toBe('KRX');
-    expect(closedKrxBody.effectiveVenue).toBe('KRX');
-    expect(closedKrxBody.lastPrice).toBe(71500);
+    expect(preSessionBaselineBody.requestedVenue).toBe('COMBINED');
+    expect(preSessionBaselineBody.effectiveVenue).toBe('KRX');
+    expect(preSessionBaselineBody.lastPrice).toBe(71500);
 
     nowSpy.mockReturnValue(new Date('2026-03-02T10:10:00+09:00').getTime());
-
     const openResponse = await app.inject({
       method: 'GET',
       url: '/api/quote?symbol=005930.KS',
@@ -802,6 +802,35 @@ describe('api quote', () => {
     };
     expect(openBody.effectiveVenue).toBe('KRX');
     expect(openBody.lastPrice).toBe(71500);
+
+    nowSpy.mockReturnValue(new Date('2026-03-02T16:10:00+09:00').getTime());
+    const afterSessionCombinedResponse = await app.inject({
+      method: 'GET',
+      url: '/api/quote?symbol=005930.KS',
+    });
+    expect(afterSessionCombinedResponse.statusCode).toBe(200);
+    const afterSessionCombinedBody = afterSessionCombinedResponse.json() as {
+      requestedVenue?: string;
+      effectiveVenue?: string;
+      lastPrice: number;
+    };
+    expect(afterSessionCombinedBody.requestedVenue).toBe('COMBINED');
+    expect(afterSessionCombinedBody.effectiveVenue).toBe('NXT');
+    expect(afterSessionCombinedBody.lastPrice).toBe(71520);
+
+    const explicitKrxResponse = await app.inject({
+      method: 'GET',
+      url: '/api/quote?symbol=005930.KS&venue=KRX',
+    });
+    expect(explicitKrxResponse.statusCode).toBe(200);
+    const explicitKrxBody = explicitKrxResponse.json() as {
+      requestedVenue?: string;
+      effectiveVenue?: string;
+      lastPrice: number;
+    };
+    expect(explicitKrxBody.requestedVenue).toBe('KRX');
+    expect(explicitKrxBody.effectiveVenue).toBe('KRX');
+    expect(explicitKrxBody.lastPrice).toBe(71500);
   });
 
   it('supports venue-aware candle selection for KR symbols', async () => {
@@ -866,12 +895,16 @@ describe('api quote', () => {
     const nxtBody = nxtResponse.json() as {
       requestedVenue?: string;
       effectiveVenue?: string;
-      candles: Array<{ close: number; high: number }>;
+      candles: Array<{ time: number; close: number; high: number; volume: number }>;
     };
+    const nxtBucketAt20 = Math.floor(new Date('2026-02-27T20:00:00+09:00').getTime() / 1000);
     expect(nxtBody.requestedVenue).toBe('NXT');
     expect(nxtBody.effectiveVenue).toBe('NXT');
+    expect(nxtBody.candles).toHaveLength(2);
+    expect(nxtBody.candles.at(-1)?.time).toBe(nxtBucketAt20);
     expect(nxtBody.candles.at(-1)?.close).toBe(217500);
     expect(nxtBody.candles.at(-1)?.high).toBe(217500);
+    expect(nxtBody.candles.at(-1)?.volume).toBe(0);
 
     const combinedResponse = await app.inject({
       method: 'GET',
@@ -881,10 +914,11 @@ describe('api quote', () => {
     const combinedBody = combinedResponse.json() as {
       requestedVenue?: string;
       effectiveVenue?: string;
-      candles: Array<{ close: number }>;
+      candles: Array<{ time: number; close: number }>;
     };
     expect(combinedBody.requestedVenue).toBe('COMBINED');
     expect(combinedBody.effectiveVenue).toBe('NXT');
+    expect(combinedBody.candles.at(-1)?.time).toBe(nxtBucketAt20);
     expect(combinedBody.candles.at(-1)?.close).toBe(217500);
 
     nowSpy.mockReturnValue(new Date('2026-03-02T10:10:00+09:00').getTime());
@@ -895,9 +929,10 @@ describe('api quote', () => {
     expect(openCombinedResponse.statusCode).toBe(200);
     const openCombinedBody = openCombinedResponse.json() as {
       effectiveVenue?: string;
-      candles: Array<{ close: number }>;
+      candles: Array<{ time: number; close: number }>;
     };
     expect(openCombinedBody.effectiveVenue).toBe('KRX');
+    expect(openCombinedBody.candles.at(-1)?.time).toBe(1_772_172_000);
     expect(openCombinedBody.candles.at(-1)?.close).toBe(216500);
   });
 
