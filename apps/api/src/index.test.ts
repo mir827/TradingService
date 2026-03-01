@@ -900,8 +900,9 @@ describe('api quote', () => {
     const nxtBucketAt20 = Math.floor(new Date('2026-02-27T20:00:00+09:00').getTime() / 1000);
     expect(nxtBody.requestedVenue).toBe('NXT');
     expect(nxtBody.effectiveVenue).toBe('NXT');
-    expect(nxtBody.candles).toHaveLength(2);
+    expect(nxtBody.candles).toHaveLength(6);
     expect(nxtBody.candles.at(-1)?.time).toBe(nxtBucketAt20);
+    expect(nxtBody.candles.at(-2)?.time).toBe(nxtBucketAt20 - 3600);
     expect(nxtBody.candles.at(-1)?.close).toBe(217500);
     expect(nxtBody.candles.at(-1)?.high).toBe(217500);
     expect(nxtBody.candles.at(-1)?.volume).toBe(0);

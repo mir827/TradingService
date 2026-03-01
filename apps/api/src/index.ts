@@ -4420,12 +4420,25 @@ function applyNxtPriceToCandles(
     const lastBucketTime = toKstIntervalBucketStartEpochSec(last.time * 1000, intradayMinutes);
 
     if (nxtBucketTime > lastBucketTime) {
-      const syntheticOpen = Number(last.close);
+      const intervalSeconds = intradayMinutes * 60;
+      const previousClose = Number(last.close);
+
+      for (let bucketTime = lastBucketTime + intervalSeconds; bucketTime < nxtBucketTime; bucketTime += intervalSeconds) {
+        next.push({
+          time: bucketTime,
+          open: previousClose,
+          high: previousClose,
+          low: previousClose,
+          close: previousClose,
+          volume: 0,
+        });
+      }
+
       next.push({
         time: nxtBucketTime,
-        open: syntheticOpen,
-        high: Math.max(syntheticOpen, normalizedPrice),
-        low: Math.min(syntheticOpen, normalizedPrice),
+        open: previousClose,
+        high: Math.max(previousClose, normalizedPrice),
+        low: Math.min(previousClose, normalizedPrice),
         close: normalizedPrice,
         volume: 0,
       });
