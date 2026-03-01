@@ -7297,7 +7297,6 @@ function App() {
     compareScaleMode === 'normalized'
       ? '정규화 기준: 첫 공통 캔들의 종가를 기준값으로 고정합니다.'
       : '절대값 기준: 비교 심볼의 원본 종가를 그대로 표시합니다.';
-  const intervalHotkeyHintText = intervals.map((interval, index) => `${index + 1}:${interval}`).join(' · ');
   const replayStatusText = replayMode
     ? `리플레이 ${replayPlaying ? '재생중' : replayProgress.isAtEnd ? '완료' : '일시정지'} · 스텝 ${replayProgress.completedSteps}/${replayProgress.totalSteps} · 속도 x${replaySpeed}`
     : null;
@@ -7353,7 +7352,6 @@ function App() {
       <header className="tv-topbar">
         <div className="brand-wrap">
           <div className="brand">TradingService</div>
-          <span className="phase-chip">Phase 1</span>
         </div>
 
         <div className="top-controls">
@@ -7378,9 +7376,6 @@ function App() {
                   {interval}
                 </button>
               ))}
-            </div>
-            <div className="interval-hotkeys-hint" title="숫자키 1~9로 타임프레임을 즉시 전환합니다.">
-              단축키: {intervalHotkeyHintText}
             </div>
           </div>
 
