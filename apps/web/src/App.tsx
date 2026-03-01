@@ -5754,19 +5754,32 @@ function App() {
     if (!area) return null;
 
     const bounds = area.getBoundingClientRect();
+    const x = event.clientX - bounds.left;
+    const y = event.clientY - bounds.top;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+
     return {
-      x: event.clientX - bounds.left,
-      y: event.clientY - bounds.top,
+      x,
+      y,
     };
   }, []);
 
   const toTimePriceFromCoordinates = useCallback((x: number, y: number) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+
     const chart = chartRef.current;
     const series = candleSeriesRef.current;
     if (!chart || !series) return null;
 
-    const rawTime = chart.timeScale().coordinateToTime(x);
-    const rawPrice = series.coordinateToPrice(y);
+    let rawTime: unknown;
+    let rawPrice: unknown;
+    try {
+      rawTime = chart.timeScale().coordinateToTime(x);
+      rawPrice = series.coordinateToPrice(y);
+    } catch {
+      return null;
+    }
+
     if (typeof rawTime !== 'number' || !Number.isFinite(rawTime)) return null;
     if (typeof rawPrice !== 'number' || !Number.isFinite(rawPrice)) return null;
 
@@ -5783,9 +5796,16 @@ function App() {
 
   const findDrawingAtPoint = useCallback(
     (x: number, y: number): DrawingHit | null => {
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+
       const chart = chartRef.current;
       const series = candleSeriesRef.current;
       if (!chart || !series) return null;
+      const chartArea = chartAreaRef.current;
+      const coordinateAbsLimit =
+        Math.max(chartArea?.clientWidth ?? 0, chartArea?.clientHeight ?? 0, 1) * 4;
+      const clampCoordinate = (value: number) =>
+        Math.min(coordinateAbsLimit, Math.max(-coordinateAbsLimit, value));
 
       let best: DrawingHit | null = null;
       const upsertHit = (id: string, kind: DrawingKind, distance: number) => {
@@ -5799,24 +5819,43 @@ function App() {
 
       for (const line of horizontalLinesRef.current) {
         if (!line.visible) continue;
-        const yCoord = series.priceToCoordinate(line.price);
+        let yCoord: unknown;
+        try {
+          yCoord = series.priceToCoordinate(line.price);
+        } catch {
+          continue;
+        }
         if (yCoord === null || !Number.isFinite(yCoord)) continue;
-        upsertHit(line.id, 'horizontal', Math.abs(y - Number(yCoord)));
+        upsertHit(line.id, 'horizontal', Math.abs(y - clampCoordinate(Number(yCoord))));
       }
 
       for (const line of verticalLinesRef.current) {
         if (!line.visible) continue;
-        const xCoord = chart.timeScale().timeToCoordinate(line.time as Time);
+        let xCoord: unknown;
+        try {
+          xCoord = chart.timeScale().timeToCoordinate(line.time as Time);
+        } catch {
+          continue;
+        }
         if (xCoord === null || !Number.isFinite(xCoord)) continue;
-        upsertHit(line.id, 'vertical', Math.abs(x - Number(xCoord)));
+        upsertHit(line.id, 'vertical', Math.abs(x - clampCoordinate(Number(xCoord))));
       }
 
       const toCoordinate = (time: UTCTimestamp, price: number) => {
-        const xCoord = chart.timeScale().timeToCoordinate(time as Time);
-        const yCoord = series.priceToCoordinate(price);
+        if (!Number.isFinite(Number(time)) || !Number.isFinite(price)) return null;
+
+        let xCoord: unknown;
+        let yCoord: unknown;
+        try {
+          xCoord = chart.timeScale().timeToCoordinate(time as Time);
+          yCoord = series.priceToCoordinate(price);
+        } catch {
+          return null;
+        }
+
         if (xCoord === null || yCoord === null) return null;
         if (!Number.isFinite(xCoord) || !Number.isFinite(yCoord)) return null;
-        return { x: Number(xCoord), y: Number(yCoord) };
+        return { x: clampCoordinate(Number(xCoord)), y: clampCoordinate(Number(yCoord)) };
       };
 
       for (const line of trendlinesRef.current) {
@@ -6069,46 +6108,72 @@ function App() {
     [updateDrawingFlagsById],
   );
 
+  const resetDragInteraction = useCallback((target?: HTMLDivElement | null) => {
+    const activeDrag = dragStateRef.current;
+    if (activeDrag && target && target.hasPointerCapture(activeDrag.pointerId)) {
+      target.releasePointerCapture(activeDrag.pointerId);
+    }
+
+    dragStateRef.current = null;
+    dragHistoryStartRef.current = null;
+    setIsDraggingDrawing(false);
+  }, []);
+
   const handleChartPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
-      if (activeToolRef.current !== 'cursor') return;
+      if (activeToolRef.current !== 'cursor') {
+        resetDragInteraction(event.currentTarget);
+        return;
+      }
       if (event.button !== 0) return;
 
       const point = getLocalChartPoint(event);
-      if (!point) return;
+      if (!point) {
+        resetDragInteraction(event.currentTarget);
+        return;
+      }
 
       const hit = findDrawingAtPoint(point.x, point.y);
       if (!hit) {
-        dragHistoryStartRef.current = null;
+        resetDragInteraction(event.currentTarget);
         setSelectedDrawingId(null);
         return;
       }
 
       setSelectedDrawingId(hit.id);
       if (isDrawingLocked(hit.id)) {
-        dragHistoryStartRef.current = null;
+        resetDragInteraction(event.currentTarget);
         return;
       }
 
       const mapped = toTimePriceFromCoordinates(point.x, point.y);
       if (!mapped) {
-        dragHistoryStartRef.current = null;
+        resetDragInteraction(event.currentTarget);
         return;
       }
 
       const dragState = startDragState(hit, event.pointerId, mapped.time, mapped.price);
       if (!dragState) {
-        dragHistoryStartRef.current = null;
+        resetDragInteraction(event.currentTarget);
         return;
       }
 
+      resetDragInteraction(event.currentTarget);
       dragStateRef.current = dragState;
       dragHistoryStartRef.current = captureChartHistorySnapshot();
       setIsDraggingDrawing(true);
       event.currentTarget.setPointerCapture(event.pointerId);
       event.preventDefault();
     },
-    [captureChartHistorySnapshot, findDrawingAtPoint, getLocalChartPoint, isDrawingLocked, startDragState, toTimePriceFromCoordinates],
+    [
+      captureChartHistorySnapshot,
+      findDrawingAtPoint,
+      getLocalChartPoint,
+      isDrawingLocked,
+      resetDragInteraction,
+      startDragState,
+      toTimePriceFromCoordinates,
+    ],
   );
 
   const handleChartPointerMove = useCallback(

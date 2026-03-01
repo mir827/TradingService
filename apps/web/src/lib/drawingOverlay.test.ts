@@ -146,4 +146,141 @@ describe('drawing overlay geometry safety', () => {
     expect(geometry.rectangles).toHaveLength(0);
     expect(geometry.notes).toEqual([{ id: 'note-valid', x: 200, y: 160, text: 'ok' }]);
   });
+
+  it('skips malformed one-off projections without dropping valid shapes', () => {
+    const geometry = buildDrawingOverlayGeometry({
+      width: 720,
+      height: 420,
+      trendlines: [
+        {
+          id: 'selected-trendline',
+          visible: true,
+          startTime: 1,
+          startPrice: 1,
+          endTime: 2,
+          endPrice: 2,
+        },
+        {
+          id: 'trend-ok',
+          visible: true,
+          startTime: 3,
+          startPrice: 3,
+          endTime: 4,
+          endPrice: 4,
+        },
+      ],
+      rays: [
+        {
+          id: 'ray-bad',
+          visible: true,
+          startTime: 5,
+          startPrice: 5,
+          endTime: 6,
+          endPrice: 6,
+        },
+        {
+          id: 'ray-ok',
+          visible: true,
+          startTime: 7,
+          startPrice: 7,
+          endTime: 8,
+          endPrice: 8,
+        },
+      ],
+      rectangles: [
+        {
+          id: 'rect-bad',
+          visible: true,
+          startTime: 9,
+          startPrice: 9,
+          endTime: 10,
+          endPrice: 10,
+        },
+        {
+          id: 'rect-ok',
+          visible: true,
+          startTime: 11,
+          startPrice: 11,
+          endTime: 12,
+          endPrice: 12,
+        },
+      ],
+      notes: [
+        {
+          id: 'note-bad',
+          visible: true,
+          time: 13,
+          price: 13,
+          text: 'bad note',
+        },
+        {
+          id: 'note-ok',
+          visible: true,
+          time: 14,
+          price: 14,
+          text: 'good note',
+        },
+      ],
+      toCoordinate: (time) => {
+        if (time === 1) throw new Error('projection failed');
+        if (time === 2) return { x: 50, y: 20 };
+        if (time === 3) return { x: 120, y: 40 };
+        if (time === 4) return { x: 200, y: 140 };
+        if (time === 5) return { x: 240, y: 160 };
+        if (time === 6) return { x: 240, y: 160 };
+        if (time === 7) return { x: 260, y: 170 };
+        if (time === 8) return { x: 340, y: 210 };
+        if (time === 9) return { x: Number.POSITIVE_INFINITY, y: 30 };
+        if (time === 10) return { x: 160, y: 120 };
+        if (time === 11) return { x: 180, y: 80 };
+        if (time === 12) return { x: 300, y: 190 };
+        if (time === 13) return { x: Number.NaN, y: 20 };
+        if (time === 14) return { x: 360, y: 220 };
+        return null;
+      },
+    });
+
+    expect(geometry.trendlines.map((shape) => shape.id)).toEqual(['trend-ok']);
+    expect(geometry.rays.map((shape) => shape.id)).toEqual(['ray-ok']);
+    expect(geometry.rectangles.map((shape) => shape.id)).toEqual(['rect-ok']);
+    expect(geometry.notes.map((shape) => shape.id)).toEqual(['note-ok']);
+  });
+
+  it('keeps rectangle dimensions finite and non-negative under extreme projected values', () => {
+    const geometry = buildDrawingOverlayGeometry({
+      width: 840,
+      height: 460,
+      trendlines: [],
+      rays: [],
+      rectangles: [
+        {
+          id: 'rect-extreme',
+          visible: true,
+          startTime: 1,
+          startPrice: 1,
+          endTime: 2,
+          endPrice: 2,
+        },
+      ],
+      notes: [],
+      toCoordinate: (time) => {
+        if (time === 1) return { x: -10_000_000, y: 8_000_000 };
+        if (time === 2) return { x: 12_000_000, y: -9_000_000 };
+        return null;
+      },
+    });
+
+    expect(geometry.rectangles).toHaveLength(1);
+    const [rect] = geometry.rectangles;
+    const maxAbs = Math.max(geometry.width, geometry.height) * 4;
+
+    expect(Number.isFinite(rect.x)).toBe(true);
+    expect(Number.isFinite(rect.y)).toBe(true);
+    expect(Number.isFinite(rect.width)).toBe(true);
+    expect(Number.isFinite(rect.height)).toBe(true);
+    expect(rect.width).toBeGreaterThanOrEqual(0);
+    expect(rect.height).toBeGreaterThanOrEqual(0);
+    expect(rect.width).toBeLessThanOrEqual(maxAbs * 2);
+    expect(rect.height).toBeLessThanOrEqual(maxAbs * 2);
+  });
 });

@@ -67,8 +67,12 @@ const RAY_EXTENSION_MULTIPLIER = 2;
 const COORDINATE_CLAMP_MULTIPLIER = 4;
 const MIN_RAY_VECTOR_LENGTH = 1e-6;
 
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
 function toViewportDimension(value: number) {
-  if (!Number.isFinite(value) || value <= 0) return 0;
+  if (!isFiniteNumber(value) || value <= 0) return 0;
   return Math.floor(value);
 }
 
@@ -76,12 +80,110 @@ function clampCoordinate(value: number, maxAbs: number) {
   return Math.min(maxAbs, Math.max(-maxAbs, value));
 }
 
+function toSafeCoordinate(value: number, maxAbs: number): number | null {
+  if (!isFiniteNumber(value)) return null;
+  const clamped = clampCoordinate(value, maxAbs);
+  return isFiniteNumber(clamped) ? clamped : null;
+}
+
+function toSafeShapeId(id: string): string | null {
+  const normalized = id.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
 function toSafePoint(point: OverlayPoint | null, maxAbs: number): OverlayPoint | null {
   if (!point) return null;
-  if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return null;
+  const x = toSafeCoordinate(point.x, maxAbs);
+  const y = toSafeCoordinate(point.y, maxAbs);
+  if (x === null || y === null) return null;
   return {
-    x: clampCoordinate(point.x, maxAbs),
-    y: clampCoordinate(point.y, maxAbs),
+    x,
+    y,
+  };
+}
+
+function projectPointSafely(
+  project: (time: number, price: number) => OverlayPoint | null,
+  time: number,
+  price: number,
+  maxAbs: number,
+): OverlayPoint | null {
+  if (!isFiniteNumber(time) || !isFiniteNumber(price)) return null;
+
+  try {
+    return toSafePoint(project(time, price), maxAbs);
+  } catch {
+    return null;
+  }
+}
+
+function toSafeLineGeometry(id: string, start: OverlayPoint, end: OverlayPoint, maxAbs: number): OverlayLineGeometry | null {
+  const safeId = toSafeShapeId(id);
+  if (!safeId) return null;
+
+  const x1 = toSafeCoordinate(start.x, maxAbs);
+  const y1 = toSafeCoordinate(start.y, maxAbs);
+  const x2 = toSafeCoordinate(end.x, maxAbs);
+  const y2 = toSafeCoordinate(end.y, maxAbs);
+  if (x1 === null || y1 === null || x2 === null || y2 === null) return null;
+
+  return {
+    id: safeId,
+    x1,
+    y1,
+    x2,
+    y2,
+  };
+}
+
+function toSafeRectangleGeometry(
+  id: string,
+  start: OverlayPoint,
+  end: OverlayPoint,
+  maxAbs: number,
+): OverlayRectangleGeometry | null {
+  const safeId = toSafeShapeId(id);
+  if (!safeId) return null;
+
+  const rawX = Math.min(start.x, end.x);
+  const rawY = Math.min(start.y, end.y);
+  const rawWidth = Math.abs(end.x - start.x);
+  const rawHeight = Math.abs(end.y - start.y);
+  if (!isFiniteNumber(rawX) || !isFiniteNumber(rawY) || !isFiniteNumber(rawWidth) || !isFiniteNumber(rawHeight)) {
+    return null;
+  }
+
+  const x = toSafeCoordinate(rawX, maxAbs);
+  const y = toSafeCoordinate(rawY, maxAbs);
+  if (x === null || y === null) return null;
+
+  const maxSpan = maxAbs * 2;
+  const width = Math.min(maxSpan, Math.max(0, rawWidth));
+  const height = Math.min(maxSpan, Math.max(0, rawHeight));
+  if (!isFiniteNumber(width) || !isFiniteNumber(height)) return null;
+
+  return {
+    id: safeId,
+    x,
+    y,
+    width,
+    height,
+  };
+}
+
+function toSafeNoteGeometry(id: string, text: string, point: OverlayPoint, maxAbs: number): OverlayNoteGeometry | null {
+  const safeId = toSafeShapeId(id);
+  if (!safeId) return null;
+
+  const x = toSafeCoordinate(point.x, maxAbs);
+  const y = toSafeCoordinate(point.y, maxAbs);
+  if (x === null || y === null) return null;
+
+  return {
+    id: safeId,
+    x,
+    y,
+    text,
   };
 }
 
@@ -104,7 +206,7 @@ export function buildDrawingOverlayGeometry(args: BuildDrawingOverlayGeometryArg
   }
 
   const coordinateAbsLimit = Math.max(width, height) * COORDINATE_CLAMP_MULTIPLIER;
-  const toCoordinate = (time: number, price: number) => toSafePoint(args.toCoordinate(time, price), coordinateAbsLimit);
+  const toCoordinate = (time: number, price: number) => projectPointSafely(args.toCoordinate, time, price, coordinateAbsLimit);
 
   const trendlineShapes: OverlayLineGeometry[] = [];
   for (const shape of args.trendlines) {
@@ -113,13 +215,10 @@ export function buildDrawingOverlayGeometry(args: BuildDrawingOverlayGeometryArg
     const end = toCoordinate(shape.endTime, shape.endPrice);
     if (!start || !end) continue;
 
-    trendlineShapes.push({
-      id: shape.id,
-      x1: start.x,
-      y1: start.y,
-      x2: end.x,
-      y2: end.y,
-    });
+    const safeShape = toSafeLineGeometry(shape.id, start, end, coordinateAbsLimit);
+    if (!safeShape) continue;
+
+    trendlineShapes.push(safeShape);
   }
 
   const rayShapes: OverlayLineGeometry[] = [];
@@ -132,20 +231,27 @@ export function buildDrawingOverlayGeometry(args: BuildDrawingOverlayGeometryArg
     const dx = end.x - start.x;
     const dy = end.y - start.y;
     const length = Math.hypot(dx, dy);
-    if (!Number.isFinite(length) || length <= MIN_RAY_VECTOR_LENGTH) continue;
+    if (!isFiniteNumber(length) || length <= MIN_RAY_VECTOR_LENGTH) continue;
 
     const extendDistance = Math.max(width, height) * RAY_EXTENSION_MULTIPLIER;
-    const extendedX2 = clampCoordinate(end.x + (dx / length) * extendDistance, coordinateAbsLimit);
-    const extendedY2 = clampCoordinate(end.y + (dy / length) * extendDistance, coordinateAbsLimit);
-    if (!Number.isFinite(extendedX2) || !Number.isFinite(extendedY2)) continue;
+    if (!isFiniteNumber(extendDistance) || extendDistance <= 0) continue;
 
-    rayShapes.push({
-      id: shape.id,
-      x1: start.x,
-      y1: start.y,
-      x2: extendedX2,
-      y2: extendedY2,
-    });
+    const unitX = dx / length;
+    const unitY = dy / length;
+    if (!isFiniteNumber(unitX) || !isFiniteNumber(unitY)) continue;
+
+    const safeShape = toSafeLineGeometry(
+      shape.id,
+      start,
+      {
+        x: end.x + unitX * extendDistance,
+        y: end.y + unitY * extendDistance,
+      },
+      coordinateAbsLimit,
+    );
+    if (!safeShape) continue;
+
+    rayShapes.push(safeShape);
   }
 
   const rectangleShapes: OverlayRectangleGeometry[] = [];
@@ -155,17 +261,10 @@ export function buildDrawingOverlayGeometry(args: BuildDrawingOverlayGeometryArg
     const end = toCoordinate(shape.endTime, shape.endPrice);
     if (!start || !end) continue;
 
-    const rectWidth = Math.abs(end.x - start.x);
-    const rectHeight = Math.abs(end.y - start.y);
-    if (!Number.isFinite(rectWidth) || !Number.isFinite(rectHeight)) continue;
+    const safeShape = toSafeRectangleGeometry(shape.id, start, end, coordinateAbsLimit);
+    if (!safeShape) continue;
 
-    rectangleShapes.push({
-      id: shape.id,
-      x: Math.min(start.x, end.x),
-      y: Math.min(start.y, end.y),
-      width: rectWidth,
-      height: rectHeight,
-    });
+    rectangleShapes.push(safeShape);
   }
 
   const noteShapes: OverlayNoteGeometry[] = [];
@@ -173,12 +272,11 @@ export function buildDrawingOverlayGeometry(args: BuildDrawingOverlayGeometryArg
     if (!note.visible) continue;
     const point = toCoordinate(note.time, note.price);
     if (!point) continue;
-    noteShapes.push({
-      id: note.id,
-      x: point.x,
-      y: point.y,
-      text: note.text,
-    });
+
+    const safeShape = toSafeNoteGeometry(note.id, note.text, point, coordinateAbsLimit);
+    if (!safeShape) continue;
+
+    noteShapes.push(safeShape);
   }
 
   return {
