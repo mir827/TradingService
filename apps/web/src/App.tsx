@@ -3406,24 +3406,30 @@ function App() {
     let canceled = false;
 
     const pullQuotes = async () => {
-      try {
-        const entries = await Promise.all(
-          quoteTargets.map(async ({ symbol, venue }) => {
-            const venueQuery = venue ? `&venue=${encodeURIComponent(venue)}` : '';
-            const res = await fetch(`${apiBase}/api/quote?symbol=${encodeURIComponent(symbol)}${venueQuery}`);
-            if (!res.ok) throw new Error(symbol);
-            const quote = (await res.json()) as Quote;
-            return [symbol, quote] as const;
-          }),
-        );
+      const settled = await Promise.allSettled(
+        quoteTargets.map(async ({ symbol, venue }) => {
+          const venueQuery = venue ? `&venue=${encodeURIComponent(venue)}` : '';
+          const res = await fetch(`${apiBase}/api/quote?symbol=${encodeURIComponent(symbol)}${venueQuery}`);
+          if (!res.ok) throw new Error(symbol);
+          const quote = (await res.json()) as Quote;
+          return [symbol, quote] as const;
+        }),
+      );
 
-        if (!canceled) {
-          setQuotes((prev) => ({ ...prev, ...Object.fromEntries(entries) }));
-        }
-      } catch {
-        if (!canceled) {
-          setError((prev) => prev ?? '일부 시세 정보를 업데이트하지 못했습니다.');
-        }
+      if (canceled) {
+        return;
+      }
+
+      const successfulEntries = settled
+        .filter((result): result is PromiseFulfilledResult<readonly [string, Quote]> => result.status === 'fulfilled')
+        .map((result) => result.value);
+
+      if (successfulEntries.length) {
+        setQuotes((prev) => ({ ...prev, ...Object.fromEntries(successfulEntries) }));
+      }
+
+      if (settled.some((result) => result.status === 'rejected')) {
+        setError((prev) => prev ?? '일부 시세 정보를 업데이트하지 못했습니다.');
       }
     };
 
@@ -4585,6 +4591,25 @@ function App() {
       }
 
       setWatchlistSymbols(nextWatchlist);
+
+      const updatedItem = nextWatchlist.find((item) => item.symbol === symbolToUpdate);
+      const normalizedVenue = updatedItem ? normalizeVenueForSymbol(updatedItem, updatedItem.venue) : undefined;
+      const venueQuery = normalizedVenue ? `&venue=${encodeURIComponent(normalizedVenue)}` : '';
+      void (async () => {
+        try {
+          const response = await fetch(
+            `${apiBase}/api/quote?symbol=${encodeURIComponent(symbolToUpdate)}${venueQuery}`,
+          );
+          if (!response.ok) {
+            return;
+          }
+          const quote = (await response.json()) as Quote;
+          const quoteSymbol = symbolToUpdate.toUpperCase();
+          setQuotes((prev) => ({ ...prev, [quoteSymbol]: quote }));
+        } catch {
+          // ignore: periodic quote poll will retry
+        }
+      })();
 
       try {
         const persistedItems = await persistWatchlist(nextWatchlist);
