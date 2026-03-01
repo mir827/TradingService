@@ -18,7 +18,7 @@ select {
   background: #0f1421;
   color: #d1d4dc;
   display: grid;
-  grid-template-rows: 52px 1fr 180px;
+  grid-template-rows: 52px 1fr 224px;
   overflow: hidden;
 }
 
@@ -3037,6 +3037,10 @@ select {
 }
 
 @media (max-width: 1200px) {
+  .tv-app {
+    grid-template-rows: 52px 1fr 208px;
+  }
+
   .tv-main {
     grid-template-columns: 52px minmax(0, 1fr) clamp(220px, 32vw, 260px);
   }
@@ -3108,6 +3112,10 @@ select {
 }
 
 @media (max-width: 960px) {
+  .tv-app {
+    grid-template-rows: 52px 1fr 196px;
+  }
+
   .tv-main {
     grid-template-columns: 52px minmax(0, 1fr) 220px;
   }
