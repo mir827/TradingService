@@ -3,6 +3,7 @@ import {
   emitOpsErrorTelemetry,
   fetchOpsTelemetryFeed,
   normalizeApiOperationError,
+  normalizeOpsTelemetryFeedPayload,
   readApiErrorMessage,
 } from './apiOperations';
 
@@ -108,5 +109,69 @@ describe('api operation helpers', () => {
     const feed = await fetchOpsTelemetryFeed('http://localhost:4100', { source: 'strategy' });
     expect(feed.total).toBe(1);
     expect(feed.errors[0].code).toBe('STRATEGY_BACKTEST_FAILED');
+  });
+
+  it('normalizes malformed ops feed events into safe fallback shapes', () => {
+    const feed = normalizeOpsTelemetryFeedPayload(
+      {
+        total: 'bad',
+        limit: '200',
+        errors: [
+          null,
+          {
+            id: ' ',
+            level: 'boom',
+            source: 'broken',
+            code: ' ',
+            message: '',
+            context: { keep: 'ok', nested: { nope: true } },
+            occurredAt: 'bad',
+            recordedAt: '42',
+          },
+        ],
+        recoveryTotal: undefined,
+        recoveryLimit: '50',
+        recoveries: [
+          {
+            id: '',
+            source: 'strategy',
+            action: ' ',
+            status: 'broken',
+            message: 123,
+            errorCode: ' ',
+            occurredAt: '10',
+            recordedAt: 'invalid',
+          },
+        ],
+      },
+      { limit: 20, recoveryLimit: 20 },
+    );
+
+    expect(feed.total).toBe(1);
+    expect(feed.limit).toBe(200);
+    expect(feed.errors).toEqual([
+      {
+        id: 'ops_error_2',
+        level: 'recoverable',
+        source: 'api',
+        code: 'UNKNOWN_ERROR',
+        message: 'UNKNOWN_ERROR',
+        context: { keep: 'ok' },
+        occurredAt: 0,
+        recordedAt: 42,
+      },
+    ]);
+    expect(feed.recoveryTotal).toBe(1);
+    expect(feed.recoveryLimit).toBe(50);
+    expect(feed.recoveries).toEqual([
+      {
+        id: 'ops_recovery_1',
+        source: 'strategy',
+        action: 'recovery',
+        status: 'attempted',
+        occurredAt: 10,
+        recordedAt: 10,
+      },
+    ]);
   });
 });

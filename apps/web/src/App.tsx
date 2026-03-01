@@ -93,8 +93,6 @@ import { getFavoriteIntervalHotkeyIndex, isTypingInputTarget } from './lib/hotke
 import { parsePineStrategyTesterDirectivesWithMeta } from './lib/pineStrategyDirectives';
 import {
   DEFAULT_PINE_SCRIPT_SOURCE,
-  PINE_SCRIPT_NAME_MAX_LENGTH,
-  PINE_SCRIPT_SOURCE_MAX_LENGTH,
   clampPineScriptName,
   clampPineScriptSource,
   createPineScriptId,
@@ -102,8 +100,7 @@ import {
   duplicatePineScript,
   deletePineScript,
   filterPineScriptsByName,
-  isPineScriptNameOverLimit,
-  isPineScriptSourceOverLimit,
+  getPineEditorGuardrailWarnings,
   renamePineScript,
   readPineWorkspace,
   setActivePineScript,
@@ -987,17 +984,6 @@ function formatOptionalTimestamp(value: number | null) {
 
 function formatStrategyDirectiveValue(value: number) {
   return Number.isInteger(value) ? String(Math.trunc(value)) : String(value);
-}
-
-function getPineEditorGuardrailWarnings(name: string, source: string): string[] {
-  const warnings: string[] = [];
-  if (isPineScriptNameOverLimit(name)) {
-    warnings.push(`이름이 ${PINE_SCRIPT_NAME_MAX_LENGTH}자를 넘어 저장 시 잘립니다.`);
-  }
-  if (isPineScriptSourceOverLimit(source)) {
-    warnings.push(`스크립트가 50KB(${PINE_SCRIPT_SOURCE_MAX_LENGTH.toLocaleString('en-US')}자) 제한을 넘어 저장 시 잘립니다.`);
-  }
-  return warnings;
 }
 
 type VenuePreferenceValue = '' | KrVenue;
@@ -8753,19 +8739,22 @@ function App() {
                       전략 테스터로 보내기
                     </button>
                   </div>
+                  {pineEditorDirty ? <span className="pine-editor-dirty-indicator">저장하지 않은 변경사항이 있습니다.</span> : null}
                 </div>
 
-                <textarea
-                  className="pine-editor-textarea"
-                  value={pineEditorSource}
-                  onChange={(event) => setPineEditorSource(event.target.value)}
-                  spellCheck={false}
-                />
+                <div className="pine-editor-textarea-wrap">
+                  <textarea
+                    className="pine-editor-textarea"
+                    value={pineEditorSource}
+                    onChange={(event) => setPineEditorSource(event.target.value)}
+                    spellCheck={false}
+                  />
+                </div>
 
                 <div className="pine-editor-status">
                   <div className="pine-editor-status-main">
                     <span className={`pine-editor-status-text ${pineStatusMessage?.tone === 'error' ? 'error' : 'info'}`}>
-                      {pineStatusMessage?.text ?? (pineEditorDirty ? '저장되지 않은 변경사항이 있습니다.' : '저장 상태 최신입니다.')}
+                      {pineStatusMessage?.text ?? (pineEditorDirty ? '편집 중입니다.' : '저장 상태 최신입니다.')}
                     </span>
                     {pineEditorGuardrailWarnings.length > 0 ? (
                       <span className="pine-editor-status-text warning">{pineEditorGuardrailWarnings.join(' ')}</span>

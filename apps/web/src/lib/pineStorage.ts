@@ -115,6 +115,17 @@ export function isPineScriptSourceOverLimit(source: string): boolean {
   return source.length > PINE_SCRIPT_SOURCE_MAX_LENGTH;
 }
 
+export function getPineEditorGuardrailWarnings(name: string, source: string): string[] {
+  const warnings: string[] = [];
+  if (isPineScriptNameOverLimit(name)) {
+    warnings.push(`이름이 ${PINE_SCRIPT_NAME_MAX_LENGTH}자를 넘어 저장 시 잘립니다.`);
+  }
+  if (isPineScriptSourceOverLimit(source)) {
+    warnings.push(`스크립트가 50KB(${PINE_SCRIPT_SOURCE_MAX_LENGTH.toLocaleString('en-US')}자) 제한을 넘어 저장 시 잘립니다.`);
+  }
+  return warnings;
+}
+
 function normalizeScriptName(name: unknown, fallback: string): string {
   if (typeof name === 'string') {
     const normalized = clampPineScriptName(name);

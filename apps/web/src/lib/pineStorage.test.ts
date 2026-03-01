@@ -11,6 +11,7 @@ import {
   deletePineScript,
   filterPineScriptsByName,
   getDefaultPineWorkspaceState,
+  getPineEditorGuardrailWarnings,
   normalizePineWorkspace,
   readPineWorkspace,
   renamePineScript,
@@ -285,6 +286,18 @@ describe('pine workspace persistence', () => {
     expect(duplicated).toBeTruthy();
     expect(duplicated?.name.length).toBeLessThanOrEqual(PINE_SCRIPT_NAME_MAX_LENGTH);
     expect(duplicated?.source.length).toBeLessThanOrEqual(PINE_SCRIPT_SOURCE_MAX_LENGTH);
+  });
+
+  it('normalizes pine editor guardrail warnings for over-limit inputs only', () => {
+    expect(getPineEditorGuardrailWarnings('Alpha', 'plot(close)')).toEqual([]);
+
+    const nameWarnings = getPineEditorGuardrailWarnings('N'.repeat(PINE_SCRIPT_NAME_MAX_LENGTH + 1), 'plot(close)');
+    expect(nameWarnings).toEqual([`이름이 ${PINE_SCRIPT_NAME_MAX_LENGTH}자를 넘어 저장 시 잘립니다.`]);
+
+    const sourceWarnings = getPineEditorGuardrailWarnings('Alpha', 'a'.repeat(PINE_SCRIPT_SOURCE_MAX_LENGTH + 1));
+    expect(sourceWarnings).toEqual([
+      `스크립트가 50KB(${PINE_SCRIPT_SOURCE_MAX_LENGTH.toLocaleString('en-US')}자) 제한을 넘어 저장 시 잘립니다.`,
+    ]);
   });
 
   it('keeps generated unique names within max length', () => {

@@ -44,8 +44,30 @@ export type NormalizedApiOperationError = {
   retryable: boolean;
 };
 
+const OPS_TELEMETRY_LEVEL_VALUES: OpsTelemetryLevel[] = ['recoverable', 'critical'];
+const OPS_TELEMETRY_SOURCE_VALUES: OpsTelemetrySource[] = ['web', 'api', 'alerts', 'strategy', 'trading', 'chart', 'watchlist'];
+const OPS_RECOVERY_STATUS_VALUES: OpsRecoveryStatus[] = ['attempted', 'succeeded', 'failed'];
+
 function asTrimmedString(value: unknown) {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeBoundedInteger(value: unknown, fallback: number, min: number, max: number) {
+  const resolvedMax = Number.isFinite(max) ? max : Number.MAX_SAFE_INTEGER;
+  const boundedFallback = Math.max(min, Math.min(resolvedMax, Math.floor(fallback)));
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.max(min, Math.min(resolvedMax, Math.floor(value)));
+  }
+
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return Math.max(min, Math.min(resolvedMax, Math.floor(parsed)));
+    }
+  }
+
+  return boundedFallback;
 }
 
 export function readApiErrorMessage(payload: unknown) {
@@ -124,8 +146,8 @@ function normalizeTelemetryCode(code: string, fallbackCode: string) {
   return fallbackCode;
 }
 
-function sanitizeOpsTelemetryContext(context?: Record<string, unknown>) {
-  if (!context) return undefined;
+function sanitizeOpsTelemetryContext(context?: unknown) {
+  if (!context || typeof context !== 'object' || Array.isArray(context)) return undefined;
 
   const sanitizedEntries: Array<[string, OpsTelemetryContextValue]> = [];
   for (const [rawKey, rawValue] of Object.entries(context)) {
@@ -163,6 +185,135 @@ function sanitizeOpsTelemetryContext(context?: Record<string, unknown>) {
   }
 
   return Object.fromEntries(sanitizedEntries);
+}
+
+function normalizeOpsErrorEvent(value: unknown, index: number): OpsErrorEvent | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const payload = value as {
+    id?: unknown;
+    level?: unknown;
+    source?: unknown;
+    code?: unknown;
+    message?: unknown;
+    context?: unknown;
+    occurredAt?: unknown;
+    recordedAt?: unknown;
+  };
+
+  const code = normalizeTelemetryCode(asTrimmedString(payload.code), 'UNKNOWN_ERROR');
+  const message = asTrimmedString(payload.message) || code;
+  const occurredAt = normalizeBoundedInteger(payload.occurredAt, 0, 0, Number.MAX_SAFE_INTEGER);
+  const recordedAt = normalizeBoundedInteger(payload.recordedAt, occurredAt, 0, Number.MAX_SAFE_INTEGER);
+  const id = asTrimmedString(payload.id) || `ops_error_${index + 1}`;
+  const source = OPS_TELEMETRY_SOURCE_VALUES.includes(payload.source as OpsTelemetrySource)
+    ? (payload.source as OpsTelemetrySource)
+    : 'api';
+  const level = OPS_TELEMETRY_LEVEL_VALUES.includes(payload.level as OpsTelemetryLevel)
+    ? (payload.level as OpsTelemetryLevel)
+    : 'recoverable';
+  const context = sanitizeOpsTelemetryContext(payload.context);
+
+  return {
+    id,
+    level,
+    source,
+    code,
+    message,
+    ...(context ? { context } : {}),
+    occurredAt,
+    recordedAt,
+  };
+}
+
+function normalizeOpsRecoveryEvent(value: unknown, index: number): OpsRecoveryEvent | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const payload = value as {
+    id?: unknown;
+    source?: unknown;
+    action?: unknown;
+    status?: unknown;
+    message?: unknown;
+    errorCode?: unknown;
+    context?: unknown;
+    occurredAt?: unknown;
+    recordedAt?: unknown;
+  };
+
+  const occurredAt = normalizeBoundedInteger(payload.occurredAt, 0, 0, Number.MAX_SAFE_INTEGER);
+  const recordedAt = normalizeBoundedInteger(payload.recordedAt, occurredAt, 0, Number.MAX_SAFE_INTEGER);
+  const id = asTrimmedString(payload.id) || `ops_recovery_${index + 1}`;
+  const source = OPS_TELEMETRY_SOURCE_VALUES.includes(payload.source as OpsTelemetrySource)
+    ? (payload.source as OpsTelemetrySource)
+    : 'api';
+  const action = asTrimmedString(payload.action).slice(0, 80) || 'recovery';
+  const status = OPS_RECOVERY_STATUS_VALUES.includes(payload.status as OpsRecoveryStatus)
+    ? (payload.status as OpsRecoveryStatus)
+    : 'attempted';
+  const message = asTrimmedString(payload.message).slice(0, 400) || undefined;
+  const errorCode = asTrimmedString(payload.errorCode)
+    ? normalizeTelemetryCode(asTrimmedString(payload.errorCode), 'RECOVERY_ERROR')
+    : undefined;
+  const context = sanitizeOpsTelemetryContext(payload.context);
+
+  return {
+    id,
+    source,
+    action,
+    status,
+    ...(message ? { message } : {}),
+    ...(errorCode ? { errorCode } : {}),
+    ...(context ? { context } : {}),
+    occurredAt,
+    recordedAt,
+  };
+}
+
+export function normalizeOpsTelemetryFeedPayload(
+  payload: unknown,
+  options?: {
+    limit?: number;
+    recoveryLimit?: number;
+  },
+): OpsTelemetryFeed {
+  const parsed =
+    payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as {
+          total?: unknown;
+          limit?: unknown;
+          errors?: unknown;
+          recoveryTotal?: unknown;
+          recoveryLimit?: unknown;
+          recoveries?: unknown;
+        })
+      : {};
+
+  const fallbackLimit = normalizeBoundedInteger(options?.limit, 20, 1, 200);
+  const fallbackRecoveryLimit = normalizeBoundedInteger(options?.recoveryLimit, 20, 0, 200);
+  const normalizedErrors = Array.isArray(parsed.errors)
+    ? parsed.errors
+        .map((eventItem, index) => normalizeOpsErrorEvent(eventItem, index))
+        .filter((eventItem): eventItem is OpsErrorEvent => eventItem !== null)
+    : [];
+  const normalizedRecoveries = Array.isArray(parsed.recoveries)
+    ? parsed.recoveries
+        .map((eventItem, index) => normalizeOpsRecoveryEvent(eventItem, index))
+        .filter((eventItem): eventItem is OpsRecoveryEvent => eventItem !== null)
+    : [];
+
+  return {
+    total: normalizeBoundedInteger(parsed.total, normalizedErrors.length, 0, Number.MAX_SAFE_INTEGER),
+    limit: normalizeBoundedInteger(parsed.limit, fallbackLimit, 1, 200),
+    errors: normalizedErrors,
+    recoveryTotal: normalizeBoundedInteger(parsed.recoveryTotal, normalizedRecoveries.length, 0, Number.MAX_SAFE_INTEGER),
+    recoveryLimit: normalizeBoundedInteger(parsed.recoveryLimit, fallbackRecoveryLimit, 0, 200),
+    recoveries: normalizedRecoveries,
+  };
 }
 
 async function postOpsEvent(apiBase: string, path: string, payload: Record<string, unknown>) {
@@ -269,15 +420,6 @@ export async function fetchOpsTelemetryFeed(
     throw new Error(message);
   }
 
-  const payload = (await response.json()) as Partial<OpsTelemetryFeed>;
-
-  return {
-    total: typeof payload.total === 'number' ? payload.total : 0,
-    limit: typeof payload.limit === 'number' ? payload.limit : options?.limit ?? 20,
-    errors: Array.isArray(payload.errors) ? payload.errors : [],
-    recoveryTotal: typeof payload.recoveryTotal === 'number' ? payload.recoveryTotal : 0,
-    recoveryLimit:
-      typeof payload.recoveryLimit === 'number' ? payload.recoveryLimit : options?.recoveryLimit ?? 20,
-    recoveries: Array.isArray(payload.recoveries) ? payload.recoveries : [],
-  };
+  const payload = (await response.json()) as unknown;
+  return normalizeOpsTelemetryFeedPayload(payload, options);
 }
