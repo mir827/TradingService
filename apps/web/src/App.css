@@ -399,9 +399,10 @@ select {
 }
 
 .chart-inspector-status {
-  display: grid;
-  justify-items: end;
-  gap: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -460,8 +461,10 @@ select {
   color: #8e9ab0;
   line-height: 1.25;
   text-align: right;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: min(360px, 56vw);
 }
 
 .chart-legend-row {
