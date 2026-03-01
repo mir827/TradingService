@@ -407,6 +407,8 @@ const cryptoIntervalMap: Record<string, string> = {
   '240': '4h',
   '1D': '1d',
   '1W': '1w',
+  '1M': '1M',
+  '1Y': '1M',
 };
 
 const krxIntervalMap: Record<string, string> = {
@@ -421,6 +423,8 @@ const krxIntervalMap: Record<string, string> = {
   '240': '1d',
   '1D': '1d',
   '1W': '1wk',
+  '1M': '1mo',
+  '1Y': '1mo',
 };
 
 const krxRangeMap: Record<string, string> = {
@@ -435,6 +439,8 @@ const krxRangeMap: Record<string, string> = {
   '240': '1y',
   '1D': '2y',
   '1W': '5y',
+  '1M': 'max',
+  '1Y': 'max',
 };
 
 const KRX_TIMEZONE = 'Asia/Seoul';
@@ -3754,6 +3760,44 @@ function scoreByQuery(item: SymbolItem, queryLower: string, queryDigits: string)
   return score;
 }
 
+function aggregateCandlesByYear(candles: Candle[], limit: number) {
+  if (!candles.length) {
+    return candles;
+  }
+
+  const aggregated: Candle[] = [];
+  let currentYear: number | null = null;
+  let bucket: Candle | null = null;
+
+  for (const candle of candles) {
+    const year = new Date(candle.time * 1000).getUTCFullYear();
+
+    if (currentYear !== year || !bucket) {
+      if (bucket) {
+        aggregated.push(bucket);
+      }
+
+      currentYear = year;
+      bucket = { ...candle };
+      continue;
+    }
+
+    bucket = {
+      ...bucket,
+      high: Math.max(bucket.high, candle.high),
+      low: Math.min(bucket.low, candle.low),
+      close: candle.close,
+      volume: bucket.volume + candle.volume,
+    };
+  }
+
+  if (bucket) {
+    aggregated.push(bucket);
+  }
+
+  return aggregated.slice(-limit);
+}
+
 async function fetchCryptoCandles(symbol: string, interval: string, limit: number) {
   const normalizedInterval = cryptoIntervalMap[interval] ?? '1h';
   const url = `https://api.binance.com/api/v3/klines?symbol=${symbol.toUpperCase()}&interval=${normalizedInterval}&limit=${limit}`;
@@ -3781,7 +3825,7 @@ async function fetchCryptoCandles(symbol: string, interval: string, limit: numbe
     ]
   >;
 
-  return raw.map((c) => ({
+  const candles = raw.map((c) => ({
     time: Math.floor(c[0] / 1000),
     open: Number(c[1]),
     high: Number(c[2]),
@@ -3789,6 +3833,12 @@ async function fetchCryptoCandles(symbol: string, interval: string, limit: numbe
     close: Number(c[4]),
     volume: Number(c[5]),
   }));
+
+  if (interval === '1Y') {
+    return aggregateCandlesByYear(candles, limit);
+  }
+
+  return candles;
 }
 
 async function fetchKrxCandles(symbol: string, interval: string, limit: number) {
@@ -3855,7 +3905,13 @@ async function fetchKrxCandles(symbol: string, interval: string, limit: number) 
     });
   }
 
-  return candles.slice(-limit);
+  const normalizedCandles = candles.slice(-limit);
+
+  if (interval === '1Y') {
+    return aggregateCandlesByYear(candles, limit);
+  }
+
+  return normalizedCandles;
 }
 
 async function fetchCryptoQuote(symbol: string): Promise<Quote> {

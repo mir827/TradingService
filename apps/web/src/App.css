@@ -97,12 +97,6 @@ select {
   min-width: 0;
 }
 
-.interval-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-}
-
 .intervals button,
 .layout-modes button,
 .top-actions button {
@@ -110,21 +104,7 @@ select {
   cursor: pointer;
 }
 
-.interval-favorite-toggle {
-  width: 22px;
-  padding: 0;
-  border-radius: 5px;
-  font-size: 11px;
-  line-height: 1;
-}
-
-.interval-favorite-toggle.active {
-  border-color: #c8992d;
-  color: #f8d58a;
-  background: #2b2412;
-}
-
-.interval-favorites-hint {
+.interval-hotkeys-hint {
   color: #8690a4;
   font-size: 10px;
   line-height: 1.2;
@@ -2929,7 +2909,7 @@ select {
     grid-template-columns: 140px minmax(0, 1fr) 230px;
   }
 
-  .interval-favorites-hint {
+  .interval-hotkeys-hint {
     display: none;
   }
 

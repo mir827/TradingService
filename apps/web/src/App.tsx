@@ -90,7 +90,6 @@ import {
 import { readUnifiedLayoutState, writeUnifiedLayoutState } from './lib/layoutPersistence';
 import { createUndoRedoHistory, type UndoRedoState } from './lib/history';
 import { getFavoriteIntervalHotkeyIndex, isTypingInputTarget } from './lib/hotkeys';
-import { readIntervalFavorites, writeIntervalFavorites } from './lib/intervalFavorites';
 import { parsePineStrategyTesterDirectivesWithMeta } from './lib/pineStrategyDirectives';
 import {
   DEFAULT_PINE_SCRIPT_SOURCE,
@@ -652,7 +651,7 @@ type ChartHistoryDrawingSnapshot = Pick<
   'horizontalLines' | 'verticalLines' | 'trendlines' | 'rays' | 'rectangles' | 'notes'
 >;
 
-const intervals = ['1', '5', '15', '60', '240', '1D', '1W'];
+const intervals = ['1', '5', '15', '60', '240', '1D', '1W', '1M', '1Y'];
 const chartLayoutOptions: Array<{ key: ChartLayoutMode; label: string }> = [
   { key: 'single', label: '단일' },
   { key: 'split', label: '2분할' },
@@ -1308,7 +1307,6 @@ function App() {
   const [watchlistSymbols, setWatchlistSymbols] = useState<SymbolItem[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState('BTCUSDT');
   const [selectedInterval, setSelectedInterval] = useState('60');
-  const [favoriteIntervals, setFavoriteIntervals] = useState<string[]>(() => readIntervalFavorites(intervals));
   const [chartLayoutMode, setChartLayoutMode] = useState<ChartLayoutMode>(() => readUnifiedLayoutState().chartLayoutMode);
   const [candles, setCandles] = useState<Candle[]>([]);
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
@@ -1462,20 +1460,6 @@ function App() {
   useEffect(() => {
     selectedIntervalRef.current = selectedInterval;
   }, [selectedInterval]);
-
-  useEffect(() => {
-    const normalizedFavorites = writeIntervalFavorites(favoriteIntervals, intervals);
-    setFavoriteIntervals((previous) => {
-      if (
-        previous.length === normalizedFavorites.length &&
-        previous.every((interval, index) => interval === normalizedFavorites[index])
-      ) {
-        return previous;
-      }
-
-      return normalizedFavorites;
-    });
-  }, [favoriteIntervals]);
 
   useEffect(() => {
     chartLayoutModeStateRef.current = chartLayoutMode;
@@ -6618,16 +6602,6 @@ function App() {
     setSelectedInterval((previous) => (previous === interval ? previous : interval));
   }, []);
 
-  const toggleFavoriteInterval = useCallback((interval: string) => {
-    setFavoriteIntervals((previous) => {
-      if (previous.includes(interval)) {
-        return previous.filter((item) => item !== interval);
-      }
-
-      return [...previous, interval];
-    });
-  }, []);
-
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (isTypingInputTarget(event.target)) return;
@@ -6654,7 +6628,7 @@ function App() {
 
       if (event.ctrlKey || event.metaKey || event.altKey) return;
 
-      const favoriteHotkeyIndex = getFavoriteIntervalHotkeyIndex(
+      const intervalHotkeyIndex = getFavoriteIntervalHotkeyIndex(
         {
           key: event.key,
           ctrlKey: event.ctrlKey,
@@ -6662,11 +6636,11 @@ function App() {
           altKey: event.altKey,
           target: event.target,
         },
-        favoriteIntervals.length,
+        intervals.length,
       );
 
-      if (favoriteHotkeyIndex !== null) {
-        const nextInterval = favoriteIntervals[favoriteHotkeyIndex];
+      if (intervalHotkeyIndex !== null) {
+        const nextInterval = intervals[intervalHotkeyIndex];
         if (!nextInterval) return;
         event.preventDefault();
         switchInterval(nextInterval);
@@ -6727,7 +6701,7 @@ function App() {
     return () => {
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [deleteSelectedDrawing, favoriteIntervals, redoHistory, selectedDrawingId, switchInterval, undoHistory]);
+  }, [deleteSelectedDrawing, redoHistory, selectedDrawingId, switchInterval, undoHistory]);
 
   const toggleIndicator = useCallback((key: IndicatorKey) => {
     const beforeSnapshot = captureChartHistorySnapshot();
@@ -7323,9 +7297,7 @@ function App() {
     compareScaleMode === 'normalized'
       ? '정규화 기준: 첫 공통 캔들의 종가를 기준값으로 고정합니다.'
       : '절대값 기준: 비교 심볼의 원본 종가를 그대로 표시합니다.';
-  const favoriteIntervalHintText = favoriteIntervals.length
-    ? favoriteIntervals.map((interval, index) => `${index + 1}:${interval}`).join(' · ')
-    : '없음';
+  const intervalHotkeyHintText = intervals.map((interval, index) => `${index + 1}:${interval}`).join(' · ');
   const replayStatusText = replayMode
     ? `리플레이 ${replayPlaying ? '재생중' : replayProgress.isAtEnd ? '완료' : '일시정지'} · 스텝 ${replayProgress.completedSteps}/${replayProgress.totalSteps} · 속도 x${replaySpeed}`
     : null;
@@ -7395,35 +7367,20 @@ function App() {
 
           <div className="interval-tools">
             <div className="intervals">
-              {intervals.map((interval) => {
-                const favoriteIndex = favoriteIntervals.indexOf(interval);
-                const isFavorite = favoriteIndex >= 0;
-
-                return (
-                  <div key={interval} className="interval-item">
-                    <button
-                      type="button"
-                      className={interval === selectedInterval ? 'active' : ''}
-                      onClick={() => switchInterval(interval)}
-                      title={isFavorite ? `즐겨찾기 #${favoriteIndex + 1} · 숫자키 ${favoriteIndex + 1}` : '타임프레임 전환'}
-                    >
-                      {interval}
-                    </button>
-                    <button
-                      type="button"
-                      className={`interval-favorite-toggle ${isFavorite ? 'active' : ''}`}
-                      onClick={() => toggleFavoriteInterval(interval)}
-                      title={isFavorite ? '즐겨찾기에서 제거' : '즐겨찾기에 추가'}
-                      aria-label={isFavorite ? `${interval} 즐겨찾기 제거` : `${interval} 즐겨찾기 추가`}
-                    >
-                      {isFavorite ? '★' : '☆'}
-                    </button>
-                  </div>
-                );
-              })}
+              {intervals.map((interval, index) => (
+                <button
+                  key={interval}
+                  type="button"
+                  className={interval === selectedInterval ? 'active' : ''}
+                  onClick={() => switchInterval(interval)}
+                  title={`타임프레임 전환 · 숫자키 ${index + 1}`}
+                >
+                  {interval}
+                </button>
+              ))}
             </div>
-            <div className="interval-favorites-hint" title="숫자키 1~9로 즐겨찾기 타임프레임을 즉시 전환합니다.">
-              즐겨찾기: {favoriteIntervalHintText}
+            <div className="interval-hotkeys-hint" title="숫자키 1~9로 타임프레임을 즉시 전환합니다.">
+              단축키: {intervalHotkeyHintText}
             </div>
           </div>
 
