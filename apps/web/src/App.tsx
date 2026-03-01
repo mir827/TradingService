@@ -327,7 +327,7 @@ type OpsTimelineItem =
 
 type WatchTab = 'watchlist' | 'detail' | 'alerts';
 type BottomTab = 'pine' | 'strategy' | 'trading' | 'objects' | 'ops';
-type TopActionKey = 'indicator' | 'compare' | 'alerts' | 'replay';
+type TopActionKey = 'indicator' | 'compare' | 'replay';
 type WatchSortKey = 'symbol' | 'price' | 'changePercent';
 type WatchSortDir = 'asc' | 'desc';
 type WatchMarketFilter = 'ALL' | MarketType;
@@ -669,7 +669,6 @@ const leftTools: Array<{ key: ToolKey; icon: string; label: string }> = [
 const topActions: Array<{ key: TopActionKey; label: string }> = [
   { key: 'indicator', label: '지표' },
   { key: 'compare', label: '비교' },
-  { key: 'alerts', label: '알림' },
   { key: 'replay', label: '리플레이' },
 ];
 const indicatorConfigs: IndicatorConfig[] = [
@@ -7230,12 +7229,6 @@ function App() {
       return;
     }
 
-    if (key === 'alerts') {
-      setRightPanelCollapsed(false);
-      setWatchTab('alerts');
-      return;
-    }
-
     if (replayMode) {
       exitReplay();
       setTopActionFeedback('리플레이 모드를 종료했습니다.');
@@ -7622,7 +7615,6 @@ function App() {
                 className={
                   (action.key === 'indicator' && indicatorPanelOpen) ||
                   (action.key === 'compare' && comparisonPanelOpen) ||
-                  (action.key === 'alerts' && !rightPanelCollapsed && watchTab === 'alerts') ||
                   (action.key === 'replay' && replayMode)
                     ? 'active'
                     : ''
