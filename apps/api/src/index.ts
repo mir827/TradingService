@@ -4345,6 +4345,10 @@ function applyKrxVenueSelection(quote: Quote, requestedVenue: QuoteRequestedVenu
     effectiveVenue: 'KRX',
   };
 
+  if (requestedVenue === 'KRX') {
+    return base;
+  }
+
   if (!isAvailableNxtQuote(quote.nxt)) {
     if (requestedVenue === 'NXT') {
       return {

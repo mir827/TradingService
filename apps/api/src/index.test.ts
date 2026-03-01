@@ -775,6 +775,20 @@ describe('api quote', () => {
     expect(closedBody.effectiveVenue).toBe('NXT');
     expect(closedBody.lastPrice).toBe(71520);
 
+    const closedKrxResponse = await app.inject({
+      method: 'GET',
+      url: '/api/quote?symbol=005930.KS&venue=KRX',
+    });
+    expect(closedKrxResponse.statusCode).toBe(200);
+    const closedKrxBody = closedKrxResponse.json() as {
+      requestedVenue?: string;
+      effectiveVenue?: string;
+      lastPrice: number;
+    };
+    expect(closedKrxBody.requestedVenue).toBe('KRX');
+    expect(closedKrxBody.effectiveVenue).toBe('KRX');
+    expect(closedKrxBody.lastPrice).toBe(71500);
+
     nowSpy.mockReturnValue(new Date('2026-03-02T10:10:00+09:00').getTime());
 
     const openResponse = await app.inject({
