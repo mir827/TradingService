@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  PINE_SCRIPT_NAME_MAX_LENGTH,
+  PINE_SCRIPT_SOURCE_MAX_LENGTH,
   PINE_WORKSPACE_SCHEMA_VERSION,
   PINE_WORKSPACE_STORAGE_KEY,
+  clampPineScriptName,
+  clampPineScriptSource,
   createUniquePineScriptName,
   duplicatePineScript,
   deletePineScript,
@@ -237,6 +241,63 @@ describe('pine workspace persistence', () => {
 
     workspace = deletePineScript(workspace, 'two', now + 40);
     expect(workspace.activeScriptId).toBe('three');
+  });
+
+  it('applies name/source guardrails consistently across save/rename/duplicate flows', () => {
+    const now = 1_700_000_700_000;
+    const overLongName = `Guardrail-${'n'.repeat(PINE_SCRIPT_NAME_MAX_LENGTH + 20)}`;
+    const overLongSource = `plot(close)\n${'a'.repeat(PINE_SCRIPT_SOURCE_MAX_LENGTH + 100)}`;
+
+    let workspace = upsertPineScript(
+      getDefaultPineWorkspaceState(),
+      {
+        id: 'guarded',
+        name: overLongName,
+        source: overLongSource,
+        createdAt: now,
+        updatedAt: now,
+        revision: 1,
+      },
+      now,
+    );
+
+    const saved = workspace.scripts.find((script) => script.id === 'guarded');
+    expect(saved).toBeTruthy();
+    expect(saved?.name).toBe(clampPineScriptName(overLongName));
+    expect(saved?.name.length).toBeLessThanOrEqual(PINE_SCRIPT_NAME_MAX_LENGTH);
+    expect(saved?.source).toBe(clampPineScriptSource(overLongSource));
+    expect(saved?.source.length).toBe(PINE_SCRIPT_SOURCE_MAX_LENGTH);
+
+    workspace = renamePineScript(workspace, 'guarded', overLongName, {
+      now: now + 10,
+      sourceOverride: overLongSource,
+    });
+    const renamed = workspace.scripts.find((script) => script.id === 'guarded');
+    expect(renamed?.name.length).toBeLessThanOrEqual(PINE_SCRIPT_NAME_MAX_LENGTH);
+    expect(renamed?.source.length).toBeLessThanOrEqual(PINE_SCRIPT_SOURCE_MAX_LENGTH);
+
+    workspace = duplicatePineScript(workspace, 'guarded', {
+      now: now + 20,
+      nameBase: overLongName,
+      sourceOverride: overLongSource,
+    });
+    const duplicated = workspace.activeScriptId ? workspace.scripts.find((script) => script.id === workspace.activeScriptId) : null;
+    expect(duplicated).toBeTruthy();
+    expect(duplicated?.name.length).toBeLessThanOrEqual(PINE_SCRIPT_NAME_MAX_LENGTH);
+    expect(duplicated?.source.length).toBeLessThanOrEqual(PINE_SCRIPT_SOURCE_MAX_LENGTH);
+  });
+
+  it('keeps generated unique names within max length', () => {
+    const baseName = 'A'.repeat(PINE_SCRIPT_NAME_MAX_LENGTH);
+    const first = normalizePineWorkspace({
+      version: 1,
+      scripts: [{ id: 'one', name: baseName, source: 'a', createdAt: 1, updatedAt: 1, revision: 1 }],
+      activeScriptId: 'one',
+    });
+
+    const generated = createUniquePineScriptName(baseName, first.scripts);
+    expect(generated.length).toBeLessThanOrEqual(PINE_SCRIPT_NAME_MAX_LENGTH);
+    expect(generated).not.toBe(baseName);
   });
 
   it('filters scripts by name case-insensitively', () => {

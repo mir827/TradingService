@@ -2,6 +2,8 @@ export const PINE_WORKSPACE_STORAGE_KEY = 'tradingservice.pine.workspace.v1';
 export const PINE_WORKSPACE_SCHEMA_VERSION = 1;
 export const DEFAULT_PINE_SCRIPT_NAME = 'New Script';
 export const DEFAULT_PINE_SCRIPT_REVISION = 1;
+export const PINE_SCRIPT_NAME_MAX_LENGTH = 80;
+export const PINE_SCRIPT_SOURCE_MAX_LENGTH = 50 * 1024;
 export const DEFAULT_PINE_SCRIPT_SOURCE =
   '//@version=5\n' +
   'indicator("New Script", overlay=true)\n' +
@@ -90,18 +92,43 @@ function normalizeTimestamp(value: unknown, fallback: number): number {
   return fallback;
 }
 
+function clampTextLength(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return value.slice(0, maxLength);
+}
+
+export function clampPineScriptName(name: string): string {
+  const normalized = name.trim();
+  if (!normalized) return '';
+  return clampTextLength(normalized, PINE_SCRIPT_NAME_MAX_LENGTH).trimEnd();
+}
+
+export function isPineScriptNameOverLimit(name: string): boolean {
+  return name.trim().length > PINE_SCRIPT_NAME_MAX_LENGTH;
+}
+
+export function clampPineScriptSource(source: string): string {
+  return clampTextLength(source, PINE_SCRIPT_SOURCE_MAX_LENGTH);
+}
+
+export function isPineScriptSourceOverLimit(source: string): boolean {
+  return source.length > PINE_SCRIPT_SOURCE_MAX_LENGTH;
+}
+
 function normalizeScriptName(name: unknown, fallback: string): string {
   if (typeof name === 'string') {
-    const normalized = name.trim();
+    const normalized = clampPineScriptName(name);
     if (normalized.length > 0) return normalized;
   }
 
-  return fallback;
+  const fallbackName = clampPineScriptName(fallback);
+  if (fallbackName.length > 0) return fallbackName;
+  return DEFAULT_PINE_SCRIPT_NAME.slice(0, PINE_SCRIPT_NAME_MAX_LENGTH);
 }
 
 function normalizeScriptSource(source: unknown): string {
-  if (typeof source === 'string') return source;
-  return DEFAULT_PINE_SCRIPT_SOURCE;
+  if (typeof source === 'string') return clampPineScriptSource(source);
+  return clampPineScriptSource(DEFAULT_PINE_SCRIPT_SOURCE);
 }
 
 function normalizeRevision(value: unknown, fallback = DEFAULT_PINE_SCRIPT_REVISION): number {
@@ -216,6 +243,13 @@ export function createPineScriptId(now = Date.now()): string {
   return `pine_${Math.max(0, Math.floor(now)).toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function toClampedUniqueName(baseName: string, suffix: string): string {
+  const maxBaseLength = Math.max(1, PINE_SCRIPT_NAME_MAX_LENGTH - suffix.length);
+  const clampedBase = clampTextLength(baseName, maxBaseLength).trimEnd();
+  const normalizedBase = clampedBase.length > 0 ? clampedBase : DEFAULT_PINE_SCRIPT_NAME.slice(0, maxBaseLength);
+  return `${normalizedBase}${suffix}`;
+}
+
 export function createUniquePineScriptName(desiredName: string, scripts: readonly PineScript[]): string {
   const baseName = normalizeScriptName(desiredName, DEFAULT_PINE_SCRIPT_NAME);
   const normalizedNameSet = new Set(scripts.map((script) => script.name.toLowerCase()));
@@ -225,11 +259,13 @@ export function createUniquePineScriptName(desiredName: string, scripts: readonl
   }
 
   let suffix = 2;
-  while (normalizedNameSet.has(`${baseName} (${suffix})`.toLowerCase())) {
+  let candidate = toClampedUniqueName(baseName, ` (${suffix})`);
+  while (normalizedNameSet.has(candidate.toLowerCase())) {
     suffix += 1;
+    candidate = toClampedUniqueName(baseName, ` (${suffix})`);
   }
 
-  return `${baseName} (${suffix})`;
+  return candidate;
 }
 
 export function getDefaultPineWorkspaceState(): PineWorkspaceState {

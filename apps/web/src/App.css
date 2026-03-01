@@ -2240,6 +2240,12 @@ select {
   font-size: 11px;
 }
 
+.pine-editor-status-main {
+  min-width: min(100%, 420px);
+  display: grid;
+  gap: 3px;
+}
+
 .pine-editor-status-text {
   color: #8d95a5;
 }
@@ -2250,6 +2256,10 @@ select {
 
 .pine-editor-status-text.error {
   color: #ff9fa6;
+}
+
+.pine-editor-status-text.warning {
+  color: #ffcc88;
 }
 
 .pine-editor-status-meta {
@@ -2408,6 +2418,12 @@ select {
   border-color: #3a404f;
   background: #1c2231;
   color: #b4bccb;
+}
+
+.strategy-link-badge.warning {
+  border-color: #876139;
+  background: #3a2a17;
+  color: #ffd8a5;
 }
 
 .strategy-link-banner button {

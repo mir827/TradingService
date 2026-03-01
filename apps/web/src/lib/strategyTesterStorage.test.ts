@@ -67,6 +67,28 @@ describe('strategy tester storage', () => {
     });
   });
 
+  it('loads optional linked-script warning metadata when present', () => {
+    const storage = new MemoryStorage();
+    writeRawPayload(storage, {
+      ...DEFAULT_STRATEGY_TESTER_FORM,
+      linkedScript: {
+        scriptId: 'pine_warn_1',
+        scriptName: 'Warn Script',
+        revision: 3,
+        warningCount: 2,
+      },
+    });
+
+    const result = readStrategyTesterForm(storage);
+
+    expect(result.linkedScript).toEqual({
+      scriptId: 'pine_warn_1',
+      scriptName: 'Warn Script',
+      revision: 3,
+      warningCount: 2,
+    });
+  });
+
   it('ignores invalid linked-script values safely', () => {
     const parsed = normalizeStrategyTesterForm({
       ...DEFAULT_STRATEGY_TESTER_FORM,
@@ -78,6 +100,24 @@ describe('strategy tester storage', () => {
     });
 
     expect(parsed.linkedScript).toBeNull();
+  });
+
+  it('ignores invalid linked-script warning metadata safely', () => {
+    const parsed = normalizeStrategyTesterForm({
+      ...DEFAULT_STRATEGY_TESTER_FORM,
+      linkedScript: {
+        scriptId: 'pine_warn_2',
+        scriptName: 'Warn 2',
+        revision: 2,
+        warningCount: 0,
+      },
+    });
+
+    expect(parsed.linkedScript).toEqual({
+      scriptId: 'pine_warn_2',
+      scriptName: 'Warn 2',
+      revision: 2,
+    });
   });
 
   it('writes normalized payload including linked-script context', () => {
@@ -105,6 +145,51 @@ describe('strategy tester storage', () => {
         scriptName: 'Linked',
         revision: 2,
       },
+    });
+  });
+
+  it('writes linked-script warning metadata when present', () => {
+    const storage = new MemoryStorage();
+
+    writeStrategyTesterForm(
+      {
+        ...DEFAULT_STRATEGY_TESTER_FORM,
+        linkedScript: {
+          scriptId: 'pine_warn_write',
+          scriptName: 'Warn Write',
+          revision: 5,
+          warningCount: 3,
+        },
+      },
+      storage,
+    );
+
+    const written = storage.getItem(STRATEGY_TESTER_STORAGE_KEY);
+    expect(written).toBeTruthy();
+    expect(JSON.parse(written ?? '{}')).toMatchObject({
+      linkedScript: {
+        scriptId: 'pine_warn_write',
+        scriptName: 'Warn Write',
+        revision: 5,
+        warningCount: 3,
+      },
+    });
+  });
+
+  it('keeps backward compatibility for linked-script payloads without warning metadata', () => {
+    const parsed = normalizeStrategyTesterForm({
+      ...DEFAULT_STRATEGY_TESTER_FORM,
+      linkedScript: {
+        scriptId: 'pine_legacy',
+        scriptName: 'Legacy Linked',
+        revision: 1,
+      },
+    });
+
+    expect(parsed.linkedScript).toEqual({
+      scriptId: 'pine_legacy',
+      scriptName: 'Legacy Linked',
+      revision: 1,
     });
   });
 });

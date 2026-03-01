@@ -91,14 +91,20 @@ import { readUnifiedLayoutState, writeUnifiedLayoutState } from './lib/layoutPer
 import { createUndoRedoHistory, type UndoRedoState } from './lib/history';
 import { getFavoriteIntervalHotkeyIndex, isTypingInputTarget } from './lib/hotkeys';
 import { readIntervalFavorites, writeIntervalFavorites } from './lib/intervalFavorites';
-import { parsePineStrategyTesterDirectives } from './lib/pineStrategyDirectives';
+import { parsePineStrategyTesterDirectivesWithMeta } from './lib/pineStrategyDirectives';
 import {
   DEFAULT_PINE_SCRIPT_SOURCE,
+  PINE_SCRIPT_NAME_MAX_LENGTH,
+  PINE_SCRIPT_SOURCE_MAX_LENGTH,
+  clampPineScriptName,
+  clampPineScriptSource,
   createPineScriptId,
   createUniquePineScriptName,
   duplicatePineScript,
   deletePineScript,
   filterPineScriptsByName,
+  isPineScriptNameOverLimit,
+  isPineScriptSourceOverLimit,
   renamePineScript,
   readPineWorkspace,
   setActivePineScript,
@@ -979,6 +985,17 @@ function formatOptionalTimestamp(value: number | null) {
 
 function formatStrategyDirectiveValue(value: number) {
   return Number.isInteger(value) ? String(Math.trunc(value)) : String(value);
+}
+
+function getPineEditorGuardrailWarnings(name: string, source: string): string[] {
+  const warnings: string[] = [];
+  if (isPineScriptNameOverLimit(name)) {
+    warnings.push(`이름이 ${PINE_SCRIPT_NAME_MAX_LENGTH}자를 넘어 저장 시 잘립니다.`);
+  }
+  if (isPineScriptSourceOverLimit(source)) {
+    warnings.push(`스크립트가 50KB(${PINE_SCRIPT_SOURCE_MAX_LENGTH.toLocaleString('en-US')}자) 제한을 넘어 저장 시 잘립니다.`);
+  }
+  return warnings;
 }
 
 type VenuePreferenceValue = '' | KrVenue;
@@ -4256,9 +4273,15 @@ function App() {
     [pineLibraryQuery, pineWorkspace.scripts],
   );
   const pineActiveScriptName = pineActiveScript?.name ?? '';
+  const pineEditorGuardrailWarnings = useMemo(
+    () => getPineEditorGuardrailWarnings(pineEditorName, pineEditorSource),
+    [pineEditorName, pineEditorSource],
+  );
   const pineEditorDirty = useMemo(() => {
     if (!pineActiveScript) return true;
-    return pineActiveScript.name !== pineEditorName.trim() || pineActiveScript.source !== pineEditorSource;
+    const normalizedName = clampPineScriptName(pineEditorName);
+    const normalizedSource = clampPineScriptSource(pineEditorSource);
+    return pineActiveScript.name !== normalizedName || pineActiveScript.source !== normalizedSource;
   }, [pineActiveScript, pineEditorName, pineEditorSource]);
 
   const priceDiff = displayCandle ? displayCandle.close - displayCandle.open : 0;
@@ -4668,7 +4691,7 @@ function App() {
       return;
     }
 
-    const trimmedName = pineEditorName.trim();
+    const trimmedName = clampPineScriptName(pineEditorName);
     if (!trimmedName) {
       setPineStatusMessage({
         tone: 'error',
@@ -4677,10 +4700,11 @@ function App() {
       return;
     }
 
+    const normalizedSource = clampPineScriptSource(pineEditorSource);
     const now = Date.now();
     const nextWorkspace = renamePineScript(pineWorkspace, pineEditorScriptId, trimmedName, {
       now,
-      sourceOverride: pineEditorSource,
+      sourceOverride: normalizedSource,
     });
     const persisted = persistPineWorkspaceState(nextWorkspace, `스크립트 이름 변경: ${trimmedName}`);
     const nextActiveScript =
@@ -4718,8 +4742,8 @@ function App() {
     const sourceCode = sourceScriptId === pineEditorScriptId ? pineEditorSource : sourceScript.source;
     const nextWorkspace = duplicatePineScript(pineWorkspace, sourceScriptId, {
       now,
-      nameBase: sourceName,
-      sourceOverride: sourceCode,
+      nameBase: clampPineScriptName(sourceName),
+      sourceOverride: clampPineScriptSource(sourceCode),
     });
     const persisted = persistPineWorkspaceState(nextWorkspace, '스크립트를 복제했습니다.');
     const nextActiveScript =
@@ -4747,7 +4771,7 @@ function App() {
   const handleSavePineScript = useCallback(
     (mode: 'save' | 'saveAs') => {
       const now = Date.now();
-      const trimmedName = pineEditorName.trim();
+      const trimmedName = clampPineScriptName(pineEditorName);
       if (!trimmedName) {
         setPineStatusMessage({
           tone: 'error',
@@ -4766,7 +4790,7 @@ function App() {
       const nextScript: PineScript = {
         id: nextId,
         name: nextName,
-        source: pineEditorSource,
+        source: clampPineScriptSource(pineEditorSource),
         createdAt: existingScript && !isSaveAs ? existingScript.createdAt : now,
         updatedAt: now,
         revision: existingScript && !isSaveAs ? existingScript.revision : 1,
@@ -4828,12 +4852,17 @@ function App() {
       return;
     }
 
+    const normalizedSource = clampPineScriptSource(pineEditorSource);
+    const directiveResult = parsePineStrategyTesterDirectivesWithMeta(normalizedSource);
+    const directives = directiveResult.directives;
+    const guardrailWarningCount = getPineEditorGuardrailWarnings(pineEditorName, pineEditorSource).length;
+    const linkedWarningCount = guardrailWarningCount + directiveResult.invalidDirectiveCount;
     const linkedScript: StrategyTesterLinkedScript = {
       scriptId: pineActiveScript.id,
       scriptName: pineActiveScript.name,
       revision: pineActiveScript.revision,
+      ...(linkedWarningCount > 0 ? { warningCount: linkedWarningCount } : {}),
     };
-    const directives = parsePineStrategyTesterDirectives(pineEditorSource);
     const hasDirectiveMapping =
       typeof directives.fastPeriod === 'number' ||
       typeof directives.slowPeriod === 'number' ||
@@ -4870,11 +4899,16 @@ function App() {
     setBottomTab('strategy');
     setPineStatusMessage({
       tone: 'info',
-      text: hasDirectiveMapping
-        ? '전략 테스터로 연결하고 ts 지시어 파라미터를 반영했습니다.'
-        : '전략 테스터로 연결했습니다.',
+      text:
+        hasDirectiveMapping && linkedWarningCount > 0
+          ? '전략 테스터로 연결하고 ts 지시어를 반영했습니다. 일부 지시어는 무시되었습니다.'
+          : hasDirectiveMapping
+            ? '전략 테스터로 연결하고 ts 지시어 파라미터를 반영했습니다.'
+            : linkedWarningCount > 0
+              ? '전략 테스터로 연결했습니다. 일부 지시어/입력 제한이 감지되었습니다.'
+              : '전략 테스터로 연결했습니다.',
     });
-  }, [pineActiveScript, pineEditorSource]);
+  }, [pineActiveScript, pineEditorName, pineEditorSource]);
 
   const handleUnlinkStrategyLinkedScript = useCallback(() => {
     setStrategyForm((previous) => {
@@ -8862,9 +8896,14 @@ function App() {
                 />
 
                 <div className="pine-editor-status">
-                  <span className={`pine-editor-status-text ${pineStatusMessage?.tone === 'error' ? 'error' : 'info'}`}>
-                    {pineStatusMessage?.text ?? (pineEditorDirty ? '저장되지 않은 변경사항이 있습니다.' : '저장 상태 최신입니다.')}
-                  </span>
+                  <div className="pine-editor-status-main">
+                    <span className={`pine-editor-status-text ${pineStatusMessage?.tone === 'error' ? 'error' : 'info'}`}>
+                      {pineStatusMessage?.text ?? (pineEditorDirty ? '저장되지 않은 변경사항이 있습니다.' : '저장 상태 최신입니다.')}
+                    </span>
+                    {pineEditorGuardrailWarnings.length > 0 ? (
+                      <span className="pine-editor-status-text warning">{pineEditorGuardrailWarnings.join(' ')}</span>
+                    ) : null}
+                  </div>
                   <span className="pine-editor-status-meta">
                     {pineActiveScript
                       ? `rev ${pineActiveScript.revision} · 마지막 저장: ${formatOptionalTimestamp(pineActiveScript.updatedAt)}`
@@ -8928,6 +8967,9 @@ function App() {
                   <>
                     <div className="strategy-link-meta">
                       <span className="strategy-link-badge">Pine 연결됨</span>
+                      {typeof strategyForm.linkedScript.warningCount === 'number' && strategyForm.linkedScript.warningCount > 0 ? (
+                        <span className="strategy-link-badge warning">경고 {strategyForm.linkedScript.warningCount}</span>
+                      ) : null}
                       <strong>{strategyForm.linkedScript.scriptName}</strong>
                       <span>
                         rev {strategyForm.linkedScript.revision} · {strategyForm.linkedScript.scriptId}

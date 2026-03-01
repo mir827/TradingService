@@ -8,6 +8,7 @@ export type StrategyTesterLinkedScript = {
   scriptId: string;
   scriptName: string;
   revision: number;
+  warningCount?: number;
 };
 
 export type StrategyTesterFormState = {
@@ -109,6 +110,21 @@ function normalizeLinkedScriptRevision(value: unknown): number | null {
   return null;
 }
 
+function normalizeLinkedScriptWarningCount(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
 function normalizeLinkedScript(value: unknown): StrategyTesterLinkedScript | null {
   if (!value || typeof value !== 'object') return null;
 
@@ -116,11 +132,13 @@ function normalizeLinkedScript(value: unknown): StrategyTesterLinkedScript | nul
     scriptId?: unknown;
     scriptName?: unknown;
     revision?: unknown;
+    warningCount?: unknown;
   };
 
   const scriptId = typeof parsed.scriptId === 'string' ? parsed.scriptId.trim() : '';
   const scriptName = typeof parsed.scriptName === 'string' ? parsed.scriptName.trim() : '';
   const revision = normalizeLinkedScriptRevision(parsed.revision);
+  const warningCount = normalizeLinkedScriptWarningCount(parsed.warningCount);
 
   if (!scriptId || !scriptName || revision === null) {
     return null;
@@ -130,6 +148,7 @@ function normalizeLinkedScript(value: unknown): StrategyTesterLinkedScript | nul
     scriptId,
     scriptName,
     revision,
+    ...(warningCount ? { warningCount } : {}),
   };
 }
 

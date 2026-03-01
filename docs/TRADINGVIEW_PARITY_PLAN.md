@@ -319,7 +319,8 @@ Progress note (2026-02-28):
 - `apps/web/src/lib/pineStorage.test.ts` 단위 테스트로 빈/손상 payload fallback, save/update/delete 동작, active script restoration 규칙을 고정함.
 - M7-2 완료: 스크립트 라이브러리에 `Rename/Duplicate` 액션, 이름 검색 필터, `updatedAt/revision` 메타 표시를 추가했고, 저장 시 스크립트별 revision 증가 규칙을 도입함. 기존 `tradingservice.pine.workspace.v1` payload는 revision 누락 시 자동 마이그레이션(기본값 1)으로 호환성을 유지하며, rename/duplicate/delete 이후 active script 선택 규칙을 결정론적으로 고정함.
 - M7-3 완료: Pine Editor 툴바에 `전략 테스터로 보내기` CTA를 추가해 클릭 시 `전략 테스터` 탭으로 전환되고, 선택된 Pine 스크립트 컨텍스트(`id/name/revision`)가 전략 폼 상태에 연결되도록 브리지했다. 전략 테스터에는 연결 상태 배지(연결/독립 실행)와 `연결 해제` 액션을 추가했으며, Pine 소스의 `//@ts_fast`, `//@ts_slow`, `//@ts_capital`, `//@ts_fee_bps` 지시어를 경량 파싱해 유효한 값만 전략 기본 파라미터에 주입하도록 반영했다. 전략 폼 localStorage 로딩/저장은 optional linked-script 필드를 additive하게 수용하도록 정규화했고, 지시어 파서/전략 폼 마이그레이션 테스트를 추가해 기존 저장 payload와의 호환을 고정했다.
-- M7 status: in progress (M7-1, M7-2, M7-3 complete; M7-4 pending).
+- M7-4 완료: Pine 스크립트 이름(최대 80자)과 소스(최대 50KB, 51,200자) guardrail을 저장 정규화 경로에 추가해 save/rename/duplicate 전 경로에서 동일하게 clamp되도록 고정했고, 편집기 상태 영역에 비차단 경고 메시지를 노출했다. 전략 브리지에서는 invalid/unsafe directive를 무시하면서 invalid count를 경고 메타로 연결 상태에 표시하도록 강화했으며, linked-script warning metadata는 optional 필드로 저장소 호환성을 유지했다.
+- M7 status: complete (M7-1, M7-2, M7-3, M7-4 complete).
 
 DoD:
 - Pine 편집기 탭에서 스크립트 CRUD/선택/편집 흐름이 모두 동작
