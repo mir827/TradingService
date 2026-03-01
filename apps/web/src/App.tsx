@@ -149,6 +149,7 @@ import {
 import { buildDrawingOverlayGeometry } from './lib/drawingOverlay';
 import { findProjectedDrawingHit } from './lib/drawingSelection';
 import { snapToNearestCandleAnchor } from './lib/drawingMagnet';
+import { resolveHorizontalLinePlacementPrice, resolvePointerPriceFromClick } from './lib/drawingPlacement';
 
 type SymbolItem = {
   symbol: string;
@@ -2861,27 +2862,33 @@ function App() {
       const nextTool = activeToolRef.current;
       const magnetOn = magnetEnabledRef.current;
       const magnetCandles = activeCandlesRef.current;
-      const toSafeClickPrice = (point: MouseEventParams<Time>['point']) => {
-        if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return null;
+      const toSafeClickPrice = (clickParam: MouseEventParams<Time>) => {
+        const chartTop = containerRef.current?.getBoundingClientRect().top;
+        const sourceBar = clickParam.seriesData.get(candleSeries) as CandlestickData<Time> | undefined;
 
-        try {
-          const rawPrice = candleSeries.coordinateToPrice(point.y);
-          return typeof rawPrice === 'number' && Number.isFinite(rawPrice) ? rawPrice : null;
-        } catch {
-          return null;
-        }
+        return resolvePointerPriceFromClick({
+          point: clickParam.point,
+          sourceEvent: clickParam.sourceEvent,
+          chartTop: typeof chartTop === 'number' && Number.isFinite(chartTop) ? chartTop : null,
+          fallbackPrice: sourceBar?.close,
+          coordinateToPrice: (coordinate) => candleSeries.coordinateToPrice(coordinate),
+        });
       };
 
       if (nextTool === 'horizontal') {
-        if (!param.point) return;
-
-        const price = toSafeClickPrice(param.point);
+        const price = toSafeClickPrice(param);
         if (price === null) return;
 
-        const normalizedPrice =
-          typeof param.time === 'number'
-            ? toNormalizedMagnetPoint(param.time, price, magnetOn, magnetCandles).price
-            : normalizeLinePrice(price);
+        const normalizedPrice = resolveHorizontalLinePlacementPrice({
+          rawPrice: price,
+          time: typeof param.time === 'number' && Number.isFinite(param.time) ? param.time : undefined,
+          magnetEnabled: magnetOn,
+          normalizePrice: normalizeLinePrice,
+          toMagnetPoint: (time, candidatePrice) =>
+            toNormalizedMagnetPoint(time, candidatePrice, magnetOn, magnetCandles),
+        });
+        if (normalizedPrice === null) return;
+
         const duplicated = horizontalLinesRef.current.some((item) => Math.abs(item.price - normalizedPrice) < 0.0001);
         if (duplicated) return;
         const beforeSnapshot = captureChartHistorySnapshot();
@@ -2947,9 +2954,9 @@ function App() {
       }
 
       if (nextTool === 'trendline' || nextTool === 'ray' || nextTool === 'rectangle') {
-        if (!param.point || typeof param.time !== 'number') return;
+        if (typeof param.time !== 'number') return;
 
-        const price = toSafeClickPrice(param.point);
+        const price = toSafeClickPrice(param);
         if (price === null) return;
 
         const snappedPoint = toNormalizedMagnetPoint(param.time, price, magnetOn, magnetCandles);
@@ -3052,9 +3059,9 @@ function App() {
       }
 
       if (nextTool !== 'note') return;
-      if (!param.point || typeof param.time !== 'number') return;
+      if (typeof param.time !== 'number') return;
 
-      const price = toSafeClickPrice(param.point);
+      const price = toSafeClickPrice(param);
       if (price === null) return;
 
       const textInput = window.prompt('노트 내용을 입력하세요');
