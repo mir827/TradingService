@@ -4012,6 +4012,12 @@ function parseNxtQuoteRecord(record: Record<string, unknown>, nowMs: number) {
     'nxtclose',
     'nxt_current_price',
     'nxtcurrentprice',
+    'nxt_over_price',
+    'nxtoverprice',
+    'over_price',
+    'overprice',
+    'over_market_price',
+    'overmarketprice',
     'price',
     'lastprice',
     'last',
@@ -4021,7 +4027,7 @@ function parseNxtQuoteRecord(record: Record<string, unknown>, nowMs: number) {
   const fallbackPrice = pickNumberByPredicate(
     record,
     (key) =>
-      key.includes('nxt') &&
+      (key.includes('nxt') || key.includes('over')) &&
       (key.includes('price') || key.includes('last') || key.includes('close') || key.endsWith('nv') || key.includes('_nv')),
   );
   const price = nxtPrice ?? fallbackPrice;
@@ -4037,31 +4043,66 @@ function parseNxtQuoteRecord(record: Record<string, unknown>, nowMs: number) {
     'nxtchangerate',
     'nxt_cr',
     'nxtcr',
+    'nxt_fluctuations_ratio',
+    'nxtfluctuationsratio',
+    'over_fluctuations_ratio',
+    'overfluctuationsratio',
+    'fluctuationsratio',
     'changepercent',
     'changerate',
     'cr',
   ]);
   const fallbackChangePercent = pickNumberByPredicate(
     record,
-    (key) => key.includes('nxt') && (key.includes('rate') || key.includes('percent') || key.endsWith('cr')),
+    (key) =>
+      (key.includes('nxt') || key.includes('over')) &&
+      (key.includes('rate') || key.includes('percent') || key.includes('fluctuation') || key.endsWith('cr')),
   );
 
   let changePercent = directChangePercent ?? fallbackChangePercent;
   if (changePercent === null) {
     const changeValue =
-      pickNumberByKeyCandidates(record, ['nxt_change', 'nxtchange', 'nxt_cv', 'nxtcv', 'change', 'cv']) ??
-      pickNumberByPredicate(record, (key) => key.includes('nxt') && (key.includes('change') || key.endsWith('cv')));
+      pickNumberByKeyCandidates(record, [
+        'nxt_change',
+        'nxtchange',
+        'nxt_cv',
+        'nxtcv',
+        'nxt_compare_to_previous_close_price',
+        'nxtcomparetopreviouscloseprice',
+        'over_change',
+        'overchange',
+        'comparetopreviouscloseprice',
+        'change',
+        'cv',
+      ]) ??
+      pickNumberByPredicate(
+        record,
+        (key) => (key.includes('nxt') || key.includes('over')) && (key.includes('change') || key.endsWith('cv')),
+      );
     const previousClose =
       pickNumberByKeyCandidates(record, [
         'nxt_prev_close',
         'nxtprevclose',
         'nxt_previous_close',
         'nxtpreviousclose',
+        'nxt_pcv',
+        'nxtpcv',
+        'over_prev_close',
+        'overprevclose',
+        'over_previous_close',
+        'overpreviousclose',
+        'over_pcv',
+        'overpcv',
         'prevclose',
         'previousclose',
         'pcv',
       ]) ??
-      pickNumberByPredicate(record, (key) => key.includes('prev') || key.includes('previous'));
+      pickNumberByPredicate(
+        record,
+        (key) =>
+          (key.includes('nxt') || key.includes('over')) &&
+          (key.includes('prev') || key.includes('previous') || key.endsWith('pcv')),
+      );
 
     if (changeValue !== null && previousClose !== null && previousClose !== 0) {
       changePercent = (changeValue / previousClose) * 100;
@@ -4077,6 +4118,15 @@ function parseNxtQuoteRecord(record: Record<string, unknown>, nowMs: number) {
     'nxttime',
     'nxt_tt',
     'nxttt',
+    'nxt_local_traded_at',
+    'nxtlocaltradedat',
+    'over_updated_at',
+    'overupdatedat',
+    'over_timestamp',
+    'overtimestamp',
+    'over_time',
+    'overtime',
+    'localtradedat',
     'updatedat',
     'timestamp',
     'time',
@@ -4085,7 +4135,9 @@ function parseNxtQuoteRecord(record: Record<string, unknown>, nowMs: number) {
   const fallbackUpdatedAt =
     pickNumberByPredicate(
       record,
-      (key) => key.includes('nxt') && (key.includes('time') || key.includes('date') || key.includes('ts') || key.includes('update')),
+      (key) =>
+        (key.includes('nxt') || key.includes('over')) &&
+        (key.includes('time') || key.includes('date') || key.includes('ts') || key.includes('update') || key.includes('tradedat')),
     ) ?? null;
   const updatedAt = directUpdatedAt ?? toEpochMs(fallbackUpdatedAt) ?? nowMs;
 
@@ -4109,9 +4161,18 @@ function parseNxtQuoteFromNaverPayload(payload: unknown, nowMs: number) {
 
   for (const record of records) {
     pushCandidate(record.nxt);
+    pushCandidate(record.nxtQuote);
+    pushCandidate(record.nxtOverMarketPriceInfo);
+    pushCandidate(record.nxt_over_market_price_info);
+    pushCandidate(record.overMarketPriceInfo);
 
     const hasNxtKey = Object.keys(record).some((key) => key.toLowerCase().includes('nxt'));
-    if (hasNxtKey) {
+    const hasDirectNxtNumericField = Object.entries(record).some(([rawKey, rawValue]) => {
+      const key = rawKey.trim().toLowerCase();
+      if (!key.includes('nxt')) return false;
+      return toFiniteNumber(rawValue) !== null;
+    });
+    if (hasNxtKey && hasDirectNxtNumericField) {
       candidates.push(record);
       continue;
     }

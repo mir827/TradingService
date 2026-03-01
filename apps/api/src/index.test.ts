@@ -662,10 +662,13 @@ describe('api quote', () => {
               {
                 datas: [
                   {
-                    nxt: {
-                      price: 71520,
-                      changePercent: 2.17,
-                      updatedAt: 1_762_281_260_000,
+                    itemCode: '005930',
+                    nv: 71500,
+                    cr: 2.14,
+                    nxtOverMarketPriceInfo: {
+                      overPrice: '71,520',
+                      fluctuationsRatio: '2.17',
+                      localTradedAt: '2026-02-27T20:00:00.000000+09:00',
                     },
                   },
                 ],
@@ -705,6 +708,7 @@ describe('api quote', () => {
       available: true,
       status: 'available',
       price: 71520,
+      changePercent: 2.17,
     });
   });
 
