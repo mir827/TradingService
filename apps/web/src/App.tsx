@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type FormEvent,
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
@@ -696,6 +697,7 @@ const apiBase = import.meta.env.VITE_API_BASE_URL ?? '';
 const WATCH_PREFS_STORAGE_KEY = 'tradingservice.watchprefs.v1';
 const ALERT_AUTO_CHECK_STORAGE_KEY = 'tradingservice.alerts.autocheck.v1';
 const INDICATOR_PREFS_STORAGE_KEY = 'tradingservice.indicators.v2';
+const BOTTOM_PANEL_HEIGHT_STORAGE_KEY = 'tradingservice.bottompanel.height.v1';
 const DEFAULT_WATCHLIST_NAME = 'default';
 const ALERT_EVENT_DEDUP_WINDOW_MS = 10_000;
 const ALERT_EVENT_MAX_ITEMS = 20;
@@ -712,6 +714,10 @@ const DRAWING_HIT_TOLERANCE_PX = 8;
 const NOTE_HIT_RADIUS_PX = 14;
 const INDICATOR_PREFS_VERSION = 2;
 const CHART_HISTORY_LIMIT = 100;
+const TOPBAR_HEIGHT_PX = 52;
+const BOTTOM_PANEL_MIN_HEIGHT_PX = 180;
+const BOTTOM_PANEL_MAX_HEIGHT_PX = 560;
+const CENTER_PANEL_MIN_HEIGHT_PX = 260;
 const DEFAULT_TRADING_ORDER_FORM: TradingOrderFormState = {
   side: 'BUY',
   orderType: 'MARKET',
@@ -915,6 +921,41 @@ function getStoredIndicatorPrefs(): IndicatorPrefs {
   } catch {
     return defaults;
   }
+}
+
+function getDefaultBottomPanelHeight(viewportWidth: number): number {
+  if (!Number.isFinite(viewportWidth)) return 224;
+  if (viewportWidth <= 960) return 196;
+  if (viewportWidth <= 1200) return 208;
+  return 224;
+}
+
+function getBottomPanelHeightBounds(viewportHeight: number): { min: number; max: number } {
+  const normalizedViewportHeight = Number.isFinite(viewportHeight) ? viewportHeight : 900;
+  const maxByViewport = Math.max(120, normalizedViewportHeight - TOPBAR_HEIGHT_PX - CENTER_PANEL_MIN_HEIGHT_PX);
+  const max = Math.max(120, Math.min(BOTTOM_PANEL_MAX_HEIGHT_PX, Math.floor(maxByViewport)));
+  const min = Math.min(BOTTOM_PANEL_MIN_HEIGHT_PX, max);
+
+  return { min, max };
+}
+
+function clampBottomPanelHeight(height: number, viewportHeight: number): number {
+  const { min, max } = getBottomPanelHeightBounds(viewportHeight);
+
+  if (!Number.isFinite(height)) return min;
+
+  return Math.min(max, Math.max(min, Math.round(height)));
+}
+
+function getStoredBottomPanelHeight(): number {
+  if (typeof window === 'undefined') return getDefaultBottomPanelHeight(1280);
+
+  const defaultHeight = getDefaultBottomPanelHeight(window.innerWidth);
+  const raw = window.localStorage.getItem(BOTTOM_PANEL_HEIGHT_STORAGE_KEY);
+  const parsed = raw === null ? Number.NaN : Number(raw);
+  const initialHeight = Number.isFinite(parsed) ? parsed : defaultHeight;
+
+  return clampBottomPanelHeight(initialHeight, window.innerHeight);
 }
 
 type PineEditorBootstrap = {
@@ -1341,6 +1382,11 @@ function App() {
   const selectedIntervalRef = useRef('60');
   const watchlistAlertCheckInFlightRef = useRef(false);
   const recentAlertEventByRuleRef = useRef<Map<string, number>>(new Map());
+  const bottomPanelResizeStateRef = useRef<{
+    pointerId: number;
+    startY: number;
+    startHeight: number;
+  } | null>(null);
   const pineBootstrap = useMemo(() => getInitialPineEditorBootstrap(), []);
 
   const [watchlistSymbols, setWatchlistSymbols] = useState<SymbolItem[]>([]);
@@ -1365,6 +1411,8 @@ function App() {
   const [searchResults, setSearchResults] = useState<SymbolItem[]>([]);
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
   const [searching, setSearching] = useState(false);
+  const [bottomPanelHeight, setBottomPanelHeight] = useState<number>(() => getStoredBottomPanelHeight());
+  const [bottomPanelResizing, setBottomPanelResizing] = useState(false);
   const [bottomTab, setBottomTab] = useState<BottomTab>('pine');
   const [pineWorkspace, setPineWorkspace] = useState<PineWorkspaceState>(() => pineBootstrap.workspace);
   const [pineEditorScriptId, setPineEditorScriptId] = useState<string | null>(() => pineBootstrap.activeScriptId);
@@ -2545,6 +2593,26 @@ function App() {
 
     window.localStorage.setItem(INDICATOR_PREFS_STORAGE_KEY, JSON.stringify(payload));
   }, [enabledIndicators, indicatorSettings]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    window.localStorage.setItem(BOTTOM_PANEL_HEIGHT_STORAGE_KEY, String(Math.round(bottomPanelHeight)));
+  }, [bottomPanelHeight]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handleWindowResize = () => {
+      setBottomPanelHeight((prev) => clampBottomPanelHeight(prev, window.innerHeight));
+    };
+
+    window.addEventListener('resize', handleWindowResize);
+
+    return () => {
+      window.removeEventListener('resize', handleWindowResize);
+    };
+  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -4217,6 +4285,13 @@ function App() {
   const selectedVenueSessionBadges = useMemo(
     () => normalizeVenueSessionBadges(selectedMarket, marketStatus),
     [selectedMarket, marketStatus],
+  );
+  const appStyle = useMemo(
+    () =>
+      ({
+        '--tv-bottom-panel-height': `${bottomPanelHeight}px`,
+      }) as CSSProperties,
+    [bottomPanelHeight],
   );
 
   useEffect(() => {
@@ -7434,9 +7509,65 @@ function App() {
     },
     [handleRetryAlertsRefresh, handleRetryStrategyBacktest, handleRetryTradingState],
   );
+  const handleBottomPanelResizeStart = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0 || bottomPanelResizing) return;
+      event.preventDefault();
+
+      bottomPanelResizeStateRef.current = {
+        pointerId: event.pointerId,
+        startY: event.clientY,
+        startHeight: bottomPanelHeight,
+      };
+
+      setBottomPanelResizing(true);
+    },
+    [bottomPanelHeight, bottomPanelResizing],
+  );
+  const stopBottomPanelResizing = useCallback(() => {
+    bottomPanelResizeStateRef.current = null;
+    setBottomPanelResizing(false);
+  }, []);
+
+  useEffect(() => {
+    if (!bottomPanelResizing || typeof window === 'undefined') return;
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const dragState = bottomPanelResizeStateRef.current;
+      if (!dragState || event.pointerId !== dragState.pointerId) return;
+
+      const deltaY = dragState.startY - event.clientY;
+      const nextHeight = clampBottomPanelHeight(dragState.startHeight + deltaY, window.innerHeight);
+      setBottomPanelHeight((prev) => (prev === nextHeight ? prev : nextHeight));
+    };
+
+    const handlePointerEnd = (event: PointerEvent) => {
+      const dragState = bottomPanelResizeStateRef.current;
+      if (!dragState || event.pointerId !== dragState.pointerId) return;
+      stopBottomPanelResizing();
+    };
+
+    const handleWindowBlur = () => {
+      stopBottomPanelResizing();
+    };
+
+    window.document.body.classList.add('bottom-panel-resizing');
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerEnd);
+    window.addEventListener('pointercancel', handlePointerEnd);
+    window.addEventListener('blur', handleWindowBlur);
+
+    return () => {
+      window.document.body.classList.remove('bottom-panel-resizing');
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerEnd);
+      window.removeEventListener('pointercancel', handlePointerEnd);
+      window.removeEventListener('blur', handleWindowBlur);
+    };
+  }, [bottomPanelResizing, stopBottomPanelResizing]);
 
   return (
-    <div className="tv-app">
+    <div className="tv-app" style={appStyle}>
       <header className="tv-topbar">
         <div className="brand-wrap">
           <TradingServiceMark />
@@ -7612,13 +7743,16 @@ function App() {
               <div className="chart-inspector" aria-live="polite">
                 <div className="chart-inspector-head">
                   <strong>Data Window</strong>
-                  <span className={`chart-inspector-mode ${crosshairInspectorSnapshot.mode}`}>
-                    {crosshairInspectorSnapshot.mode === 'crosshair'
-                      ? 'Crosshair'
-                      : crosshairInspectorSnapshot.mode === 'latest'
-                        ? 'Latest'
-                        : 'Empty'}
-                  </span>
+                  <div className="chart-inspector-status">
+                    <p className="chart-inspector-hint">{crosshairInspectorSnapshot.helperText}</p>
+                    <span className={`chart-inspector-mode ${crosshairInspectorSnapshot.mode}`}>
+                      {crosshairInspectorSnapshot.mode === 'crosshair'
+                        ? 'Crosshair'
+                        : crosshairInspectorSnapshot.mode === 'latest'
+                          ? 'Latest'
+                          : 'Empty'}
+                    </span>
+                  </div>
                 </div>
                 <div className="chart-inspector-grid">
                   <span>T {crosshairInspectorSnapshot.time ? formatCandleDateTime(crosshairInspectorSnapshot.time) : '--'}</span>
@@ -7648,8 +7782,6 @@ function App() {
                     ))}
                   </div>
                 ) : null}
-
-                <p className="chart-inspector-hint">{crosshairInspectorSnapshot.helperText}</p>
               </div>
             </div>
           </div>
@@ -8870,7 +9002,14 @@ function App() {
         ) : null}
       </main>
 
-      <footer className="tv-bottom-panel">
+      <footer className={`tv-bottom-panel${bottomPanelResizing ? ' resizing' : ''}`}>
+        <div
+          className="bottom-panel-resize-handle"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="하단 패널 높이 조절"
+          onPointerDown={handleBottomPanelResizeStart}
+        />
         <div className="bottom-tabs">
           {bottomTabs.map((tab) => (
             <button key={tab.id} className={bottomTab === tab.id ? 'active' : ''} onClick={() => setBottomTab(tab.id)}>

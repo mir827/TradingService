@@ -13,12 +13,13 @@ select {
 }
 
 .tv-app {
+  --tv-bottom-panel-height: 224px;
   height: 100vh;
   width: 100%;
   background: #0f1421;
   color: #d1d4dc;
   display: grid;
-  grid-template-rows: 52px 1fr 224px;
+  grid-template-rows: 52px minmax(0, 1fr) var(--tv-bottom-panel-height);
   overflow: hidden;
 }
 
@@ -386,7 +387,7 @@ select {
 
 .chart-inspector-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
 }
@@ -395,6 +396,13 @@ select {
   font-size: 10px;
   letter-spacing: 0.02em;
   color: #b9c5db;
+}
+
+.chart-inspector-status {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+  min-width: 0;
 }
 
 .chart-inspector-mode {
@@ -448,9 +456,12 @@ select {
 
 .chart-inspector-hint {
   margin: 0;
-  text-align: right;
   font-size: 10px;
   color: #8e9ab0;
+  line-height: 1.25;
+  text-align: right;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .chart-legend-row {
@@ -2186,6 +2197,45 @@ select {
   background: #131722;
   display: grid;
   grid-template-rows: 40px 1fr;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.bottom-panel-resize-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 10px;
+  transform: translateY(-5px);
+  cursor: row-resize;
+  touch-action: none;
+  z-index: 5;
+}
+
+.bottom-panel-resize-handle::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 56px;
+  height: 4px;
+  border-radius: 999px;
+  border: 1px solid #33435f;
+  background: #1b2638;
+  transform: translate(-50%, -50%);
+}
+
+.bottom-panel-resize-handle:hover::before,
+.tv-bottom-panel.resizing .bottom-panel-resize-handle::before {
+  border-color: #4a709f;
+  background: #284164;
+}
+
+body.bottom-panel-resizing {
+  cursor: row-resize;
+  user-select: none;
 }
 
 .bottom-tabs {
@@ -3038,7 +3088,7 @@ select {
 
 @media (max-width: 1200px) {
   .tv-app {
-    grid-template-rows: 52px 1fr 208px;
+    --tv-bottom-panel-height: 208px;
   }
 
   .tv-main {
@@ -3113,7 +3163,7 @@ select {
 
 @media (max-width: 960px) {
   .tv-app {
-    grid-template-rows: 52px 1fr 196px;
+    --tv-bottom-panel-height: 196px;
   }
 
   .tv-main {
