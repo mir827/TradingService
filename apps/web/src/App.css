@@ -214,6 +214,15 @@ select {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  min-width: 0;
+}
+
+.chart-title-main-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .chart-title-block strong {
@@ -235,6 +244,7 @@ select {
   gap: 6px;
   font-size: 11px;
   color: #8f97a7;
+  flex-shrink: 0;
 }
 
 .chart-venue-control select {
@@ -928,7 +938,7 @@ select {
   min-width: 0;
   overflow: hidden;
   display: grid;
-  grid-template-rows: 44px auto 36px auto minmax(0, 1fr);
+  grid-template-rows: 44px auto minmax(0, 1fr);
   position: relative;
   z-index: 2;
 }
@@ -992,7 +1002,7 @@ select {
   color: #8f97a7;
 }
 
-.right-panel .drawing-objects-list {
+.drawing-objects-panel .drawing-objects-list {
   margin: 0;
   padding: 0;
   list-style: none;
@@ -1002,7 +1012,7 @@ select {
   overflow: auto;
 }
 
-.right-panel .drawing-objects-list li {
+.drawing-objects-panel .drawing-objects-list li {
   border: 1px solid #2d3750;
   border-radius: 6px;
   padding: 6px 7px;
@@ -1012,12 +1022,12 @@ select {
   cursor: default;
 }
 
-.right-panel .drawing-objects-list li:hover,
-.right-panel .drawing-objects-list li.selected {
+.drawing-objects-panel .drawing-objects-list li:hover,
+.drawing-objects-panel .drawing-objects-list li.selected {
   background: #162034;
 }
 
-.right-panel .drawing-objects-row {
+.drawing-objects-panel .drawing-objects-row {
   border: 0;
   background: transparent;
   color: inherit;
@@ -1028,16 +1038,16 @@ select {
   cursor: pointer;
 }
 
-.right-panel .drawing-objects-row.selected .drawing-objects-id {
+.drawing-objects-panel .drawing-objects-row.selected .drawing-objects-id {
   color: #d8e8ff;
 }
 
-.right-panel .drawing-objects-type {
+.drawing-objects-panel .drawing-objects-type {
   font-size: 10px;
   color: #89a5c8;
 }
 
-.right-panel .drawing-objects-id {
+.drawing-objects-panel .drawing-objects-id {
   font-size: 11px;
   color: #bdcadb;
   overflow: hidden;
@@ -1045,7 +1055,7 @@ select {
   white-space: nowrap;
 }
 
-.right-panel .drawing-objects-detail {
+.drawing-objects-panel .drawing-objects-detail {
   font-size: 10px;
   color: #7f8ea5;
   overflow: hidden;
@@ -1053,12 +1063,12 @@ select {
   white-space: nowrap;
 }
 
-.right-panel .drawing-objects-actions {
+.drawing-objects-panel .drawing-objects-actions {
   display: flex;
   gap: 6px;
 }
 
-.right-panel .drawing-objects-actions button {
+.drawing-objects-panel .drawing-objects-actions button {
   border: 1px solid #3b4f6a;
   background: #15283f;
   color: #9fc4f0;
@@ -1068,7 +1078,7 @@ select {
   cursor: pointer;
 }
 
-.right-panel .drawing-objects-actions button.active {
+.drawing-objects-panel .drawing-objects-actions button.active {
   border-color: #4b6f40;
   background: #213922;
   color: #c3f0a8;
@@ -1152,7 +1162,7 @@ select {
   color: #8f97a7;
 }
 
-.right-panel .ops-mini-list {
+.ops-mini-panel .ops-mini-list {
   margin: 0;
   padding: 0;
   list-style: none;
@@ -1162,7 +1172,7 @@ select {
   overflow: auto;
 }
 
-.right-panel .ops-mini-list li {
+.ops-mini-panel .ops-mini-list li {
   border: 1px solid #2d3750;
   border-radius: 6px;
   padding: 6px 7px;
@@ -2109,6 +2119,28 @@ select {
   font-size: 12px;
   color: #98a0af;
   overflow: auto;
+}
+
+.bottom-side-panel {
+  min-height: 0;
+  max-width: 960px;
+}
+
+.bottom-side-panel .drawing-objects-panel,
+.bottom-side-panel .ops-mini-panel {
+  border: 1px solid #2b2f3a;
+  border-bottom: 1px solid #2b2f3a;
+  border-radius: 8px;
+  background: #111826;
+  padding: 10px;
+}
+
+.bottom-side-panel .drawing-objects-list {
+  max-height: 100%;
+}
+
+.bottom-side-panel .ops-mini-list {
+  max-height: 100%;
 }
 
 .bottom-placeholder {

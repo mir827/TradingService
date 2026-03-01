@@ -326,7 +326,7 @@ type OpsTimelineItem =
     };
 
 type WatchTab = 'watchlist' | 'detail' | 'alerts';
-type BottomTab = 'pine' | 'strategy' | 'trading';
+type BottomTab = 'pine' | 'strategy' | 'trading' | 'objects' | 'ops';
 type TopActionKey = 'indicator' | 'compare' | 'alerts' | 'replay';
 type WatchSortKey = 'symbol' | 'price' | 'changePercent';
 type WatchSortDir = 'asc' | 'desc';
@@ -690,6 +690,8 @@ const bottomTabs: Array<{ id: BottomTab; label: string }> = [
   { id: 'pine', label: 'Pine Editor' },
   { id: 'strategy', label: '전략 테스터' },
   { id: 'trading', label: '트레이딩 패널' },
+  { id: 'objects', label: '도형 오브젝트' },
+  { id: 'ops', label: '운영 로그' },
 ];
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? '';
@@ -7448,29 +7450,31 @@ function App() {
         <section className="center-panel">
           <div className="chart-header">
             <div className="chart-title-block">
-              <strong className="chart-title-main">
-                {selectedCode} · {selectedName} · {selectedInterval}
-              </strong>
+              <div className="chart-title-main-row">
+                <strong className="chart-title-main">
+                  {selectedCode} · {selectedName} · {selectedInterval}
+                </strong>
+                {selectedSymbolVenueSupported ? (
+                  <label className="chart-venue-control">
+                    <span>차트 Venue</span>
+                    <select
+                      value={selectedChartVenue ?? ''}
+                      onChange={(event) => {
+                        void handleUpdateWatchSymbolVenue(selectedSymbol, toVenuePreferenceValue(event.target.value));
+                      }}
+                    >
+                      <option value="">기본(전체)</option>
+                      <option value="KRX">KRX</option>
+                      <option value="NXT">NXT</option>
+                    </select>
+                  </label>
+                ) : null}
+              </div>
               <div className="market-status-row">
                 <span className={`market-status-badge ${marketStatusBadgeClass}`}>{marketStatusBadgeText}</span>
                 <span className="market-status-text">{marketStatusHint}</span>
               </div>
               <span>{exchangeText} · 실시간 데이터</span>
-              {selectedSymbolVenueSupported ? (
-                <label className="chart-venue-control">
-                  <span>차트 Venue</span>
-                  <select
-                    value={selectedChartVenue ?? ''}
-                    onChange={(event) => {
-                      void handleUpdateWatchSymbolVenue(selectedSymbol, toVenuePreferenceValue(event.target.value));
-                    }}
-                  >
-                    <option value="">기본(전체)</option>
-                    <option value="KRX">KRX</option>
-                    <option value="NXT">NXT</option>
-                  </select>
-                </label>
-              ) : null}
             </div>
 
             <div className="chart-meta-wrap">
@@ -7963,56 +7967,6 @@ function App() {
               <h3>시장 패널</h3>
             </div>
 
-            <div className="drawing-objects-panel">
-              <div className="drawing-objects-head">
-                <strong>도형 오브젝트</strong>
-                <span>{drawingObjects.length}</span>
-              </div>
-              {drawingObjects.length === 0 ? (
-                <p className="drawing-objects-empty">저장된 도형이 없습니다.</p>
-              ) : (
-                <ul className="drawing-objects-list" aria-label="드로잉 오브젝트 목록">
-                  {drawingObjects.map((drawing) => (
-                    <li key={drawing.id} className={selectedDrawingId === drawing.id ? 'selected' : ''}>
-                      <button
-                        type="button"
-                        className={`drawing-objects-row${selectedDrawingId === drawing.id ? ' selected' : ''}`}
-                        onClick={() => setSelectedDrawingId(drawing.id)}
-                      >
-                        <span className="drawing-objects-type">{formatDrawingKindLabel(drawing.kind)}</span>
-                        <span className="drawing-objects-id">{drawing.id}</span>
-                        <span className="drawing-objects-detail">{drawing.detail}</span>
-                      </button>
-                      <div className="drawing-objects-actions">
-                        <button
-                          type="button"
-                          className={drawing.locked ? 'active' : ''}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setSelectedDrawingId(drawing.id);
-                            toggleDrawingLockedById(drawing.id);
-                          }}
-                        >
-                          잠금
-                        </button>
-                        <button
-                          type="button"
-                          className={drawing.visible ? 'active' : ''}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setSelectedDrawingId(drawing.id);
-                            toggleDrawingVisibilityById(drawing.id);
-                          }}
-                        >
-                          표시
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-
             <div className="watch-tabs">
               <button className={watchTab === 'watchlist' ? 'active' : ''} onClick={() => setWatchTab('watchlist')}>
                 관심종목
@@ -8024,36 +7978,6 @@ function App() {
                 알림
                 {alertBadgeCount > 0 ? <span className="watch-tab-badge">{Math.min(alertBadgeCount, ALERT_EVENT_MAX_ITEMS)}</span> : null}
               </button>
-            </div>
-
-            <div className="ops-mini-panel">
-              <div className="ops-mini-head">
-                <strong>운영 로그</strong>
-                <button type="button" onClick={() => void loadOpsTelemetry()} disabled={opsLoading}>
-                  {opsLoading ? '로딩중...' : '새로고침'}
-                </button>
-              </div>
-              {opsPanelError ? <p className="ops-mini-error">{opsPanelError}</p> : null}
-              {!opsPanelError && !hasOpsTimeline ? (
-                <p className="ops-mini-empty">최근 오류/복구 이벤트가 없습니다.</p>
-              ) : null}
-              {hasOpsTimeline ? (
-                <ul className="ops-mini-list">
-                  {opsTimelineItems.map((item) => (
-                    <li key={item.id}>
-                      <div className="ops-mini-row">
-                        <span className={`ops-mini-kind ${item.kind}`}>{item.kind === 'error' ? 'ERR' : 'REC'}</span>
-                        <span className="ops-mini-label">{item.label}</span>
-                      </div>
-                      <div className="ops-mini-sub">
-                        <span>{item.source}</span>
-                        <span>{new Date(item.occurredAt).toLocaleTimeString('ko-KR')}</span>
-                        {item.detail ? <span>{item.detail}</span> : null}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
             </div>
 
             <div className={`right-panel-body${watchTab === 'watchlist' ? ' watchlist-body' : ''}`}>
@@ -9654,6 +9578,94 @@ function App() {
               ) : (
                 <p className="trading-empty">트레이딩 상태를 불러오지 못했습니다.</p>
               )}
+            </div>
+          ) : null}
+
+          {bottomTab === 'objects' ? (
+            <div className="bottom-side-panel">
+              <div className="drawing-objects-panel">
+                <div className="drawing-objects-head">
+                  <strong>도형 오브젝트</strong>
+                  <span>{drawingObjects.length}</span>
+                </div>
+                {drawingObjects.length === 0 ? (
+                  <p className="drawing-objects-empty">저장된 도형이 없습니다.</p>
+                ) : (
+                  <ul className="drawing-objects-list" aria-label="드로잉 오브젝트 목록">
+                    {drawingObjects.map((drawing) => (
+                      <li key={drawing.id} className={selectedDrawingId === drawing.id ? 'selected' : ''}>
+                        <button
+                          type="button"
+                          className={`drawing-objects-row${selectedDrawingId === drawing.id ? ' selected' : ''}`}
+                          onClick={() => setSelectedDrawingId(drawing.id)}
+                        >
+                          <span className="drawing-objects-type">{formatDrawingKindLabel(drawing.kind)}</span>
+                          <span className="drawing-objects-id">{drawing.id}</span>
+                          <span className="drawing-objects-detail">{drawing.detail}</span>
+                        </button>
+                        <div className="drawing-objects-actions">
+                          <button
+                            type="button"
+                            className={drawing.locked ? 'active' : ''}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setSelectedDrawingId(drawing.id);
+                              toggleDrawingLockedById(drawing.id);
+                            }}
+                          >
+                            잠금
+                          </button>
+                          <button
+                            type="button"
+                            className={drawing.visible ? 'active' : ''}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setSelectedDrawingId(drawing.id);
+                              toggleDrawingVisibilityById(drawing.id);
+                            }}
+                          >
+                            표시
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          ) : null}
+
+          {bottomTab === 'ops' ? (
+            <div className="bottom-side-panel">
+              <div className="ops-mini-panel">
+                <div className="ops-mini-head">
+                  <strong>운영 로그</strong>
+                  <button type="button" onClick={() => void loadOpsTelemetry()} disabled={opsLoading}>
+                    {opsLoading ? '로딩중...' : '새로고침'}
+                  </button>
+                </div>
+                {opsPanelError ? <p className="ops-mini-error">{opsPanelError}</p> : null}
+                {!opsPanelError && !hasOpsTimeline ? (
+                  <p className="ops-mini-empty">최근 오류/복구 이벤트가 없습니다.</p>
+                ) : null}
+                {hasOpsTimeline ? (
+                  <ul className="ops-mini-list">
+                    {opsTimelineItems.map((item) => (
+                      <li key={item.id}>
+                        <div className="ops-mini-row">
+                          <span className={`ops-mini-kind ${item.kind}`}>{item.kind === 'error' ? 'ERR' : 'REC'}</span>
+                          <span className="ops-mini-label">{item.label}</span>
+                        </div>
+                        <div className="ops-mini-sub">
+                          <span>{item.source}</span>
+                          <span>{new Date(item.occurredAt).toLocaleTimeString('ko-KR')}</span>
+                          {item.detail ? <span>{item.detail}</span> : null}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
             </div>
           ) : null}
         </div>
