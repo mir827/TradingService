@@ -712,6 +712,181 @@ describe('api quote', () => {
     });
   });
 
+  it('uses NXT as combined venue outside KRX session but keeps KRX during open session', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = toUrl(input);
+
+      if (url.hostname === 'query1.finance.yahoo.com' && url.pathname === '/v8/finance/chart/005930.KS') {
+        return jsonResponse({
+          chart: {
+            result: [
+              {
+                meta: {
+                  regularMarketPrice: 71500,
+                  previousClose: 70000,
+                  regularMarketDayHigh: 71800,
+                  regularMarketDayLow: 69800,
+                  regularMarketVolume: 1234567,
+                },
+              },
+            ],
+          },
+        });
+      }
+
+      if (url.hostname === 'polling.finance.naver.com' && url.pathname === '/api/realtime') {
+        return jsonResponse({
+          result: {
+            areas: [
+              {
+                datas: [
+                  {
+                    itemCode: '005930',
+                    nxtOverMarketPriceInfo: {
+                      overPrice: '71,520',
+                      fluctuationsRatio: '2.17',
+                      localTradedAt: '2026-02-27T20:00:00.000000+09:00',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        });
+      }
+
+      return jsonResponse({ error: 'unexpected request', url: url.toString() }, 404);
+    });
+
+    const nowSpy = vi.spyOn(Date, 'now');
+    nowSpy.mockReturnValue(new Date('2026-03-01T09:10:00+09:00').getTime());
+
+    const closedResponse = await app.inject({
+      method: 'GET',
+      url: '/api/quote?symbol=005930.KS',
+    });
+    expect(closedResponse.statusCode).toBe(200);
+    const closedBody = closedResponse.json() as {
+      requestedVenue?: string;
+      effectiveVenue?: string;
+      lastPrice: number;
+    };
+    expect(closedBody.requestedVenue).toBe('COMBINED');
+    expect(closedBody.effectiveVenue).toBe('NXT');
+    expect(closedBody.lastPrice).toBe(71520);
+
+    nowSpy.mockReturnValue(new Date('2026-03-02T10:10:00+09:00').getTime());
+
+    const openResponse = await app.inject({
+      method: 'GET',
+      url: '/api/quote?symbol=005930.KS',
+    });
+    expect(openResponse.statusCode).toBe(200);
+    const openBody = openResponse.json() as {
+      effectiveVenue?: string;
+      lastPrice: number;
+    };
+    expect(openBody.effectiveVenue).toBe('KRX');
+    expect(openBody.lastPrice).toBe(71500);
+  });
+
+  it('supports venue-aware candle selection for KR symbols', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = toUrl(input);
+
+      if (url.hostname === 'query1.finance.yahoo.com' && url.pathname === '/v8/finance/chart/005930.KS') {
+        return jsonResponse({
+          chart: {
+            result: [
+              {
+                timestamp: [1_772_172_000],
+                indicators: {
+                  quote: [
+                    {
+                      open: [216500],
+                      high: [216500],
+                      low: [216500],
+                      close: [216500],
+                      volume: [0],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        });
+      }
+
+      if (url.hostname === 'polling.finance.naver.com' && url.pathname === '/api/realtime') {
+        return jsonResponse({
+          result: {
+            areas: [
+              {
+                datas: [
+                  {
+                    itemCode: '005930',
+                    nxtOverMarketPriceInfo: {
+                      overPrice: '217,500',
+                      fluctuationsRatio: '-0.23',
+                      localTradedAt: '2026-02-27T20:00:00.000000+09:00',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        });
+      }
+
+      return jsonResponse({ error: 'unexpected request', url: url.toString() }, 404);
+    });
+
+    const nowSpy = vi.spyOn(Date, 'now');
+    nowSpy.mockReturnValue(new Date('2026-03-01T09:10:00+09:00').getTime());
+
+    const nxtResponse = await app.inject({
+      method: 'GET',
+      url: '/api/candles?symbol=005930.KS&interval=60&limit=50&venue=NXT',
+    });
+    expect(nxtResponse.statusCode).toBe(200);
+    const nxtBody = nxtResponse.json() as {
+      requestedVenue?: string;
+      effectiveVenue?: string;
+      candles: Array<{ close: number; high: number }>;
+    };
+    expect(nxtBody.requestedVenue).toBe('NXT');
+    expect(nxtBody.effectiveVenue).toBe('NXT');
+    expect(nxtBody.candles.at(-1)?.close).toBe(217500);
+    expect(nxtBody.candles.at(-1)?.high).toBe(217500);
+
+    const combinedResponse = await app.inject({
+      method: 'GET',
+      url: '/api/candles?symbol=005930.KS&interval=60&limit=50',
+    });
+    expect(combinedResponse.statusCode).toBe(200);
+    const combinedBody = combinedResponse.json() as {
+      requestedVenue?: string;
+      effectiveVenue?: string;
+      candles: Array<{ close: number }>;
+    };
+    expect(combinedBody.requestedVenue).toBe('COMBINED');
+    expect(combinedBody.effectiveVenue).toBe('NXT');
+    expect(combinedBody.candles.at(-1)?.close).toBe(217500);
+
+    nowSpy.mockReturnValue(new Date('2026-03-02T10:10:00+09:00').getTime());
+    const openCombinedResponse = await app.inject({
+      method: 'GET',
+      url: '/api/candles?symbol=005930.KS&interval=60&limit=50',
+    });
+    expect(openCombinedResponse.statusCode).toBe(200);
+    const openCombinedBody = openCombinedResponse.json() as {
+      effectiveVenue?: string;
+      candles: Array<{ close: number }>;
+    };
+    expect(openCombinedBody.effectiveVenue).toBe('KRX');
+    expect(openCombinedBody.candles.at(-1)?.close).toBe(216500);
+  });
+
   it('keeps non-KOSPI/KOSDAQ quote payload backward-compatible', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const rawUrl =

@@ -267,6 +267,23 @@ select {
   color: #7f8797;
 }
 
+.chart-venue-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #8f97a7;
+}
+
+.chart-venue-control select {
+  background: #111827;
+  color: #d9e2f2;
+  border: 1px solid #2d3b54;
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+
 .market-status-row {
   display: flex;
   align-items: center;

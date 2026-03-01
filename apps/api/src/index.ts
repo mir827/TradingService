@@ -456,6 +456,15 @@ const candleQuerySchema = z.object({
   symbol: z.string().default('BTCUSDT'),
   interval: z.string().default('60'),
   limit: z.coerce.number().int().min(50).max(1000).default(400),
+  venue: z
+    .preprocess((value) => {
+      if (typeof value === 'string') {
+        return value.trim().toUpperCase();
+      }
+
+      return value;
+    }, z.enum(['KRX', 'NXT']))
+    .optional(),
 });
 
 const quoteQuerySchema = z.object({
@@ -4254,6 +4263,81 @@ function isAvailableNxtQuote(nxt?: NxtQuoteInfo): nxt is NxtQuoteInfo & { price:
   );
 }
 
+function shouldPreferNxtForCombined(nowMs: number, nxt?: NxtQuoteInfo) {
+  if (!isAvailableNxtQuote(nxt)) {
+    return false;
+  }
+
+  const krxStatus = getKrxStatus(nowMs);
+  if (krxStatus.status === 'OPEN') {
+    return false;
+  }
+
+  if (typeof nxt.updatedAt === 'number' && Number.isFinite(nxt.updatedAt)) {
+    const ageMs = nowMs - nxt.updatedAt;
+    if (ageMs < -5 * 60 * 1000) {
+      return false;
+    }
+    return ageMs <= 72 * 60 * 60 * 1000;
+  }
+
+  return true;
+}
+
+function applyNxtPriceToCandles(candles: Candle[], nxtPrice: number) {
+  if (!candles.length) {
+    return candles;
+  }
+
+  const next = candles.slice();
+  const last = next[next.length - 1];
+  const normalizedPrice = Number(nxtPrice);
+
+  next[next.length - 1] = {
+    ...last,
+    high: Math.max(last.high, normalizedPrice),
+    low: Math.min(last.low, normalizedPrice),
+    close: normalizedPrice,
+  };
+
+  return next;
+}
+
+function applyKrxCandleVenueSelection(
+  candles: Candle[],
+  nxt: NxtQuoteInfo | undefined,
+  requestedVenue: QuoteRequestedVenue,
+  nowMs = Date.now(),
+): { candles: Candle[]; effectiveVenue: KrVenue; venueFallback?: string } {
+  if (requestedVenue === 'KRX') {
+    return {
+      candles,
+      effectiveVenue: 'KRX',
+    };
+  }
+
+  if (!isAvailableNxtQuote(nxt)) {
+    return {
+      candles,
+      effectiveVenue: 'KRX',
+      ...(requestedVenue === 'NXT' ? { venueFallback: 'NXT_UNAVAILABLE_FALLBACK_TO_KRX' } : {}),
+    };
+  }
+
+  const useNxt = requestedVenue === 'NXT' || shouldPreferNxtForCombined(nowMs, nxt);
+  if (!useNxt) {
+    return {
+      candles,
+      effectiveVenue: 'KRX',
+    };
+  }
+
+  return {
+    candles: applyNxtPriceToCandles(candles, nxt.price),
+    effectiveVenue: 'NXT',
+  };
+}
+
 function applyKrxVenueSelection(quote: Quote, requestedVenue: QuoteRequestedVenue): Quote {
   const base: Quote = {
     ...quote,
@@ -4261,15 +4345,20 @@ function applyKrxVenueSelection(quote: Quote, requestedVenue: QuoteRequestedVenu
     effectiveVenue: 'KRX',
   };
 
-  if (requestedVenue !== 'NXT') {
+  if (!isAvailableNxtQuote(quote.nxt)) {
+    if (requestedVenue === 'NXT') {
+      return {
+        ...base,
+        venueFallback: 'NXT_UNAVAILABLE_FALLBACK_TO_KRX',
+      };
+    }
+
     return base;
   }
 
-  if (!isAvailableNxtQuote(quote.nxt)) {
-    return {
-      ...base,
-      venueFallback: 'NXT_UNAVAILABLE_FALLBACK_TO_KRX',
-    };
+  const useNxt = requestedVenue === 'NXT' || shouldPreferNxtForCombined(Date.now(), quote.nxt);
+  if (!useNxt) {
+    return base;
   }
 
   return {
@@ -4579,21 +4668,56 @@ app.get('/api/candles', async (request, reply) => {
 
   const { symbol, interval, limit } = parsed.data;
   const normalizedSymbol = symbol.toUpperCase();
-  const cacheKey = `${normalizedSymbol}:${interval}:${limit}`;
+  const requestedVenueHint = resolveVenueForSymbol(normalizedSymbol, parsed.data.venue);
+  const requestedVenue = resolveRequestedQuoteVenue(normalizedSymbol, requestedVenueHint);
+  const cacheKey = isKrxSymbol(normalizedSymbol)
+    ? `${normalizedSymbol}:${interval}:${limit}:${requestedVenue}`
+    : `${normalizedSymbol}:${interval}:${limit}`;
   const cached = getCachedCandles(cacheKey);
 
   if (cached) {
-    return { symbol: normalizedSymbol, interval, candles: cached };
+    if (!isKrxSymbol(normalizedSymbol)) {
+      return {
+        symbol: normalizedSymbol,
+        interval,
+        candles: cached,
+      };
+    }
+
+    const nxtQuote = requestedVenue === 'KRX' ? undefined : await fetchBestEffortNxtQuote(normalizedSymbol);
+    const selected = applyKrxCandleVenueSelection(cached, nxtQuote, requestedVenue);
+
+    return {
+      symbol: normalizedSymbol,
+      interval,
+      candles: selected.candles,
+      requestedVenue,
+      effectiveVenue: selected.effectiveVenue,
+      ...(selected.venueFallback ? { venueFallback: selected.venueFallback } : {}),
+    };
   }
 
   try {
-    const candles = isKrxSymbol(normalizedSymbol)
-      ? await fetchKrxCandles(normalizedSymbol, interval, limit)
-      : await fetchCryptoCandles(normalizedSymbol, interval, limit);
+    if (!isKrxSymbol(normalizedSymbol)) {
+      const candles = await fetchCryptoCandles(normalizedSymbol, interval, limit);
+      setCachedCandles(cacheKey, candles);
+      return { symbol: normalizedSymbol, interval, candles };
+    }
 
-    setCachedCandles(cacheKey, candles);
+    const baseCandles = await fetchKrxCandles(normalizedSymbol, interval, limit);
+    const nxtQuote = requestedVenue === 'KRX' ? undefined : await fetchBestEffortNxtQuote(normalizedSymbol);
+    const selected = applyKrxCandleVenueSelection(baseCandles, nxtQuote, requestedVenue);
 
-    return { symbol: normalizedSymbol, interval, candles };
+    setCachedCandles(cacheKey, requestedVenue === 'COMBINED' ? baseCandles : selected.candles);
+
+    return {
+      symbol: normalizedSymbol,
+      interval,
+      candles: selected.candles,
+      requestedVenue,
+      effectiveVenue: selected.effectiveVenue,
+      ...(selected.venueFallback ? { venueFallback: selected.venueFallback } : {}),
+    };
   } catch (error) {
     app.log.error({ error, symbol: normalizedSymbol, interval }, 'Failed to fetch candles');
     return reply.code(502).send({ error: 'Failed to fetch candle data from upstream exchange' });

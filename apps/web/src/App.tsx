@@ -3247,8 +3247,17 @@ function App() {
       clearHoveredCandle();
 
       try {
+        const selectedMeta =
+          watchlistSymbols.find((item) => item.symbol === selectedSymbol) ??
+          searchResults.find((item) => item.symbol === selectedSymbol);
+        const selectedMarketForCandles = selectedMeta?.market ?? 'CRYPTO';
+        const selectedCandleVenue = normalizeVenueForSymbol(
+          { symbol: selectedSymbol, market: selectedMarketForCandles },
+          selectedMeta?.venue,
+        );
+        const venueQuery = selectedCandleVenue ? `&venue=${encodeURIComponent(selectedCandleVenue)}` : '';
         const response = await fetch(
-          `${apiBase}/api/candles?symbol=${encodeURIComponent(selectedSymbol)}&interval=${encodeURIComponent(selectedInterval)}&limit=500`,
+          `${apiBase}/api/candles?symbol=${encodeURIComponent(selectedSymbol)}&interval=${encodeURIComponent(selectedInterval)}&limit=500${venueQuery}`,
         );
 
         if (!response.ok) {
@@ -3277,7 +3286,7 @@ function App() {
     return () => {
       canceled = true;
     };
-  }, [clearHoveredCandle, selectedSymbol, selectedInterval]);
+  }, [clearHoveredCandle, searchResults, selectedInterval, selectedSymbol, watchlistSymbols]);
 
   const compareSymbolSignature = useMemo(
     () => compareOverlays.map((overlay) => overlay.symbol.trim()).join('|'),
@@ -4144,6 +4153,13 @@ function App() {
   const selectedSymbolDefaultVenue = useMemo(
     () => (selectedSymbolVenueSupported ? toVenuePreferenceValue(selectedSymbolMeta?.venue) : ''),
     [selectedSymbolMeta?.venue, selectedSymbolVenueSupported],
+  );
+  const selectedChartVenue = useMemo(
+    () =>
+      selectedSymbolVenueSupported
+        ? normalizeVenueForSymbol({ symbol: selectedSymbol, market: selectedMarket }, selectedSymbolMeta?.venue)
+        : undefined,
+    [selectedMarket, selectedSymbol, selectedSymbolMeta?.venue, selectedSymbolVenueSupported],
   );
   const selectedVenueCheckedAt = useMemo(() => normalizeVenueCheckedAt(marketStatus), [marketStatus]);
   const selectedKrxNxtComparison = useMemo(
@@ -7463,6 +7479,21 @@ function App() {
                 <span className="market-status-text">{marketStatusHint}</span>
               </div>
               <span>{exchangeText} · 실시간 데이터</span>
+              {selectedSymbolVenueSupported ? (
+                <label className="chart-venue-control">
+                  <span>차트 Venue</span>
+                  <select
+                    value={selectedChartVenue ?? ''}
+                    onChange={(event) => {
+                      void handleUpdateWatchSymbolVenue(selectedSymbol, toVenuePreferenceValue(event.target.value));
+                    }}
+                  >
+                    <option value="">기본(전체)</option>
+                    <option value="KRX">KRX</option>
+                    <option value="NXT">NXT</option>
+                  </select>
+                </label>
+              ) : null}
             </div>
 
             <div className="chart-meta-wrap">
