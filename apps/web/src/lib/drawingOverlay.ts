@@ -66,6 +66,7 @@ type BuildDrawingOverlayGeometryArgs = {
 const RAY_EXTENSION_MULTIPLIER = 2;
 const COORDINATE_CLAMP_MULTIPLIER = 4;
 const MIN_RAY_VECTOR_LENGTH = 1e-6;
+const MAX_GUARD_WARNINGS_PER_BUILD = 8;
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
@@ -198,6 +199,19 @@ function createEmptyGeometry(width: number, height: number): DrawingOverlayGeome
   };
 }
 
+function createGuardLogger() {
+  let count = 0;
+  const isVitestRuntime = typeof globalThis === 'object' && '__vitest_worker__' in globalThis;
+
+  return (message: string) => {
+    if (isVitestRuntime) return;
+    if (count >= MAX_GUARD_WARNINGS_PER_BUILD) return;
+    count += 1;
+    if (typeof console === 'undefined' || typeof console.warn !== 'function') return;
+    console.warn(`[drawingOverlay] ${message}`);
+  };
+}
+
 export function buildDrawingOverlayGeometry(args: BuildDrawingOverlayGeometryArgs): DrawingOverlayGeometry {
   const width = toViewportDimension(args.width);
   const height = toViewportDimension(args.height);
@@ -206,6 +220,10 @@ export function buildDrawingOverlayGeometry(args: BuildDrawingOverlayGeometryArg
   }
 
   const coordinateAbsLimit = Math.max(width, height) * COORDINATE_CLAMP_MULTIPLIER;
+  if (!isFiniteNumber(coordinateAbsLimit) || coordinateAbsLimit <= 0) {
+    return createEmptyGeometry(width, height);
+  }
+  const logGuard = createGuardLogger();
   const toCoordinate = (time: number, price: number) => projectPointSafely(args.toCoordinate, time, price, coordinateAbsLimit);
 
   const trendlineShapes: OverlayLineGeometry[] = [];
@@ -213,10 +231,16 @@ export function buildDrawingOverlayGeometry(args: BuildDrawingOverlayGeometryArg
     if (!shape.visible) continue;
     const start = toCoordinate(shape.startTime, shape.startPrice);
     const end = toCoordinate(shape.endTime, shape.endPrice);
-    if (!start || !end) continue;
+    if (!start || !end) {
+      logGuard(`skip trendline "${shape.id}" due to invalid projected anchor`);
+      continue;
+    }
 
     const safeShape = toSafeLineGeometry(shape.id, start, end, coordinateAbsLimit);
-    if (!safeShape) continue;
+    if (!safeShape) {
+      logGuard(`skip trendline "${shape.id}" due to invalid geometry`);
+      continue;
+    }
 
     trendlineShapes.push(safeShape);
   }
@@ -226,19 +250,31 @@ export function buildDrawingOverlayGeometry(args: BuildDrawingOverlayGeometryArg
     if (!shape.visible) continue;
     const start = toCoordinate(shape.startTime, shape.startPrice);
     const end = toCoordinate(shape.endTime, shape.endPrice);
-    if (!start || !end) continue;
+    if (!start || !end) {
+      logGuard(`skip ray "${shape.id}" due to invalid projected anchor`);
+      continue;
+    }
 
     const dx = end.x - start.x;
     const dy = end.y - start.y;
     const length = Math.hypot(dx, dy);
-    if (!isFiniteNumber(length) || length <= MIN_RAY_VECTOR_LENGTH) continue;
+    if (!isFiniteNumber(length) || length <= MIN_RAY_VECTOR_LENGTH) {
+      logGuard(`skip ray "${shape.id}" due to degenerate vector`);
+      continue;
+    }
 
     const extendDistance = Math.max(width, height) * RAY_EXTENSION_MULTIPLIER;
-    if (!isFiniteNumber(extendDistance) || extendDistance <= 0) continue;
+    if (!isFiniteNumber(extendDistance) || extendDistance <= 0) {
+      logGuard(`skip ray "${shape.id}" due to invalid extension distance`);
+      continue;
+    }
 
     const unitX = dx / length;
     const unitY = dy / length;
-    if (!isFiniteNumber(unitX) || !isFiniteNumber(unitY)) continue;
+    if (!isFiniteNumber(unitX) || !isFiniteNumber(unitY)) {
+      logGuard(`skip ray "${shape.id}" due to invalid direction unit vector`);
+      continue;
+    }
 
     const safeShape = toSafeLineGeometry(
       shape.id,
@@ -249,7 +285,10 @@ export function buildDrawingOverlayGeometry(args: BuildDrawingOverlayGeometryArg
       },
       coordinateAbsLimit,
     );
-    if (!safeShape) continue;
+    if (!safeShape) {
+      logGuard(`skip ray "${shape.id}" due to invalid extended geometry`);
+      continue;
+    }
 
     rayShapes.push(safeShape);
   }
@@ -259,10 +298,16 @@ export function buildDrawingOverlayGeometry(args: BuildDrawingOverlayGeometryArg
     if (!shape.visible) continue;
     const start = toCoordinate(shape.startTime, shape.startPrice);
     const end = toCoordinate(shape.endTime, shape.endPrice);
-    if (!start || !end) continue;
+    if (!start || !end) {
+      logGuard(`skip rectangle "${shape.id}" due to invalid projected anchor`);
+      continue;
+    }
 
     const safeShape = toSafeRectangleGeometry(shape.id, start, end, coordinateAbsLimit);
-    if (!safeShape) continue;
+    if (!safeShape) {
+      logGuard(`skip rectangle "${shape.id}" due to invalid geometry`);
+      continue;
+    }
 
     rectangleShapes.push(safeShape);
   }
@@ -271,10 +316,16 @@ export function buildDrawingOverlayGeometry(args: BuildDrawingOverlayGeometryArg
   for (const note of args.notes) {
     if (!note.visible) continue;
     const point = toCoordinate(note.time, note.price);
-    if (!point) continue;
+    if (!point) {
+      logGuard(`skip note "${note.id}" due to invalid projected anchor`);
+      continue;
+    }
 
     const safeShape = toSafeNoteGeometry(note.id, note.text, point, coordinateAbsLimit);
-    if (!safeShape) continue;
+    if (!safeShape) {
+      logGuard(`skip note "${note.id}" due to invalid geometry`);
+      continue;
+    }
 
     noteShapes.push(safeShape);
   }

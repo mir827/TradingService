@@ -147,6 +147,7 @@ import {
   type CrosshairInspectorIndicatorInput,
 } from './lib/crosshairInspector';
 import { buildDrawingOverlayGeometry } from './lib/drawingOverlay';
+import { findProjectedDrawingHit } from './lib/drawingSelection';
 import { snapToNearestCandleAnchor } from './lib/drawingMagnet';
 
 type SymbolItem = {
@@ -536,6 +537,11 @@ type NoteState = DrawingFlagState & {
 type ToolKey = 'cursor' | 'crosshair' | 'vertical' | 'horizontal' | 'trendline' | 'ray' | 'rectangle' | 'note';
 type DrawingKind = 'horizontal' | 'vertical' | 'trendline' | 'ray' | 'rectangle' | 'note';
 type PendingShapeTool = 'trendline' | 'ray' | 'rectangle';
+type PendingShapeStart = {
+  tool: PendingShapeTool;
+  time: UTCTimestamp;
+  price: number;
+};
 type DrawingPayloadItem =
   | { id: string; type: 'horizontal'; price: number; visible: boolean; locked: boolean }
   | { id: string; type: 'vertical'; time: number; visible: boolean; locked: boolean }
@@ -711,6 +717,7 @@ const HOVER_TOOLTIP_HEIGHT = 174;
 const HOVER_TOOLTIP_MARGIN = 14;
 const DRAWING_HIT_TOLERANCE_PX = 8;
 const NOTE_HIT_RADIUS_PX = 14;
+const DRAWING_GUARD_LOG_LIMIT = 20;
 const INDICATOR_PREFS_VERSION = 2;
 const CHART_HISTORY_LIMIT = 100;
 const TOPBAR_HEIGHT_PX = 52;
@@ -769,42 +776,6 @@ const EMPTY_TIME_VALUE_LOOKUP = new Map<number, number>();
 
 function toTimestampValue(value: number) {
   return Math.max(1, Math.floor(value)) as UTCTimestamp;
-}
-
-function pointDistance(x1: number, y1: number, x2: number, y2: number) {
-  return Math.hypot(x1 - x2, y1 - y2);
-}
-
-function distanceToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number) {
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const lengthSquared = dx * dx + dy * dy;
-
-  if (lengthSquared <= 1e-9) {
-    return pointDistance(px, py, x1, y1);
-  }
-
-  const projected = ((px - x1) * dx + (py - y1) * dy) / lengthSquared;
-  const t = Math.min(1, Math.max(0, projected));
-  const nearestX = x1 + dx * t;
-  const nearestY = y1 + dy * t;
-  return pointDistance(px, py, nearestX, nearestY);
-}
-
-function distanceToRay(px: number, py: number, x1: number, y1: number, x2: number, y2: number) {
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const lengthSquared = dx * dx + dy * dy;
-
-  if (lengthSquared <= 1e-9) {
-    return pointDistance(px, py, x1, y1);
-  }
-
-  const projected = ((px - x1) * dx + (py - y1) * dy) / lengthSquared;
-  const t = Math.max(0, projected);
-  const nearestX = x1 + dx * t;
-  const nearestY = y1 + dy * t;
-  return pointDistance(px, py, nearestX, nearestY);
 }
 
 function cloneChartHistorySnapshot(snapshot: ChartHistorySnapshot): ChartHistorySnapshot {
@@ -1375,8 +1346,10 @@ function App() {
   const verticalLineNodesRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const dragStateRef = useRef<DragState | null>(null);
   const dragHistoryStartRef = useRef<ChartHistorySnapshot | null>(null);
+  const pendingShapeStartRef = useRef<PendingShapeStart | null>(null);
   const historyRef = useRef(createUndoRedoHistory<ChartHistorySnapshot>({ limit: CHART_HISTORY_LIMIT }));
   const historyApplyingRef = useRef(false);
+  const drawingGuardLogCountRef = useRef(0);
   const selectedSymbolRef = useRef('BTCUSDT');
   const selectedIntervalRef = useRef('60');
   const watchlistAlertCheckInFlightRef = useRef(false);
@@ -1463,11 +1436,7 @@ function App() {
   const [notes, setNotes] = useState<NoteState[]>([]);
   const [isDraggingDrawing, setIsDraggingDrawing] = useState(false);
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
-  const [pendingShapeStart, setPendingShapeStart] = useState<{
-    tool: PendingShapeTool;
-    time: UTCTimestamp;
-    price: number;
-  } | null>(null);
+  const [pendingShapeStart, setPendingShapeStart] = useState<PendingShapeStart | null>(null);
   const [overlayTick, setOverlayTick] = useState(0);
   const [chartReady, setChartReady] = useState(false);
   const [alertRules, setAlertRules] = useState<AlertRule[]>([]);
@@ -1527,6 +1496,16 @@ function App() {
     if (!replayMode) return candles;
     return candles.slice(0, replayProgress.visibleBars);
   }, [candles, replayMode, replayProgress.visibleBars]);
+  const updatePendingShapeStart = useCallback((next: PendingShapeStart | null) => {
+    pendingShapeStartRef.current = next;
+    setPendingShapeStart(next);
+  }, []);
+  const logDrawingGuard = useCallback((message: string) => {
+    if (drawingGuardLogCountRef.current >= DRAWING_GUARD_LOG_LIMIT) return;
+    drawingGuardLogCountRef.current += 1;
+    if (typeof console === 'undefined' || typeof console.warn !== 'function') return;
+    console.warn(`[drawings] ${message}`);
+  }, []);
 
   useEffect(() => {
     activeToolRef.current = activeTool;
@@ -1539,6 +1518,10 @@ function App() {
   useEffect(() => {
     activeCandlesRef.current = activeCandles;
   }, [activeCandles]);
+
+  useEffect(() => {
+    pendingShapeStartRef.current = pendingShapeStart;
+  }, [pendingShapeStart]);
 
   useEffect(() => {
     selectedSymbolRef.current = selectedSymbol;
@@ -1589,9 +1572,9 @@ function App() {
 
   useEffect(() => {
     if (activeTool !== 'trendline' && activeTool !== 'ray' && activeTool !== 'rectangle') {
-      setPendingShapeStart(null);
+      updatePendingShapeStart(null);
     }
-  }, [activeTool]);
+  }, [activeTool, updatePendingShapeStart]);
 
   useEffect(() => {
     if (activeTool !== 'cursor' && dragStateRef.current) {
@@ -2490,7 +2473,7 @@ function App() {
       setCompareOverlays(nextCompareOverlays);
       setCompareScaleMode(normalizeCompareScaleMode(nextSnapshot.compareScaleMode));
       setChartLayoutMode(nextSnapshot.chartLayoutMode);
-      setPendingShapeStart(null);
+      updatePendingShapeStart(null);
       setSelectedDrawingId(null);
       dragStateRef.current = null;
       setIsDraggingDrawing(false);
@@ -2532,6 +2515,7 @@ function App() {
       snapshotRectangles,
       snapshotTrendlines,
       snapshotVerticalLines,
+      updatePendingShapeStart,
     ],
   );
 
@@ -2877,12 +2861,22 @@ function App() {
       const nextTool = activeToolRef.current;
       const magnetOn = magnetEnabledRef.current;
       const magnetCandles = activeCandlesRef.current;
+      const toSafeClickPrice = (point: MouseEventParams<Time>['point']) => {
+        if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return null;
+
+        try {
+          const rawPrice = candleSeries.coordinateToPrice(point.y);
+          return typeof rawPrice === 'number' && Number.isFinite(rawPrice) ? rawPrice : null;
+        } catch {
+          return null;
+        }
+      };
 
       if (nextTool === 'horizontal') {
         if (!param.point) return;
 
-        const price = candleSeries.coordinateToPrice(param.point.y);
-        if (typeof price !== 'number' || !Number.isFinite(price)) return;
+        const price = toSafeClickPrice(param.point);
+        if (price === null) return;
 
         const normalizedPrice =
           typeof param.time === 'number'
@@ -2955,13 +2949,13 @@ function App() {
       if (nextTool === 'trendline' || nextTool === 'ray' || nextTool === 'rectangle') {
         if (!param.point || typeof param.time !== 'number') return;
 
-        const price = candleSeries.coordinateToPrice(param.point.y);
-        if (typeof price !== 'number' || !Number.isFinite(price)) return;
+        const price = toSafeClickPrice(param.point);
+        if (price === null) return;
 
         const snappedPoint = toNormalizedMagnetPoint(param.time, price, magnetOn, magnetCandles);
         const timestamp = snappedPoint.time;
         const normalizedPrice = snappedPoint.price;
-        const pending = pendingShapeStart;
+        const pending = pendingShapeStartRef.current;
 
         if (pending?.tool === nextTool) {
           const samePoint =
@@ -3045,11 +3039,11 @@ function App() {
           }
 
           recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
-          setPendingShapeStart(null);
+          updatePendingShapeStart(null);
           return;
         }
 
-        setPendingShapeStart({
+        updatePendingShapeStart({
           tool: nextTool,
           time: timestamp,
           price: normalizedPrice,
@@ -3060,8 +3054,8 @@ function App() {
       if (nextTool !== 'note') return;
       if (!param.point || typeof param.time !== 'number') return;
 
-      const price = candleSeries.coordinateToPrice(param.point.y);
-      if (typeof price !== 'number' || !Number.isFinite(price)) return;
+      const price = toSafeClickPrice(param.point);
+      if (price === null) return;
 
       const textInput = window.prompt('노트 내용을 입력하세요');
       if (textInput === null) return;
@@ -3165,7 +3159,7 @@ function App() {
       setRectangles([]);
       setNotes([]);
       setIsDraggingDrawing(false);
-      setPendingShapeStart(null);
+      updatePendingShapeStart(null);
       setSelectedDrawingId(null);
       setChartReady(false);
       setCrosshairInspectorTime(null);
@@ -3173,7 +3167,6 @@ function App() {
   }, [
     captureChartHistorySnapshot,
     clearHoveredCandle,
-    pendingShapeStart,
     persistDrawings,
     refreshDrawingOverlay,
     recordHistoryTransition,
@@ -3190,6 +3183,7 @@ function App() {
     snapshotVerticalLines,
     syncVisibleLogicalRange,
     syncVerticalLinePositions,
+    updatePendingShapeStart,
   ]);
 
   useEffect(() => {
@@ -3317,7 +3311,7 @@ function App() {
       renderRays(loaded.rays);
       renderRectangles(loaded.rectangles);
       renderNotes(loaded.notes);
-      setPendingShapeStart(null);
+      updatePendingShapeStart(null);
       setSelectedDrawingId(null);
       dragHistoryStartRef.current = null;
       historyRef.current.clear();
@@ -3341,6 +3335,7 @@ function App() {
     selectedInterval,
     selectedSymbol,
     syncHistoryState,
+    updatePendingShapeStart,
   ]);
 
   useEffect(() => {
@@ -5882,12 +5877,14 @@ function App() {
         Math.min(coordinateAbsLimit, Math.max(-coordinateAbsLimit, value));
 
       let best: DrawingHit | null = null;
+      let bestScore = Number.POSITIVE_INFINITY;
       const upsertHit = (id: string, kind: DrawingKind, distance: number) => {
         if (!Number.isFinite(distance) || distance > DRAWING_HIT_TOLERANCE_PX) return;
         const score = distance + (id === selectedDrawingId ? -0.75 : 0);
 
         if (!best || score < best.score) {
           best = { id, kind, distance, score };
+          bestScore = score;
         }
       };
 
@@ -5915,13 +5912,13 @@ function App() {
         upsertHit(line.id, 'vertical', Math.abs(x - clampCoordinate(Number(xCoord))));
       }
 
-      const toCoordinate = (time: UTCTimestamp, price: number) => {
-        if (!Number.isFinite(Number(time)) || !Number.isFinite(price)) return null;
+      const toCoordinate = (time: number, price: number) => {
+        if (!Number.isFinite(time) || !Number.isFinite(price)) return null;
 
         let xCoord: unknown;
         let yCoord: unknown;
         try {
-          xCoord = chart.timeScale().timeToCoordinate(time as Time);
+          xCoord = chart.timeScale().timeToCoordinate(toTimestampValue(time) as Time);
           yCoord = series.priceToCoordinate(price);
         } catch {
           return null;
@@ -5929,63 +5926,33 @@ function App() {
 
         if (xCoord === null || yCoord === null) return null;
         if (!Number.isFinite(xCoord) || !Number.isFinite(yCoord)) return null;
-        return { x: clampCoordinate(Number(xCoord)), y: clampCoordinate(Number(yCoord)) };
+        return { x: Number(xCoord), y: Number(yCoord) };
       };
 
-      for (const line of trendlinesRef.current) {
-        if (!line.visible) continue;
-        const start = toCoordinate(line.startTime, line.startPrice);
-        const end = toCoordinate(line.endTime, line.endPrice);
-        if (!start || !end) continue;
-
-        upsertHit(line.id, 'trendline', distanceToSegment(x, y, start.x, start.y, end.x, end.y));
-      }
-
-      for (const line of raysRef.current) {
-        if (!line.visible) continue;
-        const start = toCoordinate(line.startTime, line.startPrice);
-        const end = toCoordinate(line.endTime, line.endPrice);
-        if (!start || !end) continue;
-
-        upsertHit(line.id, 'ray', distanceToRay(x, y, start.x, start.y, end.x, end.y));
-      }
-
-      for (const shape of rectanglesRef.current) {
-        if (!shape.visible) continue;
-        const start = toCoordinate(shape.startTime, shape.startPrice);
-        const end = toCoordinate(shape.endTime, shape.endPrice);
-        if (!start || !end) continue;
-
-        const left = Math.min(start.x, end.x);
-        const right = Math.max(start.x, end.x);
-        const top = Math.min(start.y, end.y);
-        const bottom = Math.max(start.y, end.y);
-        const withinX = x >= left - DRAWING_HIT_TOLERANCE_PX && x <= right + DRAWING_HIT_TOLERANCE_PX;
-        const withinY = y >= top - DRAWING_HIT_TOLERANCE_PX && y <= bottom + DRAWING_HIT_TOLERANCE_PX;
-        if (!withinX || !withinY) continue;
-
-        const edgeDistance = Math.min(
-          Math.abs(x - left),
-          Math.abs(x - right),
-          Math.abs(y - top),
-          Math.abs(y - bottom),
-        );
-        upsertHit(shape.id, 'rectangle', edgeDistance);
-      }
-
-      for (const note of notesRef.current) {
-        if (!note.visible) continue;
-        const point = toCoordinate(note.time, note.price);
-        if (!point) continue;
-        const distance = pointDistance(x, y, point.x, point.y);
-        if (distance <= NOTE_HIT_RADIUS_PX) {
-          upsertHit(note.id, 'note', distance);
+      const shapeHit = findProjectedDrawingHit({
+        x,
+        y,
+        selectedDrawingId,
+        trendlines: trendlinesRef.current,
+        rays: raysRef.current,
+        rectangles: rectanglesRef.current,
+        notes: notesRef.current,
+        hitTolerancePx: DRAWING_HIT_TOLERANCE_PX,
+        noteHitRadiusPx: NOTE_HIT_RADIUS_PX,
+        coordinateAbsLimit,
+        project: toCoordinate,
+        onGuardMessage: logDrawingGuard,
+      });
+      if (shapeHit) {
+        if (shapeHit.score < bestScore) {
+          best = shapeHit;
+          bestScore = shapeHit.score;
         }
       }
 
       return best;
     },
-    [selectedDrawingId],
+    [logDrawingGuard, selectedDrawingId],
   );
 
   const startDragState = useCallback((hit: DrawingHit, pointerId: number, time: UTCTimestamp, price: number): DragState | null => {
@@ -6182,19 +6149,46 @@ function App() {
     [updateDrawingFlagsById],
   );
 
+  const releasePointerCaptureSafely = useCallback(
+    (target: HTMLDivElement, pointerId: number) => {
+      try {
+        if (target.hasPointerCapture(pointerId)) {
+          target.releasePointerCapture(pointerId);
+        }
+      } catch {
+        logDrawingGuard(`pointer capture release skipped (pointerId=${pointerId})`);
+      }
+    },
+    [logDrawingGuard],
+  );
+
+  const setPointerCaptureSafely = useCallback(
+    (target: HTMLDivElement, pointerId: number) => {
+      try {
+        target.setPointerCapture(pointerId);
+        return true;
+      } catch {
+        logDrawingGuard(`pointer capture set failed (pointerId=${pointerId})`);
+        return false;
+      }
+    },
+    [logDrawingGuard],
+  );
+
   const resetDragInteraction = useCallback((target?: HTMLDivElement | null) => {
     const activeDrag = dragStateRef.current;
-    if (activeDrag && target && target.hasPointerCapture(activeDrag.pointerId)) {
-      target.releasePointerCapture(activeDrag.pointerId);
+    if (activeDrag && target) {
+      releasePointerCaptureSafely(target, activeDrag.pointerId);
     }
 
     dragStateRef.current = null;
     dragHistoryStartRef.current = null;
     setIsDraggingDrawing(false);
-  }, []);
+  }, [releasePointerCaptureSafely]);
 
   const handleChartPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (!event.isPrimary) return;
       if (activeToolRef.current !== 'cursor') {
         resetDragInteraction(event.currentTarget);
         return;
@@ -6236,7 +6230,10 @@ function App() {
       dragStateRef.current = dragState;
       dragHistoryStartRef.current = captureChartHistorySnapshot();
       setIsDraggingDrawing(true);
-      event.currentTarget.setPointerCapture(event.pointerId);
+      if (!setPointerCaptureSafely(event.currentTarget, event.pointerId)) {
+        resetDragInteraction(event.currentTarget);
+        return;
+      }
       event.preventDefault();
     },
     [
@@ -6245,6 +6242,7 @@ function App() {
       getLocalChartPoint,
       isDrawingLocked,
       resetDragInteraction,
+      setPointerCaptureSafely,
       startDragState,
       toTimePriceFromCoordinates,
     ],
@@ -6252,6 +6250,7 @@ function App() {
 
   const handleChartPointerMove = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (!event.isPrimary) return;
       const dragState = dragStateRef.current;
       if (!dragState || dragState.pointerId !== event.pointerId) return;
 
@@ -6436,12 +6435,11 @@ function App() {
 
   const handleChartPointerUpOrCancel = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (!event.isPrimary) return;
       const dragState = dragStateRef.current;
       if (!dragState || dragState.pointerId !== event.pointerId) return;
 
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }
+      releasePointerCaptureSafely(event.currentTarget, event.pointerId);
 
       const beforeSnapshot = dragHistoryStartRef.current;
       dragHistoryStartRef.current = null;
@@ -6490,6 +6488,7 @@ function App() {
       snapshotRectangles,
       snapshotTrendlines,
       snapshotVerticalLines,
+      releasePointerCaptureSafely,
     ],
   );
 
@@ -6774,10 +6773,10 @@ function App() {
     setNotes([]);
     renderVerticalLines([]);
     setSelectedDrawingId(null);
-    setPendingShapeStart(null);
+    updatePendingShapeStart(null);
     void persistDrawings(selectedSymbolRef.current, selectedIntervalRef.current, [], [], [], [], [], []);
     recordHistoryTransition(beforeSnapshot, captureChartHistorySnapshot());
-  }, [captureChartHistorySnapshot, persistDrawings, recordHistoryTransition, renderVerticalLines]);
+  }, [captureChartHistorySnapshot, persistDrawings, recordHistoryTransition, renderVerticalLines, updatePendingShapeStart]);
 
   const deleteDrawingById = useCallback((id: string, options?: { allowLocked?: boolean }) => {
     if (!options?.allowLocked && isDrawingLocked(id)) {
@@ -6927,7 +6926,7 @@ function App() {
       if (event.key === 'Escape') {
         event.preventDefault();
         setActiveTool('cursor');
-        setPendingShapeStart(null);
+        updatePendingShapeStart(null);
         return;
       }
 
@@ -6942,7 +6941,7 @@ function App() {
     return () => {
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [deleteSelectedDrawing, redoHistory, selectedDrawingId, switchInterval, undoHistory]);
+  }, [deleteSelectedDrawing, redoHistory, selectedDrawingId, switchInterval, undoHistory, updatePendingShapeStart]);
 
   const toggleIndicator = useCallback((key: IndicatorKey) => {
     const beforeSnapshot = captureChartHistorySnapshot();
