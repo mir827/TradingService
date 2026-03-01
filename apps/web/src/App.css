@@ -25,7 +25,7 @@ select {
 .tv-topbar {
   border-bottom: 1px solid #2b2f3a;
   display: grid;
-  grid-template-columns: 160px minmax(0, 1fr) 280px;
+  grid-template-columns: 188px minmax(0, 1fr) 280px;
   align-items: center;
   padding: 0 14px;
   gap: 12px;
@@ -40,11 +40,61 @@ select {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
   font-weight: 700;
   letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+
+.brand-tm {
+  font-size: 10px;
+  color: #8fa3c4;
+  letter-spacing: 0.04em;
+}
+
+.brand-mark {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+}
+
+.brand-mark-frame {
+  fill: #111827;
+  stroke: #35547b;
+  stroke-width: 1.1;
+}
+
+.brand-mark-grid {
+  stroke: #25344e;
+  stroke-width: 0.8;
+}
+
+.brand-mark-wick-up,
+.brand-mark-wick-down {
+  stroke: #8fa0ba;
+  stroke-width: 0.9;
+}
+
+.brand-mark-candle-up {
+  fill: #28a79a;
+}
+
+.brand-mark-candle-down {
+  fill: #de6d6d;
+}
+
+.brand-mark-trend {
+  fill: none;
+  stroke: #7cb0ff;
+  stroke-width: 1.1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .top-controls {
@@ -190,6 +240,16 @@ select {
   background: #2a3650;
   border-color: #3d5886;
   color: #d8e8ff;
+}
+
+.left-toolbar button.magnet-toggle {
+  margin-top: 2px;
+}
+
+.left-toolbar button.magnet-toggle.active {
+  background: #1d3a2b;
+  border-color: #2f7a58;
+  color: #b8f0d3;
 }
 
 .center-panel {
@@ -786,6 +846,14 @@ select {
 .status-chip {
   color: #ffcc66;
   font-size: 11px;
+}
+
+.magnet-status-chip.on {
+  color: #9be9c4;
+}
+
+.magnet-status-chip.off {
+  color: #9ca6b8;
 }
 
 .replay-status-chip {
@@ -2960,7 +3028,7 @@ select {
 
 @media (max-width: 1380px) {
   .tv-topbar {
-    grid-template-columns: 140px minmax(0, 1fr) 230px;
+    grid-template-columns: 168px minmax(0, 1fr) 230px;
   }
 
   .top-actions {

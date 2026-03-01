@@ -146,6 +146,7 @@ import {
   type CrosshairInspectorIndicatorInput,
 } from './lib/crosshairInspector';
 import { buildDrawingOverlayGeometry } from './lib/drawingOverlay';
+import { snapToNearestCandleAnchor } from './lib/drawingMagnet';
 
 type SymbolItem = {
   symbol: string;
@@ -531,7 +532,7 @@ type NoteState = DrawingFlagState & {
   price: number;
   text: string;
 };
-type ToolKey = 'cursor' | 'crosshair' | 'vertical' | 'horizontal' | 'trendline' | 'ray' | 'rectangle' | 'note' | 'magnet';
+type ToolKey = 'cursor' | 'crosshair' | 'vertical' | 'horizontal' | 'trendline' | 'ray' | 'rectangle' | 'note';
 type DrawingKind = 'horizontal' | 'vertical' | 'trendline' | 'ray' | 'rectangle' | 'note';
 type PendingShapeTool = 'trendline' | 'ray' | 'rectangle';
 type DrawingPayloadItem =
@@ -663,7 +664,6 @@ const leftTools: Array<{ key: ToolKey; icon: string; label: string }> = [
   { key: 'ray', icon: 'Y', label: '레이' },
   { key: 'rectangle', icon: 'R', label: '사각형' },
   { key: 'note', icon: 'N', label: '노트' },
-  { key: 'magnet', icon: '🧲', label: '자석' },
 ];
 const topActions: Array<{ key: TopActionKey; label: string }> = [
   { key: 'indicator', label: '지표' },
@@ -1079,6 +1079,38 @@ function normalizeLinePrice(price: number) {
   return Number(price.toFixed(Math.abs(price) < 10 ? 4 : 2));
 }
 
+function toNormalizedMagnetPoint(time: number, price: number, magnetEnabled: boolean, candles: Candle[]) {
+  const normalizedTime = toTimestampValue(time);
+  const normalizedPrice = normalizeLinePrice(price);
+
+  if (!magnetEnabled || candles.length === 0) {
+    return {
+      time: normalizedTime,
+      price: normalizedPrice,
+    };
+  }
+
+  const snapped = snapToNearestCandleAnchor(
+    {
+      time: normalizedTime,
+      price: normalizedPrice,
+    },
+    candles,
+  );
+
+  if (!snapped) {
+    return {
+      time: normalizedTime,
+      price: normalizedPrice,
+    };
+  }
+
+  return {
+    time: toTimestampValue(snapped.time),
+    price: normalizeLinePrice(snapped.price),
+  };
+}
+
 function normalizeDrawingFlag(value: unknown, fallback: boolean) {
   return typeof value === 'boolean' ? value : fallback;
 }
@@ -1210,6 +1242,22 @@ function MiniLineChart({
   );
 }
 
+function TradingServiceMark() {
+  return (
+    <svg viewBox="0 0 24 24" className="brand-mark" aria-hidden="true">
+      <rect x="1.25" y="1.25" width="21.5" height="21.5" rx="6" className="brand-mark-frame" />
+      <line x1="6" y1="7" x2="18" y2="7" className="brand-mark-grid" />
+      <line x1="6" y1="12" x2="18" y2="12" className="brand-mark-grid" />
+      <line x1="6" y1="17" x2="18" y2="17" className="brand-mark-grid" />
+      <line x1="8" y1="7.8" x2="8" y2="15.9" className="brand-mark-wick-up" />
+      <rect x="6.8" y="10" width="2.4" height="3.8" rx="0.8" className="brand-mark-candle-up" />
+      <line x1="15.2" y1="8.2" x2="15.2" y2="16.8" className="brand-mark-wick-down" />
+      <rect x="14" y="12.2" width="2.4" height="3.2" rx="0.8" className="brand-mark-candle-down" />
+      <path d="M5.6 15.2L10 11.4L12.6 12.8L18.4 8.6" className="brand-mark-trend" />
+    </svg>
+  );
+}
+
 function formatIndicatorLegend(config: IndicatorConfig, settings: IndicatorSettings) {
   if (config.key === 'rsi') {
     return `RSI ${settings.rsi.period}`;
@@ -1276,6 +1324,8 @@ function App() {
   const chartRangeSyncStateRef = useRef(createChartRangeSyncState());
   const candleMapRef = useRef<Map<number, Candle>>(new Map());
   const activeToolRef = useRef<ToolKey>('cursor');
+  const magnetEnabledRef = useRef(false);
+  const activeCandlesRef = useRef<Candle[]>([]);
   const horizontalLinesRef = useRef<HorizontalLine[]>([]);
   const verticalLinesRef = useRef<VerticalLineState[]>([]);
   const trendlinesRef = useRef<TrendlineState[]>([]);
@@ -1305,6 +1355,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
 
   const [activeTool, setActiveTool] = useState<ToolKey>('cursor');
+  const [magnetEnabled, setMagnetEnabled] = useState(false);
   const [watchTab, setWatchTab] = useState<WatchTab>('watchlist');
   const [watchQuery, setWatchQuery] = useState('');
   const [watchSortKey, setWatchSortKey] = useState<WatchSortKey>(() => getStoredWatchPrefs().watchSortKey ?? 'symbol');
@@ -1433,6 +1484,14 @@ function App() {
   useEffect(() => {
     activeToolRef.current = activeTool;
   }, [activeTool]);
+
+  useEffect(() => {
+    magnetEnabledRef.current = magnetEnabled;
+  }, [magnetEnabled]);
+
+  useEffect(() => {
+    activeCandlesRef.current = activeCandles;
+  }, [activeCandles]);
 
   useEffect(() => {
     selectedSymbolRef.current = selectedSymbol;
@@ -2749,6 +2808,8 @@ function App() {
 
     const onChartClick = (param: MouseEventParams<Time>) => {
       const nextTool = activeToolRef.current;
+      const magnetOn = magnetEnabledRef.current;
+      const magnetCandles = activeCandlesRef.current;
 
       if (nextTool === 'horizontal') {
         if (!param.point) return;
@@ -2756,7 +2817,10 @@ function App() {
         const price = candleSeries.coordinateToPrice(param.point.y);
         if (typeof price !== 'number' || !Number.isFinite(price)) return;
 
-        const normalizedPrice = normalizeLinePrice(price);
+        const normalizedPrice =
+          typeof param.time === 'number'
+            ? toNormalizedMagnetPoint(param.time, price, magnetOn, magnetCandles).price
+            : normalizeLinePrice(price);
         const duplicated = horizontalLinesRef.current.some((item) => Math.abs(item.price - normalizedPrice) < 0.0001);
         if (duplicated) return;
         const beforeSnapshot = captureChartHistorySnapshot();
@@ -2797,7 +2861,7 @@ function App() {
       if (nextTool === 'vertical') {
         if (typeof param.time !== 'number') return;
 
-        const timestamp = Math.floor(param.time) as UTCTimestamp;
+        const timestamp = toNormalizedMagnetPoint(param.time, 0, magnetOn, magnetCandles).time;
         const duplicated = verticalLinesRef.current.some((item) => Number(item.time) === Number(timestamp));
         if (duplicated) return;
         const beforeSnapshot = captureChartHistorySnapshot();
@@ -2827,8 +2891,9 @@ function App() {
         const price = candleSeries.coordinateToPrice(param.point.y);
         if (typeof price !== 'number' || !Number.isFinite(price)) return;
 
-        const timestamp = Math.floor(param.time) as UTCTimestamp;
-        const normalizedPrice = normalizeLinePrice(price);
+        const snappedPoint = toNormalizedMagnetPoint(param.time, price, magnetOn, magnetCandles);
+        const timestamp = snappedPoint.time;
+        const normalizedPrice = snappedPoint.price;
         const pending = pendingShapeStart;
 
         if (pending?.tool === nextTool) {
@@ -2938,13 +3003,13 @@ function App() {
       if (!text) return;
       const beforeSnapshot = captureChartHistorySnapshot();
 
-      const timestamp = Math.floor(param.time) as UTCTimestamp;
+      const snappedPoint = toNormalizedMagnetPoint(param.time, price, magnetOn, magnetCandles);
       const nextNotes = [
         ...snapshotNotes(),
         {
           id: createNoteId(),
-          time: timestamp,
-          price: normalizeLinePrice(price),
+          time: snappedPoint.time,
+          price: snappedPoint.price,
           text,
           visible: true,
           locked: false,
@@ -5711,6 +5776,11 @@ function App() {
     };
   }, []);
 
+  const toMagnetSnappedPoint = useCallback(
+    (time: number, price: number) => toNormalizedMagnetPoint(time, price, magnetEnabled, activeCandles),
+    [activeCandles, magnetEnabled],
+  );
+
   const findDrawingAtPoint = useCallback(
     (x: number, y: number): DrawingHit | null => {
       const chart = chartRef.current;
@@ -6055,7 +6125,8 @@ function App() {
       let moved = false;
 
       if (dragState.kind === 'horizontal') {
-        const nextPrice = normalizeLinePrice(dragState.originPrice + (mapped.price - dragState.startPrice));
+        const rawPrice = dragState.originPrice + (mapped.price - dragState.startPrice);
+        const nextPrice = toMagnetSnappedPoint(mapped.time, rawPrice).price;
         const nextLines = horizontalLinesRef.current.map((line) =>
           line.id === dragState.id
             ? { id: line.id, price: nextPrice, visible: line.visible, locked: line.locked }
@@ -6069,7 +6140,8 @@ function App() {
 
       if (dragState.kind === 'vertical') {
         const deltaTime = Number(mapped.time) - Number(dragState.startTime);
-        const nextTime = toTimestampValue(Number(dragState.originTime) + deltaTime);
+        const rawTime = Number(dragState.originTime) + deltaTime;
+        const nextTime = toMagnetSnappedPoint(rawTime, mapped.price).time;
         const nextLines = verticalLinesRef.current.map((line) =>
           line.id === dragState.id ? { ...line, time: nextTime } : line,
         );
@@ -6082,14 +6154,20 @@ function App() {
       if (dragState.kind === 'trendline') {
         const deltaTime = Number(mapped.time) - Number(dragState.startTime);
         const deltaPrice = mapped.price - dragState.startPrice;
+        const rawStartTime = Number(dragState.origin.startTime) + deltaTime;
+        const rawEndTime = Number(dragState.origin.endTime) + deltaTime;
+        const rawStartPrice = dragState.origin.startPrice + deltaPrice;
+        const rawEndPrice = dragState.origin.endPrice + deltaPrice;
+        const snappedStart = toMagnetSnappedPoint(rawStartTime, rawStartPrice);
+        const snappedEnd = toMagnetSnappedPoint(rawEndTime, rawEndPrice);
         const nextTrendlines = trendlinesRef.current.map((line) =>
           line.id === dragState.id
             ? {
                 ...line,
-                startTime: toTimestampValue(Number(dragState.origin.startTime) + deltaTime),
-                endTime: toTimestampValue(Number(dragState.origin.endTime) + deltaTime),
-                startPrice: normalizeLinePrice(dragState.origin.startPrice + deltaPrice),
-                endPrice: normalizeLinePrice(dragState.origin.endPrice + deltaPrice),
+                startTime: snappedStart.time,
+                endTime: snappedEnd.time,
+                startPrice: snappedStart.price,
+                endPrice: snappedEnd.price,
               }
             : line,
         );
@@ -6110,14 +6188,20 @@ function App() {
       if (dragState.kind === 'ray') {
         const deltaTime = Number(mapped.time) - Number(dragState.startTime);
         const deltaPrice = mapped.price - dragState.startPrice;
+        const rawStartTime = Number(dragState.origin.startTime) + deltaTime;
+        const rawEndTime = Number(dragState.origin.endTime) + deltaTime;
+        const rawStartPrice = dragState.origin.startPrice + deltaPrice;
+        const rawEndPrice = dragState.origin.endPrice + deltaPrice;
+        const snappedStart = toMagnetSnappedPoint(rawStartTime, rawStartPrice);
+        const snappedEnd = toMagnetSnappedPoint(rawEndTime, rawEndPrice);
         const nextRays = raysRef.current.map((line) =>
           line.id === dragState.id
             ? {
                 ...line,
-                startTime: toTimestampValue(Number(dragState.origin.startTime) + deltaTime),
-                endTime: toTimestampValue(Number(dragState.origin.endTime) + deltaTime),
-                startPrice: normalizeLinePrice(dragState.origin.startPrice + deltaPrice),
-                endPrice: normalizeLinePrice(dragState.origin.endPrice + deltaPrice),
+                startTime: snappedStart.time,
+                endTime: snappedEnd.time,
+                startPrice: snappedStart.price,
+                endPrice: snappedEnd.price,
               }
             : line,
         );
@@ -6138,14 +6222,20 @@ function App() {
       if (dragState.kind === 'rectangle') {
         const deltaTime = Number(mapped.time) - Number(dragState.startTime);
         const deltaPrice = mapped.price - dragState.startPrice;
+        const rawStartTime = Number(dragState.origin.startTime) + deltaTime;
+        const rawEndTime = Number(dragState.origin.endTime) + deltaTime;
+        const rawStartPrice = dragState.origin.startPrice + deltaPrice;
+        const rawEndPrice = dragState.origin.endPrice + deltaPrice;
+        const snappedStart = toMagnetSnappedPoint(rawStartTime, rawStartPrice);
+        const snappedEnd = toMagnetSnappedPoint(rawEndTime, rawEndPrice);
         const nextRectangles = rectanglesRef.current.map((shape) =>
           shape.id === dragState.id
             ? {
                 ...shape,
-                startTime: toTimestampValue(Number(dragState.origin.startTime) + deltaTime),
-                endTime: toTimestampValue(Number(dragState.origin.endTime) + deltaTime),
-                startPrice: normalizeLinePrice(dragState.origin.startPrice + deltaPrice),
-                endPrice: normalizeLinePrice(dragState.origin.endPrice + deltaPrice),
+                startTime: snappedStart.time,
+                endTime: snappedEnd.time,
+                startPrice: snappedStart.price,
+                endPrice: snappedEnd.price,
               }
             : shape,
         );
@@ -6166,12 +6256,15 @@ function App() {
       if (dragState.kind === 'note') {
         const deltaTime = Number(mapped.time) - Number(dragState.startTime);
         const deltaPrice = mapped.price - dragState.startPrice;
+        const rawTime = Number(dragState.origin.time) + deltaTime;
+        const rawPrice = dragState.origin.price + deltaPrice;
+        const snapped = toMagnetSnappedPoint(rawTime, rawPrice);
         const nextNotes = notesRef.current.map((note) =>
           note.id === dragState.id
             ? {
                 ...note,
-                time: toTimestampValue(Number(dragState.origin.time) + deltaTime),
-                price: normalizeLinePrice(dragState.origin.price + deltaPrice),
+                time: snapped.time,
+                price: snapped.price,
               }
             : note,
         );
@@ -6197,6 +6290,7 @@ function App() {
       renderRectangles,
       renderTrendlines,
       renderVerticalLines,
+      toMagnetSnappedPoint,
       toTimePriceFromCoordinates,
     ],
   );
@@ -6682,6 +6776,12 @@ function App() {
       if (key === 'n') {
         event.preventDefault();
         setActiveTool('note');
+        return;
+      }
+
+      if (key === 'm') {
+        event.preventDefault();
+        setMagnetEnabled((previous) => !previous);
         return;
       }
 
@@ -7274,7 +7374,11 @@ function App() {
     <div className="tv-app">
       <header className="tv-topbar">
         <div className="brand-wrap">
-          <div className="brand">TradingService</div>
+          <TradingServiceMark />
+          <div className="brand">
+            <span>TradingService</span>
+            <span className="brand-tm">TM</span>
+          </div>
         </div>
 
         <div className="top-controls">
@@ -7359,6 +7463,7 @@ function App() {
           {leftTools.map((item) => (
             <button
               key={item.key}
+              type="button"
               className={item.key === activeTool ? 'active' : ''}
               onClick={() => setActiveTool(item.key)}
               title={item.label}
@@ -7366,6 +7471,15 @@ function App() {
               {item.icon}
             </button>
           ))}
+          <button
+            type="button"
+            className={magnetEnabled ? 'active magnet-toggle' : 'magnet-toggle'}
+            onClick={() => setMagnetEnabled((previous) => !previous)}
+            title={magnetEnabled ? '자석 스냅 ON' : '자석 스냅 OFF'}
+            aria-pressed={magnetEnabled}
+          >
+            🧲
+          </button>
         </aside>
 
         <section className="center-panel">
@@ -7801,8 +7915,11 @@ function App() {
             <span>{loading ? '데이터를 불러오는 중...' : '실시간 UI 프로토타입'}</span>
             {topActionFeedback ? <span className="status-chip">{topActionFeedback}</span> : null}
             {activeToolDescription ? <span className="status-chip">{activeToolDescription}</span> : null}
+            <span className={`status-chip magnet-status-chip ${magnetEnabled ? 'on' : 'off'}`}>
+              Magnet {magnetEnabled ? 'ON' : 'OFF'}
+            </span>
             {replayStatusText ? <span className="status-chip replay-status-chip">{replayStatusText}</span> : null}
-            <span className="status-chip">단축키 H/V/T/Y/R/N · Esc · Delete/Backspace · Ctrl/Cmd+Z · Ctrl/Cmd+Shift+Z</span>
+            <span className="status-chip">단축키 H/V/T/Y/R/N/M · Esc · Delete/Backspace · Ctrl/Cmd+Z · Ctrl/Cmd+Shift+Z</span>
             <div className="status-actions status-actions-history">
               <button className="status-button" type="button" onClick={undoHistory} disabled={!historyState.canUndo}>
                 Undo
