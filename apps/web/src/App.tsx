@@ -91,6 +91,7 @@ import { readUnifiedLayoutState, writeUnifiedLayoutState } from './lib/layoutPer
 import { createUndoRedoHistory, type UndoRedoState } from './lib/history';
 import { getFavoriteIntervalHotkeyIndex, isTypingInputTarget } from './lib/hotkeys';
 import { readIntervalFavorites, writeIntervalFavorites } from './lib/intervalFavorites';
+import { parsePineStrategyTesterDirectives } from './lib/pineStrategyDirectives';
 import {
   DEFAULT_PINE_SCRIPT_SOURCE,
   createPineScriptId,
@@ -106,6 +107,12 @@ import {
   type PineScript,
   type PineWorkspaceState,
 } from './lib/pineStorage';
+import {
+  readStrategyTesterForm,
+  writeStrategyTesterForm,
+  type StrategyTesterFormState,
+  type StrategyTesterLinkedScript,
+} from './lib/strategyTesterStorage';
 import {
   emitOpsErrorTelemetry,
   emitOpsRecoveryTelemetry,
@@ -352,27 +359,7 @@ type AlertAutoCheckPrefs = {
   intervalSec: AlertAutoCheckIntervalSec;
 };
 
-type StrategyFeeUnit = 'bps' | 'percent';
-type StrategySlippageMode = 'tick' | 'percent';
-type StrategyPositionSizeMode = 'fixed-percent' | 'fixed-qty';
-
-type StrategyTesterFormState = {
-  symbol: string;
-  interval: string;
-  limit: string;
-  initialCapital: string;
-  feeUnit: StrategyFeeUnit;
-  feeValue: string;
-  slippageMode: StrategySlippageMode;
-  slippageValue: string;
-  positionSizeMode: StrategyPositionSizeMode;
-  fixedPercent: string;
-  fixedQty: string;
-  fastPeriod: string;
-  slowPeriod: string;
-};
-
-type StrategyFormField = keyof StrategyTesterFormState;
+type StrategyFormField = Exclude<keyof StrategyTesterFormState, 'linkedScript'>;
 
 type StrategyBacktestSummary = {
   grossPnl?: number;
@@ -701,7 +688,6 @@ const apiBase = import.meta.env.VITE_API_BASE_URL ?? '';
 const WATCH_PREFS_STORAGE_KEY = 'tradingservice.watchprefs.v1';
 const ALERT_AUTO_CHECK_STORAGE_KEY = 'tradingservice.alerts.autocheck.v1';
 const INDICATOR_PREFS_STORAGE_KEY = 'tradingservice.indicators.v2';
-const STRATEGY_TESTER_STORAGE_KEY = 'tradingservice.strategytester.v1';
 const DEFAULT_WATCHLIST_NAME = 'default';
 const ALERT_EVENT_DEDUP_WINDOW_MS = 10_000;
 const ALERT_EVENT_MAX_ITEMS = 20;
@@ -718,21 +704,6 @@ const DRAWING_HIT_TOLERANCE_PX = 8;
 const NOTE_HIT_RADIUS_PX = 14;
 const INDICATOR_PREFS_VERSION = 2;
 const CHART_HISTORY_LIMIT = 100;
-const DEFAULT_STRATEGY_TESTER_FORM: StrategyTesterFormState = {
-  symbol: 'BTCUSDT',
-  interval: '60',
-  limit: '500',
-  initialCapital: '10000',
-  feeUnit: 'bps',
-  feeValue: '10',
-  slippageMode: 'percent',
-  slippageValue: '0',
-  positionSizeMode: 'fixed-percent',
-  fixedPercent: '100',
-  fixedQty: '1',
-  fastPeriod: '12',
-  slowPeriod: '26',
-};
 const DEFAULT_TRADING_ORDER_FORM: TradingOrderFormState = {
   side: 'BUY',
   orderType: 'MARKET',
@@ -938,55 +909,6 @@ function getStoredIndicatorPrefs(): IndicatorPrefs {
   }
 }
 
-function toStoredStrategyField(value: unknown, fallback: string) {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return String(value);
-  }
-
-  if (typeof value === 'string') {
-    const normalized = value.trim();
-    if (normalized.length > 0) return normalized;
-  }
-
-  return fallback;
-}
-
-function getStoredStrategyTesterForm(): StrategyTesterFormState {
-  if (typeof window === 'undefined') {
-    return { ...DEFAULT_STRATEGY_TESTER_FORM };
-  }
-
-  try {
-    const raw = window.localStorage.getItem(STRATEGY_TESTER_STORAGE_KEY);
-    if (!raw) return { ...DEFAULT_STRATEGY_TESTER_FORM };
-
-    const parsed = JSON.parse(raw) as Partial<Record<string, unknown>>;
-    const storedFeeUnit = parsed.feeUnit === 'percent' ? 'percent' : 'bps';
-    const storedSlippageMode = parsed.slippageMode === 'tick' ? 'tick' : 'percent';
-    const storedPositionSizeMode = parsed.positionSizeMode === 'fixed-qty' ? 'fixed-qty' : 'fixed-percent';
-    const legacyFeeBps = parsed.feeBps;
-    const feeFallback = toStoredStrategyField(legacyFeeBps, DEFAULT_STRATEGY_TESTER_FORM.feeValue);
-
-    return {
-      symbol: toStoredStrategyField(parsed.symbol, DEFAULT_STRATEGY_TESTER_FORM.symbol).toUpperCase(),
-      interval: toStoredStrategyField(parsed.interval, DEFAULT_STRATEGY_TESTER_FORM.interval).toUpperCase(),
-      limit: toStoredStrategyField(parsed.limit, DEFAULT_STRATEGY_TESTER_FORM.limit),
-      initialCapital: toStoredStrategyField(parsed.initialCapital, DEFAULT_STRATEGY_TESTER_FORM.initialCapital),
-      feeUnit: storedFeeUnit,
-      feeValue: toStoredStrategyField(parsed.feeValue, feeFallback),
-      slippageMode: storedSlippageMode,
-      slippageValue: toStoredStrategyField(parsed.slippageValue, DEFAULT_STRATEGY_TESTER_FORM.slippageValue),
-      positionSizeMode: storedPositionSizeMode,
-      fixedPercent: toStoredStrategyField(parsed.fixedPercent, DEFAULT_STRATEGY_TESTER_FORM.fixedPercent),
-      fixedQty: toStoredStrategyField(parsed.fixedQty, DEFAULT_STRATEGY_TESTER_FORM.fixedQty),
-      fastPeriod: toStoredStrategyField(parsed.fastPeriod, DEFAULT_STRATEGY_TESTER_FORM.fastPeriod),
-      slowPeriod: toStoredStrategyField(parsed.slowPeriod, DEFAULT_STRATEGY_TESTER_FORM.slowPeriod),
-    };
-  } catch {
-    return { ...DEFAULT_STRATEGY_TESTER_FORM };
-  }
-}
-
 type PineEditorBootstrap = {
   workspace: PineWorkspaceState;
   activeScriptId: string | null;
@@ -1050,6 +972,10 @@ function formatVolume(value: number) {
 function formatOptionalTimestamp(value: number | null) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '--';
   return new Date(value).toLocaleString('ko-KR');
+}
+
+function formatStrategyDirectiveValue(value: number) {
+  return Number.isInteger(value) ? String(Math.trunc(value)) : String(value);
 }
 
 type VenuePreferenceValue = '' | KrVenue;
@@ -1388,7 +1314,7 @@ function App() {
   const [pineEditorSource, setPineEditorSource] = useState(() => pineBootstrap.scriptSource);
   const [pineLibraryQuery, setPineLibraryQuery] = useState('');
   const [pineStatusMessage, setPineStatusMessage] = useState<PineStatusMessage | null>(() => pineBootstrap.status);
-  const [strategyForm, setStrategyForm] = useState<StrategyTesterFormState>(() => getStoredStrategyTesterForm());
+  const [strategyForm, setStrategyForm] = useState<StrategyTesterFormState>(() => readStrategyTesterForm());
   const [strategyResult, setStrategyResult] = useState<StrategyBacktestResult | null>(null);
   const [strategyLoading, setStrategyLoading] = useState(false);
   const [strategyError, setStrategyError] = useState<string | null>(null);
@@ -2575,7 +2501,7 @@ function App() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    window.localStorage.setItem(STRATEGY_TESTER_STORAGE_KEY, JSON.stringify(strategyForm));
+    writeStrategyTesterForm(strategyForm);
   }, [strategyForm]);
 
   useEffect(() => {
@@ -4862,6 +4788,73 @@ function App() {
     setPineEditorName(createUniquePineScriptName('New Script', persisted.scripts));
     setPineEditorSource(DEFAULT_PINE_SCRIPT_SOURCE);
   }, [persistPineWorkspaceState, pineActiveScriptName, pineEditorName, pineEditorScriptId, pineWorkspace]);
+
+  const handleBridgePineToStrategyTester = useCallback(() => {
+    if (!pineActiveScript) {
+      setPineStatusMessage({
+        tone: 'error',
+        text: '전략 테스터로 보내려면 저장된 스크립트를 먼저 선택해주세요.',
+      });
+      return;
+    }
+
+    const linkedScript: StrategyTesterLinkedScript = {
+      scriptId: pineActiveScript.id,
+      scriptName: pineActiveScript.name,
+      revision: pineActiveScript.revision,
+    };
+    const directives = parsePineStrategyTesterDirectives(pineEditorSource);
+    const hasDirectiveMapping =
+      typeof directives.fastPeriod === 'number' ||
+      typeof directives.slowPeriod === 'number' ||
+      typeof directives.initialCapital === 'number' ||
+      typeof directives.feeBps === 'number';
+
+    setStrategyError(null);
+    setStrategyRecovery(null);
+    setStrategyForm((previous) => {
+      const next: StrategyTesterFormState = {
+        ...previous,
+        linkedScript,
+      };
+
+      if (typeof directives.fastPeriod === 'number') {
+        next.fastPeriod = String(directives.fastPeriod);
+      }
+
+      if (typeof directives.slowPeriod === 'number') {
+        next.slowPeriod = String(directives.slowPeriod);
+      }
+
+      if (typeof directives.initialCapital === 'number') {
+        next.initialCapital = formatStrategyDirectiveValue(directives.initialCapital);
+      }
+
+      if (typeof directives.feeBps === 'number') {
+        next.feeUnit = 'bps';
+        next.feeValue = formatStrategyDirectiveValue(directives.feeBps);
+      }
+
+      return next;
+    });
+    setBottomTab('strategy');
+    setPineStatusMessage({
+      tone: 'info',
+      text: hasDirectiveMapping
+        ? '전략 테스터로 연결하고 ts 지시어 파라미터를 반영했습니다.'
+        : '전략 테스터로 연결했습니다.',
+    });
+  }, [pineActiveScript, pineEditorSource]);
+
+  const handleUnlinkStrategyLinkedScript = useCallback(() => {
+    setStrategyForm((previous) => {
+      if (!previous.linkedScript) return previous;
+      return {
+        ...previous,
+        linkedScript: null,
+      };
+    });
+  }, []);
 
   const updateStrategyField = useCallback((field: StrategyFormField, value: string) => {
     setStrategyError(null);
@@ -8817,6 +8810,14 @@ function App() {
                     <button type="button" onClick={handleDeletePineScript} disabled={!pineEditorScriptId}>
                       Delete
                     </button>
+                    <button
+                      type="button"
+                      className="pine-editor-bridge-btn"
+                      onClick={handleBridgePineToStrategyTester}
+                      disabled={!pineActiveScript}
+                    >
+                      전략 테스터로 보내기
+                    </button>
                   </div>
                 </div>
 
@@ -8889,6 +8890,28 @@ function App() {
 
           {bottomTab === 'strategy' ? (
             <div className="strategy-tester-panel">
+              <div className={`strategy-link-banner ${strategyForm.linkedScript ? 'linked' : 'standalone'}`}>
+                {strategyForm.linkedScript ? (
+                  <>
+                    <div className="strategy-link-meta">
+                      <span className="strategy-link-badge">Pine 연결됨</span>
+                      <strong>{strategyForm.linkedScript.scriptName}</strong>
+                      <span>
+                        rev {strategyForm.linkedScript.revision} · {strategyForm.linkedScript.scriptId}
+                      </span>
+                    </div>
+                    <button type="button" onClick={handleUnlinkStrategyLinkedScript} disabled={strategyLoading}>
+                      연결 해제
+                    </button>
+                  </>
+                ) : (
+                  <div className="strategy-link-meta">
+                    <span className="strategy-link-badge standalone">독립 실행</span>
+                    <span>Pine 스크립트 연결 없이 백테스트를 실행합니다.</span>
+                  </div>
+                )}
+              </div>
+
               <form className="strategy-form" onSubmit={handleRunStrategyBacktest}>
                 <div className="strategy-form-grid">
                   <label>

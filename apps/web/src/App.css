@@ -2204,6 +2204,18 @@ select {
   cursor: default;
 }
 
+.pine-editor-actions .pine-editor-bridge-btn {
+  border-color: #2954d1;
+  background: #19305f;
+  color: #d9e6ff;
+}
+
+.pine-editor-actions .pine-editor-bridge-btn:disabled {
+  border-color: #2b2f3a;
+  background: #1e222d;
+  color: #9ba3b5;
+}
+
 .pine-editor-textarea {
   width: 100%;
   min-height: 160px;
@@ -2333,6 +2345,78 @@ select {
 .strategy-tester-panel {
   display: grid;
   gap: 10px;
+}
+
+.strategy-link-banner {
+  border: 1px solid #2b2f3a;
+  border-radius: 8px;
+  background: #101521;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.strategy-link-banner.linked {
+  border-color: #2954d1;
+  background: #13254a;
+}
+
+.strategy-link-banner.standalone {
+  border-color: #2b2f3a;
+}
+
+.strategy-link-meta {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.strategy-link-meta strong {
+  color: #d5dded;
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.strategy-link-meta span {
+  color: #95a0b5;
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.strategy-link-badge {
+  display: inline-flex;
+  width: fit-content;
+  border-radius: 999px;
+  border: 1px solid #355cc9;
+  background: #173061;
+  color: #dbe7ff;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.strategy-link-badge.standalone {
+  border-color: #3a404f;
+  background: #1c2231;
+  color: #b4bccb;
+}
+
+.strategy-link-banner button {
+  border: 1px solid #2b2f3a;
+  background: #1e222d;
+  color: #d1d4dc;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.strategy-link-banner button:disabled {
+  opacity: 0.65;
+  cursor: default;
 }
 
 .strategy-form {
