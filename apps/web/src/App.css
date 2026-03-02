@@ -2285,6 +2285,11 @@ select {
   position: relative;
 }
 
+.tv-bottom-panel.allow-overflow {
+  overflow: visible;
+  z-index: 12;
+}
+
 .bottom-panel-resize-handle {
   position: absolute;
   top: 0;
@@ -2340,6 +2345,10 @@ body.bottom-panel-resizing {
   color: #98a0af;
   min-height: 0;
   overflow: auto;
+}
+
+.bottom-content.allow-overflow {
+  overflow: visible;
 }
 
 .bottom-side-panel {
@@ -2974,6 +2983,11 @@ body.bottom-panel-resizing {
   overflow: auto;
 }
 
+.bottom-content.allow-overflow .simulation-table-wrap {
+  overflow-x: auto;
+  overflow-y: visible;
+}
+
 .simulation-table {
   width: 100%;
   border-collapse: collapse;
@@ -3068,6 +3082,8 @@ body.bottom-panel-resizing {
   font-size: 11px;
   padding: 5px 7px;
   width: 148px;
+  position: relative;
+  z-index: 2;
 }
 
 .simulation-row-error {

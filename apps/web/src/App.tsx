@@ -1583,6 +1583,7 @@ function App() {
   );
   const [simulationRefreshing, setSimulationRefreshing] = useState(false);
   const [simulationPanelMessage, setSimulationPanelMessage] = useState<string | null>(null);
+  const [simulationDatePickerOpen, setSimulationDatePickerOpen] = useState(false);
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [indicatorPanelOpen, setIndicatorPanelOpen] = useState(false);
   const [comparisonPanelOpen, setComparisonPanelOpen] = useState(false);
@@ -9614,7 +9615,11 @@ function App() {
         ) : null}
       </main>
 
-      <footer className={`tv-bottom-panel${bottomPanelResizing ? ' resizing' : ''}`}>
+      <footer
+        className={`tv-bottom-panel${bottomPanelResizing ? ' resizing' : ''}${
+          simulationDatePickerOpen ? ' allow-overflow' : ''
+        }`}
+      >
         <div
           className="bottom-panel-resize-handle"
           role="separator"
@@ -9630,7 +9635,7 @@ function App() {
           ))}
         </div>
 
-        <div className="bottom-content">
+        <div className={`bottom-content${simulationDatePickerOpen ? ' allow-overflow' : ''}`}>
           {bottomTab === 'pine' ? (
             <div className="pine-editor-panel">
               <div className="pine-editor-main">
@@ -10189,6 +10194,8 @@ function App() {
                               className="simulation-row-date"
                               type="date"
                               value={row.baseDate}
+                              onFocus={() => setSimulationDatePickerOpen(true)}
+                              onBlur={() => setSimulationDatePickerOpen(false)}
                               onChange={(event) => handleSimulationDateChange(row.id, event.target.value)}
                             />
                           </td>
