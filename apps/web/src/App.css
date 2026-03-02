@@ -2984,8 +2984,7 @@ body.bottom-panel-resizing {
 }
 
 .bottom-content.allow-overflow .simulation-table-wrap {
-  overflow-x: auto;
-  overflow-y: visible;
+  overflow: visible;
 }
 
 .simulation-table {
@@ -3098,14 +3097,21 @@ body.bottom-panel-resizing {
 .simulation-date-picker-popover {
   position: absolute;
   right: 0;
-  bottom: calc(100% + 8px);
   width: 236px;
   border: 1px solid #31405c;
   border-radius: 10px;
   background: #121c2b;
   box-shadow: 0 10px 26px rgb(0 0 0 / 45%);
   padding: 8px;
-  z-index: 18;
+  z-index: 32;
+}
+
+.simulation-date-picker-popover.is-above {
+  bottom: calc(100% + 8px);
+}
+
+.simulation-date-picker-popover.is-below {
+  top: calc(100% + 8px);
 }
 
 .simulation-date-picker-head {

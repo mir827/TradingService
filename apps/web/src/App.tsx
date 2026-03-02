@@ -493,6 +493,7 @@ type TradingOrderFormState = {
 };
 
 type SimulationRowStatus = 'idle' | 'active' | 'win' | 'loss' | 'error';
+type SimulationDatePickerPlacement = 'above' | 'below';
 
 type SimulationRow = {
   id: string;
@@ -766,6 +767,7 @@ const STRATEGY_MAX_FIXED_QTY = 1_000_000_000;
 const SIMULATION_DEFAULT_STOP_LOSS_PCT = 10;
 const SIMULATION_DEFAULT_TAKE_PROFIT_PCT = 20;
 const SIMULATION_CALENDAR_WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토'] as const;
+const SIMULATION_DATE_PICKER_ESTIMATED_HEIGHT_PX = 280;
 const HOVER_TOOLTIP_WIDTH = 232;
 const HOVER_TOOLTIP_HEIGHT = 174;
 const HOVER_TOOLTIP_MARGIN = 14;
@@ -1612,7 +1614,7 @@ function App() {
   const [searching, setSearching] = useState(false);
   const [bottomPanelHeight, setBottomPanelHeight] = useState<number>(() => getStoredBottomPanelHeight());
   const [bottomPanelResizing, setBottomPanelResizing] = useState(false);
-  const [bottomTab, setBottomTab] = useState<BottomTab>('pine');
+  const [bottomTab, setBottomTab] = useState<BottomTab>('simulation');
   const [pineWorkspace, setPineWorkspace] = useState<PineWorkspaceState>(() => pineBootstrap.workspace);
   const [pineEditorScriptId, setPineEditorScriptId] = useState<string | null>(() => pineBootstrap.activeScriptId);
   const [pineEditorName, setPineEditorName] = useState(() => pineBootstrap.scriptName);
@@ -1644,6 +1646,8 @@ function App() {
   const [simulationRefreshing, setSimulationRefreshing] = useState(false);
   const [simulationPanelMessage, setSimulationPanelMessage] = useState<string | null>(null);
   const [simulationDatePickerRowId, setSimulationDatePickerRowId] = useState<string | null>(null);
+  const [simulationDatePickerPlacement, setSimulationDatePickerPlacement] =
+    useState<SimulationDatePickerPlacement>('below');
   const [simulationDatePickerMonth, setSimulationDatePickerMonth] = useState<Date>(() => {
     const now = new Date();
     return new Date(now.getFullYear(), now.getMonth(), 1);
@@ -6036,16 +6040,31 @@ function App() {
     });
   }, []);
 
-  const handleOpenSimulationDatePicker = useCallback((rowId: string, baseDate: string) => {
-    if (simulationDatePickerRowId === rowId) {
-      setSimulationDatePickerRowId(null);
-      return;
-    }
+  const handleOpenSimulationDatePicker = useCallback(
+    (rowId: string, baseDate: string, triggerElement?: HTMLElement) => {
+      if (simulationDatePickerRowId === rowId) {
+        setSimulationDatePickerRowId(null);
+        return;
+      }
 
-    const parsedDate = parseSimulationDateText(baseDate) ?? new Date();
-    setSimulationDatePickerMonth(new Date(parsedDate.getFullYear(), parsedDate.getMonth(), 1));
-    setSimulationDatePickerRowId(rowId);
-  }, [simulationDatePickerRowId]);
+      const parsedDate = parseSimulationDateText(baseDate) ?? new Date();
+      setSimulationDatePickerMonth(new Date(parsedDate.getFullYear(), parsedDate.getMonth(), 1));
+
+      if (typeof window !== 'undefined' && triggerElement) {
+        const rect = triggerElement.getBoundingClientRect();
+        const spaceAbove = rect.top;
+        const spaceBelow = window.innerHeight - rect.bottom;
+        setSimulationDatePickerPlacement(
+          spaceBelow >= SIMULATION_DATE_PICKER_ESTIMATED_HEIGHT_PX || spaceBelow >= spaceAbove ? 'below' : 'above',
+        );
+      } else {
+        setSimulationDatePickerPlacement('below');
+      }
+
+      setSimulationDatePickerRowId(rowId);
+    },
+    [simulationDatePickerRowId],
+  );
 
   const handleSelectSimulationDate = useCallback(
     (rowId: string, dateText: string) => {
@@ -10318,12 +10337,20 @@ function App() {
                             <button
                               type="button"
                               className="simulation-row-date-trigger"
-                              onClick={() => handleOpenSimulationDatePicker(row.id, row.baseDate)}
+                              onClick={(event) =>
+                                handleOpenSimulationDatePicker(row.id, row.baseDate, event.currentTarget)
+                              }
                             >
                               {row.baseDate}
                             </button>
                             {simulationDatePickerRowId === row.id ? (
-                              <div className="simulation-date-picker-popover" role="dialog" aria-label="기준 날짜 선택">
+                              <div
+                                className={`simulation-date-picker-popover ${
+                                  simulationDatePickerPlacement === 'above' ? 'is-above' : 'is-below'
+                                }`}
+                                role="dialog"
+                                aria-label="기준 날짜 선택"
+                              >
                                 <div className="simulation-date-picker-head">
                                   <button
                                     type="button"
