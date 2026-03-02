@@ -497,6 +497,7 @@ type SimulationRowStatus = 'idle' | 'active' | 'win' | 'loss' | 'error';
 type SimulationRow = {
   id: string;
   query: string;
+  baseDate: string;
   symbol: SymbolItem | null;
   searching: boolean;
   status: SimulationRowStatus;
@@ -1341,6 +1342,7 @@ function createSimulationRow(): SimulationRow {
   return {
     id: createSimulationRowId(),
     query: '',
+    baseDate: getDefaultSimulationDate(),
     symbol: null,
     searching: false,
     status: 'idle',
@@ -1474,7 +1476,6 @@ function App() {
   const [tradingRecovery, setTradingRecovery] = useState<WorkflowRecoveryState | null>(null);
   const [tradingLastUpdatedAt, setTradingLastUpdatedAt] = useState<number | null>(null);
   const [simulationRows, setSimulationRows] = useState<SimulationRow[]>(() => [createSimulationRow()]);
-  const [simulationBaseDate, setSimulationBaseDate] = useState(() => getDefaultSimulationDate());
   const [simulationStopLossPctInput, setSimulationStopLossPctInput] = useState(String(SIMULATION_DEFAULT_STOP_LOSS_PCT));
   const [simulationTakeProfitPctInput, setSimulationTakeProfitPctInput] = useState(String(SIMULATION_DEFAULT_TAKE_PROFIT_PCT));
   const [simulationRefreshing, setSimulationRefreshing] = useState(false);
@@ -5559,12 +5560,6 @@ function App() {
 
   const refreshSimulationRows = useCallback(
     async (options?: { targetIds?: string[]; resetTerminal?: boolean }) => {
-      const targetTimestamp = resolveSimulationTargetTimestamp(simulationBaseDate);
-      if (targetTimestamp === null) {
-        setSimulationPanelMessage('기준 날짜를 올바르게 입력해주세요.');
-        return;
-      }
-
       const stopLossPct = normalizeSimulationStopLossPercent(simulationStopLossPctInput);
       const takeProfitPct = normalizeSimulationTakeProfitPercent(simulationTakeProfitPctInput);
 
@@ -5576,12 +5571,6 @@ function App() {
       simulationRefreshRunRef.current = runId;
       setSimulationRefreshing(true);
       setSimulationPanelMessage(null);
-
-      const selectedDateStart = new Date(`${simulationBaseDate}T00:00:00`);
-      const elapsedDays = Number.isFinite(selectedDateStart.getTime())
-        ? Math.max(1, Math.floor((Date.now() - selectedDateStart.getTime()) / (1000 * 60 * 60 * 24)) + 30)
-        : 365;
-      const candleLimit = Math.min(1000, Math.max(120, elapsedDays));
 
       const evaluatedRows = await Promise.all(
         targetRows.map(async (row) => {
@@ -5601,6 +5590,30 @@ function App() {
               errorMessage: null,
             };
           }
+
+          const targetTimestamp = resolveSimulationTargetTimestamp(row.baseDate);
+          if (targetTimestamp === null) {
+            return {
+              id: row.id,
+              searching: false,
+              status: 'error' as SimulationRowStatus,
+              statusLabel: '날짜 확인 필요',
+              basePrice: null,
+              currentPrice: null,
+              pnl: null,
+              pnlPct: null,
+              stopLossPrice: null,
+              takeProfitPrice: null,
+              closedAt: null,
+              errorMessage: '기준 날짜를 올바르게 지정해주세요.',
+            };
+          }
+
+          const selectedDateStart = new Date(`${row.baseDate}T00:00:00`);
+          const elapsedDays = Number.isFinite(selectedDateStart.getTime())
+            ? Math.max(1, Math.floor((Date.now() - selectedDateStart.getTime()) / (1000 * 60 * 60 * 24)) + 30)
+            : 365;
+          const candleLimit = Math.min(1000, Math.max(120, elapsedDays));
 
           const symbol = row.symbol.symbol;
           const venueQuery = row.symbol.venue ? `&venue=${encodeURIComponent(row.symbol.venue)}` : '';
@@ -5731,7 +5744,7 @@ function App() {
       setSimulationPanelMessage(errorCount > 0 ? `일부 종목(${errorCount}개) 데이터 확인이 필요합니다.` : null);
       setSimulationRefreshing(false);
     },
-    [simulationBaseDate, simulationStopLossPctInput, simulationTakeProfitPctInput],
+    [simulationStopLossPctInput, simulationTakeProfitPctInput],
   );
 
   const handleAddSimulationRow = useCallback(() => {
@@ -5760,6 +5773,31 @@ function App() {
               symbol: null,
               status: 'idle',
               statusLabel: '종목을 검색하세요',
+              basePrice: null,
+              currentPrice: null,
+              pnl: null,
+              pnlPct: null,
+              stopLossPrice: null,
+              takeProfitPrice: null,
+              closedAt: null,
+              errorMessage: null,
+            }
+          : row,
+      );
+      simulationRowsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const handleSimulationDateChange = useCallback((rowId: string, value: string) => {
+    setSimulationRows((previous) => {
+      const next: SimulationRow[] = previous.map((row) =>
+        row.id === rowId
+          ? {
+              ...row,
+              baseDate: value,
+              status: row.symbol ? 'active' : 'idle',
+              statusLabel: row.symbol ? '재계산 필요' : '종목을 검색하세요',
               basePrice: null,
               currentPrice: null,
               pnl: null,
@@ -9883,14 +9921,6 @@ function App() {
               <div className="simulation-panel-head">
                 <div className="simulation-controls-grid">
                   <label>
-                    <span>기준 날짜</span>
-                    <input
-                      type="date"
-                      value={simulationBaseDate}
-                      onChange={(event) => setSimulationBaseDate(event.target.value)}
-                    />
-                  </label>
-                  <label>
                     <span>손절 %</span>
                     <input
                       type="number"
@@ -9940,11 +9970,11 @@ function App() {
               </div>
 
               <div className="simulation-summary-row">
+                <strong className="simulation-winrate">전체 승률 {simulationSummary.winRate.toFixed(2)}%</strong>
                 <span>대상 {simulationSummary.total}종목</span>
                 <span className="up">승 {simulationSummary.wins}</span>
                 <span className="down">패 {simulationSummary.losses}</span>
                 <span>미종료 {simulationSummary.active}</span>
-                <strong>승률 {simulationSummary.winRate.toFixed(2)}%</strong>
                 <span>
                   설정: 손절 {normalizedSimulationStopLossPct.toFixed(1)}% / 익절{' '}
                   {normalizedSimulationTakeProfitPct.toFixed(1)}%
@@ -9958,6 +9988,7 @@ function App() {
                   <thead>
                     <tr>
                       <th>종목명 검색</th>
+                      <th>기준 날짜</th>
                       <th>기준가</th>
                       <th>현재가</th>
                       <th>현재 수익</th>
@@ -9969,7 +10000,7 @@ function App() {
                   <tbody>
                     {simulationRows.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="simulation-empty-cell">
+                        <td colSpan={8} className="simulation-empty-cell">
                           시뮬레이션 행이 없습니다. 행 추가 버튼으로 종목을 추가하세요.
                         </td>
                       </tr>
@@ -9998,17 +10029,32 @@ function App() {
                               >
                                 {row.searching ? '검색중...' : '검색'}
                               </button>
-                            </div>
-                            {row.symbol ? (
-                              <div className="simulation-symbol-meta">
-                                <span>{row.symbol.name}</span>
-                                <span>
-                                  {row.symbol.symbol} · {row.symbol.market}
-                                  {row.symbol.venue ? ` · ${row.symbol.venue}` : ''}
+                              {row.symbol ? (
+                                <span className="simulation-symbol-inline-meta">
+                                  <strong>{row.symbol.name}</strong>
+                                  <span>
+                                    {row.symbol.market}
+                                    {row.symbol.venue ? ` · ${row.symbol.venue}` : ''}
+                                  </span>
                                 </span>
-                              </div>
-                            ) : null}
+                              ) : (
+                                <span className="simulation-symbol-inline-meta placeholder">종목/시장 미선택</span>
+                              )}
+                            </div>
                             {row.errorMessage ? <p className="simulation-row-error">{row.errorMessage}</p> : null}
+                          </td>
+                          <td>
+                            <input
+                              className="simulation-row-date"
+                              type="date"
+                              value={row.baseDate}
+                              onChange={(event) => {
+                                handleSimulationDateChange(row.id, event.target.value);
+                                if (row.symbol) {
+                                  void refreshSimulationRows({ targetIds: [row.id], resetTerminal: true });
+                                }
+                              }}
+                            />
                           </td>
                           <td>{row.basePrice !== null ? formatPrice(row.basePrice) : '--'}</td>
                           <td>{row.currentPrice !== null ? formatPrice(row.currentPrice) : '--'}</td>
