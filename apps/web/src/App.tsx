@@ -7380,6 +7380,26 @@ function App() {
       },
     });
   }, [notes, overlayTick, rays, rectangles, trendlines]);
+  const pendingShapeStartMarker = useMemo(() => {
+    void overlayTick;
+    if (!pendingShapeStart) return null;
+
+    const chart = chartRef.current;
+    const series = candleSeriesRef.current;
+    if (!chart || !series) return null;
+
+    const x = chart.timeScale().timeToCoordinate(pendingShapeStart.time as Time);
+    const y = series.priceToCoordinate(pendingShapeStart.price);
+    if (x === null || y === null || !Number.isFinite(x) || !Number.isFinite(y)) {
+      return null;
+    }
+
+    return {
+      x: Number(x),
+      y: Number(y),
+      tool: pendingShapeStart.tool,
+    };
+  }, [overlayTick, pendingShapeStart]);
   const activeIndicatorConfigs = indicatorConfigs.filter((config) => enabledIndicators[config.key]);
   const activeIndicatorLegends = activeIndicatorConfigs.map((config) => ({
     ...config,
@@ -8031,35 +8051,64 @@ function App() {
                 preserveAspectRatio="none"
               >
                 {drawingOverlayGeometry.trendlines.map((shape) => (
-                  <line
-                    key={shape.id}
-                    x1={shape.x1}
-                    y1={shape.y1}
-                    x2={shape.x2}
-                    y2={shape.y2}
-                    className={`drawing-shape trendline${selectedDrawingId === shape.id ? ' selected' : ''}`}
-                  />
+                  <g key={shape.id}>
+                    <line
+                      x1={shape.x1}
+                      y1={shape.y1}
+                      x2={shape.x2}
+                      y2={shape.y2}
+                      className={`drawing-shape trendline${selectedDrawingId === shape.id ? ' selected' : ''}`}
+                    />
+                    <circle
+                      cx={shape.x1}
+                      cy={shape.y1}
+                      r={selectedDrawingId === shape.id ? 4 : 3}
+                      className={`drawing-shape-start-point trendline${selectedDrawingId === shape.id ? ' selected' : ''}`}
+                    />
+                  </g>
                 ))}
                 {drawingOverlayGeometry.rays.map((shape) => (
-                  <line
-                    key={shape.id}
-                    x1={shape.x1}
-                    y1={shape.y1}
-                    x2={shape.x2}
-                    y2={shape.y2}
-                    className={`drawing-shape ray${selectedDrawingId === shape.id ? ' selected' : ''}`}
-                  />
+                  <g key={shape.id}>
+                    <line
+                      x1={shape.x1}
+                      y1={shape.y1}
+                      x2={shape.x2}
+                      y2={shape.y2}
+                      className={`drawing-shape ray${selectedDrawingId === shape.id ? ' selected' : ''}`}
+                    />
+                    <circle
+                      cx={shape.x1}
+                      cy={shape.y1}
+                      r={selectedDrawingId === shape.id ? 4 : 3}
+                      className={`drawing-shape-start-point ray${selectedDrawingId === shape.id ? ' selected' : ''}`}
+                    />
+                  </g>
                 ))}
                 {drawingOverlayGeometry.rectangles.map((shape) => (
-                  <rect
-                    key={shape.id}
-                    x={shape.x}
-                    y={shape.y}
-                    width={shape.width}
-                    height={shape.height}
-                    className={`drawing-shape rectangle${selectedDrawingId === shape.id ? ' selected' : ''}`}
-                  />
+                  <g key={shape.id}>
+                    <rect
+                      x={shape.x}
+                      y={shape.y}
+                      width={shape.width}
+                      height={shape.height}
+                      className={`drawing-shape rectangle${selectedDrawingId === shape.id ? ' selected' : ''}`}
+                    />
+                    <circle
+                      cx={shape.startX}
+                      cy={shape.startY}
+                      r={selectedDrawingId === shape.id ? 4 : 3}
+                      className={`drawing-shape-start-point rectangle${selectedDrawingId === shape.id ? ' selected' : ''}`}
+                    />
+                  </g>
                 ))}
+                {pendingShapeStartMarker ? (
+                  <circle
+                    cx={pendingShapeStartMarker.x}
+                    cy={pendingShapeStartMarker.y}
+                    r={4}
+                    className={`drawing-shape-start-point pending ${pendingShapeStartMarker.tool}`}
+                  />
+                ) : null}
                 {drawingOverlayGeometry.notes.map((shape) => (
                   <g key={shape.id} className={`drawing-shape note${selectedDrawingId === shape.id ? ' selected' : ''}`}>
                     <circle cx={shape.x} cy={shape.y} r={4} />
@@ -9829,7 +9878,22 @@ function App() {
               <div className="drawing-objects-panel">
                 <div className="drawing-objects-head">
                   <strong>도형 오브젝트</strong>
-                  <span>{drawingObjects.length}</span>
+                  <div className="drawing-objects-head-actions">
+                    <span>{drawingObjects.length}</span>
+                    <button
+                      type="button"
+                      className="delete-all"
+                      onClick={() => {
+                        if (!drawingObjects.length) return;
+                        const confirmed = window.confirm(`도형 오브젝트 ${drawingObjects.length}개를 모두 삭제할까요?`);
+                        if (!confirmed) return;
+                        clearAllDrawings();
+                      }}
+                      disabled={drawingObjects.length === 0}
+                    >
+                      전체 삭제
+                    </button>
+                  </div>
                 </div>
                 {drawingObjects.length === 0 ? (
                   <p className="drawing-objects-empty">저장된 도형이 없습니다.</p>

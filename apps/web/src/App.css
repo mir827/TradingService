@@ -963,6 +963,40 @@ select {
   fill: rgb(255 140 66 / 14%);
 }
 
+.drawing-shape-start-point {
+  vector-effect: non-scaling-stroke;
+}
+
+.drawing-shape-start-point.trendline {
+  fill: #9be9c4;
+  stroke: #1e352a;
+  stroke-width: 1.25;
+}
+
+.drawing-shape-start-point.ray {
+  fill: #7fd4db;
+  stroke: #1b3640;
+  stroke-width: 1.25;
+}
+
+.drawing-shape-start-point.rectangle {
+  fill: #ffb67f;
+  stroke: #3f291a;
+  stroke-width: 1.25;
+}
+
+.drawing-shape-start-point.selected {
+  fill: #fff2dc;
+  stroke: #5b4a31;
+  stroke-width: 1.5;
+}
+
+.drawing-shape-start-point.pending {
+  fill: #ffdb82;
+  stroke: #5a4420;
+  stroke-width: 1.5;
+}
+
 .drawing-shape.note circle {
   fill: #d6b4ff;
   stroke: #2a1c40;
@@ -1069,6 +1103,12 @@ select {
   color: #9db5d8;
 }
 
+.drawing-objects-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .drawing-objects-head span {
   font-size: 10px;
   color: #86a8d4;
@@ -1076,6 +1116,26 @@ select {
   border-radius: 999px;
   padding: 1px 6px;
   background: #152338;
+}
+
+.drawing-objects-head .delete-all {
+  border: 1px solid #6d3d47;
+  background: #341a21;
+  color: #ffc0cb;
+  border-radius: 999px;
+  font-size: 10px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.drawing-objects-head .delete-all:hover:enabled {
+  border-color: #8a4e5a;
+  background: #422029;
+}
+
+.drawing-objects-head .delete-all:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .drawing-objects-empty {

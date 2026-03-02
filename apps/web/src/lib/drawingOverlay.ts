@@ -35,6 +35,8 @@ type OverlayRectangleGeometry = {
   y: number;
   width: number;
   height: number;
+  startX: number;
+  startY: number;
 };
 
 type OverlayNoteGeometry = {
@@ -156,7 +158,9 @@ function toSafeRectangleGeometry(
 
   const x = toSafeCoordinate(rawX, maxAbs);
   const y = toSafeCoordinate(rawY, maxAbs);
-  if (x === null || y === null) return null;
+  const startX = toSafeCoordinate(start.x, maxAbs);
+  const startY = toSafeCoordinate(start.y, maxAbs);
+  if (x === null || y === null || startX === null || startY === null) return null;
 
   const maxSpan = maxAbs * 2;
   const width = Math.min(maxSpan, Math.max(0, rawWidth));
@@ -169,6 +173,8 @@ function toSafeRectangleGeometry(
     y,
     width,
     height,
+    startX,
+    startY,
   };
 }
 

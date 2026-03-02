@@ -76,6 +76,8 @@ describe('drawing overlay geometry safety', () => {
       geometry.rectangles[0].y,
       geometry.rectangles[0].width,
       geometry.rectangles[0].height,
+      geometry.rectangles[0].startX,
+      geometry.rectangles[0].startY,
       geometry.notes[0].x,
       geometry.notes[0].y,
     ];
@@ -278,9 +280,13 @@ describe('drawing overlay geometry safety', () => {
     expect(Number.isFinite(rect.y)).toBe(true);
     expect(Number.isFinite(rect.width)).toBe(true);
     expect(Number.isFinite(rect.height)).toBe(true);
+    expect(Number.isFinite(rect.startX)).toBe(true);
+    expect(Number.isFinite(rect.startY)).toBe(true);
     expect(rect.width).toBeGreaterThanOrEqual(0);
     expect(rect.height).toBeGreaterThanOrEqual(0);
     expect(rect.width).toBeLessThanOrEqual(maxAbs * 2);
     expect(rect.height).toBeLessThanOrEqual(maxAbs * 2);
+    expect(Math.abs(rect.startX)).toBeLessThanOrEqual(maxAbs);
+    expect(Math.abs(rect.startY)).toBeLessThanOrEqual(maxAbs);
   });
 });
