@@ -1530,11 +1530,15 @@ function getStoredSimulationState(): SimulationBootstrapState {
       typeof parsed.takeProfitPctInput === 'string' && Number.isFinite(Number(parsed.takeProfitPctInput))
         ? parsed.takeProfitPctInput
         : defaults.takeProfitPctInput;
+    const shouldUpgradeLegacyDefaultPair =
+      (parsed.version ?? 0) < 2 && Number(stopLossPctInput) === 5 && Number(takeProfitPctInput) === 10;
 
     return {
       rows: rows.length > 0 ? rows : defaults.rows,
-      stopLossPctInput,
-      takeProfitPctInput,
+      stopLossPctInput: shouldUpgradeLegacyDefaultPair ? String(SIMULATION_DEFAULT_STOP_LOSS_PCT) : stopLossPctInput,
+      takeProfitPctInput: shouldUpgradeLegacyDefaultPair
+        ? String(SIMULATION_DEFAULT_TAKE_PROFIT_PCT)
+        : takeProfitPctInput,
     };
   } catch {
     return defaults;
@@ -2866,7 +2870,7 @@ function App() {
     if (typeof window === 'undefined') return;
 
     const payload: SimulationStoragePayload = {
-      version: 1,
+      version: 2,
       stopLossPctInput: simulationStopLossPctInput,
       takeProfitPctInput: simulationTakeProfitPctInput,
       rows: simulationRows.map((row) => ({
