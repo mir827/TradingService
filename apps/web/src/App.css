@@ -2875,6 +2875,228 @@ body.bottom-panel-resizing {
   font-size: 12px;
 }
 
+.simulation-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.simulation-panel-head {
+  border: 1px solid #2b2f3a;
+  border-radius: 8px;
+  background: #101521;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.simulation-controls-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.simulation-controls-grid label {
+  display: grid;
+  gap: 4px;
+}
+
+.simulation-controls-grid label span {
+  font-size: 11px;
+  color: #8d95a5;
+}
+
+.simulation-controls-grid input {
+  border: 1px solid #2b2f3a;
+  background: #1e222d;
+  color: #d1d4dc;
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.simulation-head-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.simulation-head-actions button {
+  border: 1px solid #2d4766;
+  background: #182638;
+  color: #b7d8ff;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.simulation-head-actions button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.simulation-summary-row {
+  border: 1px solid #2b2f3a;
+  border-radius: 8px;
+  background: #111826;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: #9ca9bd;
+}
+
+.simulation-summary-row strong {
+  color: #d8e3f4;
+}
+
+.simulation-panel-message {
+  margin: 0;
+  color: #ffb7b7;
+  font-size: 12px;
+}
+
+.simulation-table-wrap {
+  border: 1px solid #2b2f3a;
+  border-radius: 8px;
+  background: #101521;
+  overflow: auto;
+}
+
+.simulation-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.simulation-table th,
+.simulation-table td {
+  border-bottom: 1px solid #1f2636;
+  padding: 7px 8px;
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.simulation-table th {
+  color: #8d95a5;
+  font-weight: 500;
+}
+
+.simulation-empty-cell {
+  color: #8d95a5;
+  text-align: center !important;
+  padding: 16px 8px !important;
+}
+
+.simulation-symbol-field {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.simulation-symbol-field input {
+  border: 1px solid #2b2f3a;
+  background: #1e222d;
+  color: #d1d4dc;
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 6px 8px;
+  min-width: 0;
+}
+
+.simulation-symbol-field button {
+  border: 1px solid #2b2f3a;
+  background: #1f2f44;
+  color: #c3dcff;
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 6px 9px;
+  cursor: pointer;
+}
+
+.simulation-symbol-field button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.simulation-symbol-meta {
+  margin-top: 4px;
+  display: grid;
+  gap: 2px;
+}
+
+.simulation-symbol-meta span:first-child {
+  color: #d8e3f4;
+  font-size: 11px;
+}
+
+.simulation-symbol-meta span:last-child {
+  color: #8d95a5;
+  font-size: 10px;
+}
+
+.simulation-row-error {
+  margin: 4px 0 0;
+  color: #ffafb7;
+  font-size: 10px;
+  white-space: normal;
+}
+
+.simulation-status-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #3a465f;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  color: #b9c6de;
+  background: #1a2438;
+}
+
+.simulation-status-chip.active {
+  border-color: #34567a;
+  color: #9ed4ff;
+}
+
+.simulation-status-chip.win {
+  border-color: #2f7a58;
+  color: #9be9c4;
+  background: #163225;
+}
+
+.simulation-status-chip.loss,
+.simulation-status-chip.error {
+  border-color: #7d4050;
+  color: #ffb8c5;
+  background: #391d25;
+}
+
+.simulation-status-sub {
+  margin-top: 4px;
+  color: #8d95a5;
+  font-size: 10px;
+}
+
+.simulation-delete {
+  border: 1px solid #6d3d47;
+  background: #341a21;
+  color: #ffc0cb;
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.simulation-delete:hover {
+  border-color: #8a4e5a;
+  background: #422029;
+}
+
 .trading-panel {
   display: grid;
   gap: 10px;
@@ -3227,6 +3449,10 @@ body.bottom-panel-resizing {
     grid-template-columns: 1fr;
   }
 
+  .simulation-controls-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .trading-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3281,6 +3507,19 @@ body.bottom-panel-resizing {
 
   .strategy-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .simulation-controls-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .simulation-head-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .simulation-symbol-field {
+    grid-template-columns: 1fr;
   }
 
   .trading-panel-head {

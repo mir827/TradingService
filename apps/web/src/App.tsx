@@ -328,7 +328,7 @@ type OpsTimelineItem =
     };
 
 type WatchTab = 'watchlist' | 'detail' | 'alerts';
-type BottomTab = 'pine' | 'strategy' | 'trading' | 'objects' | 'ops';
+type BottomTab = 'pine' | 'strategy' | 'simulation' | 'trading' | 'objects' | 'ops';
 type TopActionKey = 'indicator' | 'compare' | 'replay';
 type WatchSortKey = 'symbol' | 'price' | 'changePercent';
 type WatchSortDir = 'asc' | 'desc';
@@ -490,6 +490,25 @@ type TradingOrderFormState = {
   useBracket: boolean;
   takeProfitPrice: string;
   stopLossPrice: string;
+};
+
+type SimulationRowStatus = 'idle' | 'active' | 'win' | 'loss' | 'error';
+
+type SimulationRow = {
+  id: string;
+  query: string;
+  symbol: SymbolItem | null;
+  searching: boolean;
+  status: SimulationRowStatus;
+  statusLabel: string;
+  basePrice: number | null;
+  currentPrice: number | null;
+  pnl: number | null;
+  pnlPct: number | null;
+  stopLossPrice: number | null;
+  takeProfitPrice: number | null;
+  closedAt: number | null;
+  errorMessage: string | null;
 };
 
 type HorizontalLine = DrawingFlagState & {
@@ -705,6 +724,7 @@ const DUPLICATE_COMPARE_SYMBOL_ERROR = '이미 비교 목록에 추가된 심볼
 const bottomTabs: Array<{ id: BottomTab; label: string }> = [
   { id: 'pine', label: 'Pine Editor' },
   { id: 'strategy', label: '전략 테스터' },
+  { id: 'simulation', label: '시뮬레이션' },
   { id: 'trading', label: '트레이딩 패널' },
   { id: 'objects', label: '도형 오브젝트' },
   { id: 'ops', label: '운영 로그' },
@@ -724,6 +744,8 @@ const STRATEGY_MAX_FEE_PERCENT = STRATEGY_MAX_FEE_BPS / 100;
 const STRATEGY_MAX_SLIPPAGE_TICK = 1_000_000;
 const STRATEGY_MAX_SLIPPAGE_PERCENT = 10;
 const STRATEGY_MAX_FIXED_QTY = 1_000_000_000;
+const SIMULATION_DEFAULT_STOP_LOSS_PCT = 5;
+const SIMULATION_DEFAULT_TAKE_PROFIT_PCT = 10;
 const HOVER_TOOLTIP_WIDTH = 232;
 const HOVER_TOOLTIP_HEIGHT = 174;
 const HOVER_TOOLTIP_MARGIN = 14;
@@ -1311,6 +1333,56 @@ function buildCompareOverlayStates(configs: CompareOverlayConfig[]): CompareOver
   });
 }
 
+function createSimulationRowId() {
+  return `sim_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createSimulationRow(): SimulationRow {
+  return {
+    id: createSimulationRowId(),
+    query: '',
+    symbol: null,
+    searching: false,
+    status: 'idle',
+    statusLabel: '종목을 검색하세요',
+    basePrice: null,
+    currentPrice: null,
+    pnl: null,
+    pnlPct: null,
+    stopLossPrice: null,
+    takeProfitPrice: null,
+    closedAt: null,
+    errorMessage: null,
+  };
+}
+
+function getDefaultSimulationDate() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = `${now.getMonth() + 1}`.padStart(2, '0');
+  const day = `${now.getDate()}`.padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function normalizeSimulationStopLossPercent(value: string) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return SIMULATION_DEFAULT_STOP_LOSS_PCT;
+  return Math.min(99.9, Math.max(0, parsed));
+}
+
+function normalizeSimulationTakeProfitPercent(value: string) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return SIMULATION_DEFAULT_TAKE_PROFIT_PCT;
+  return Math.min(1000, Math.max(0, parsed));
+}
+
+function resolveSimulationTargetTimestamp(dateText: string) {
+  if (!dateText.trim()) return null;
+  const candidate = new Date(`${dateText}T23:59:59`);
+  const timestamp = Math.floor(candidate.getTime() / 1000);
+  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : null;
+}
+
 function App() {
   const chartAreaRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1401,6 +1473,12 @@ function App() {
   const [tradingFormError, setTradingFormError] = useState<string | null>(null);
   const [tradingRecovery, setTradingRecovery] = useState<WorkflowRecoveryState | null>(null);
   const [tradingLastUpdatedAt, setTradingLastUpdatedAt] = useState<number | null>(null);
+  const [simulationRows, setSimulationRows] = useState<SimulationRow[]>(() => [createSimulationRow()]);
+  const [simulationBaseDate, setSimulationBaseDate] = useState(() => getDefaultSimulationDate());
+  const [simulationStopLossPctInput, setSimulationStopLossPctInput] = useState(String(SIMULATION_DEFAULT_STOP_LOSS_PCT));
+  const [simulationTakeProfitPctInput, setSimulationTakeProfitPctInput] = useState(String(SIMULATION_DEFAULT_TAKE_PROFIT_PCT));
+  const [simulationRefreshing, setSimulationRefreshing] = useState(false);
+  const [simulationPanelMessage, setSimulationPanelMessage] = useState<string | null>(null);
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [indicatorPanelOpen, setIndicatorPanelOpen] = useState(false);
   const [comparisonPanelOpen, setComparisonPanelOpen] = useState(false);
@@ -1479,6 +1557,8 @@ function App() {
   const indicatorSettingsRef = useRef<IndicatorSettings>(indicatorSettings);
   const compareOverlaysStateRef = useRef(compareOverlays);
   const compareScaleModeStateRef = useRef<CompareScaleMode>(compareScaleMode);
+  const simulationRowsRef = useRef(simulationRows);
+  const simulationRefreshRunRef = useRef(0);
   const hasTradingState = tradingState !== null;
 
   const replayProgress = useMemo(
@@ -1551,6 +1631,10 @@ function App() {
   useEffect(() => {
     compareScaleModeStateRef.current = compareScaleMode;
   }, [compareScaleMode]);
+
+  useEffect(() => {
+    simulationRowsRef.current = simulationRows;
+  }, [simulationRows]);
 
   useEffect(() => {
     chartRangeSyncStateRef.current = createChartRangeSyncState();
@@ -5473,6 +5557,333 @@ function App() {
     [loadTradingState, reportOpsError, selectedQuote?.lastPrice, selectedSymbol, tradingOrderForm],
   );
 
+  const refreshSimulationRows = useCallback(
+    async (options?: { targetIds?: string[]; resetTerminal?: boolean }) => {
+      const targetTimestamp = resolveSimulationTargetTimestamp(simulationBaseDate);
+      if (targetTimestamp === null) {
+        setSimulationPanelMessage('기준 날짜를 올바르게 입력해주세요.');
+        return;
+      }
+
+      const stopLossPct = normalizeSimulationStopLossPercent(simulationStopLossPctInput);
+      const takeProfitPct = normalizeSimulationTakeProfitPercent(simulationTakeProfitPctInput);
+
+      const targetIdSet = options?.targetIds?.length ? new Set(options.targetIds) : null;
+      const targetRows = simulationRowsRef.current.filter((row) => (targetIdSet ? targetIdSet.has(row.id) : true));
+      if (targetRows.length === 0) return;
+
+      const runId = simulationRefreshRunRef.current + 1;
+      simulationRefreshRunRef.current = runId;
+      setSimulationRefreshing(true);
+      setSimulationPanelMessage(null);
+
+      const selectedDateStart = new Date(`${simulationBaseDate}T00:00:00`);
+      const elapsedDays = Number.isFinite(selectedDateStart.getTime())
+        ? Math.max(1, Math.floor((Date.now() - selectedDateStart.getTime()) / (1000 * 60 * 60 * 24)) + 30)
+        : 365;
+      const candleLimit = Math.min(1000, Math.max(120, elapsedDays));
+
+      const evaluatedRows = await Promise.all(
+        targetRows.map(async (row) => {
+          if (!row.symbol) {
+            return {
+              id: row.id,
+              searching: false,
+              status: 'idle' as SimulationRowStatus,
+              statusLabel: '종목을 검색하세요',
+              basePrice: null,
+              currentPrice: null,
+              pnl: null,
+              pnlPct: null,
+              stopLossPrice: null,
+              takeProfitPrice: null,
+              closedAt: null,
+              errorMessage: null,
+            };
+          }
+
+          const symbol = row.symbol.symbol;
+          const venueQuery = row.symbol.venue ? `&venue=${encodeURIComponent(row.symbol.venue)}` : '';
+
+          try {
+            const [candlesResponse, quoteResponse] = await Promise.all([
+              fetch(
+                `${apiBase}/api/candles?symbol=${encodeURIComponent(symbol)}&interval=1D&limit=${candleLimit}${venueQuery}`,
+              ),
+              fetch(`${apiBase}/api/quote?symbol=${encodeURIComponent(symbol)}${venueQuery}`),
+            ]);
+
+            if (!candlesResponse.ok || !quoteResponse.ok) {
+              throw new Error('시세 또는 캔들 조회에 실패했습니다.');
+            }
+
+            const candlesPayload = (await candlesResponse.json()) as { candles?: Candle[] };
+            const quotePayload = (await quoteResponse.json()) as Quote;
+
+            const normalizedCandles = (candlesPayload.candles ?? [])
+              .filter(
+                (item): item is Candle =>
+                  typeof item.time === 'number' &&
+                  typeof item.close === 'number' &&
+                  Number.isFinite(item.time) &&
+                  Number.isFinite(item.close),
+              )
+              .sort((left, right) => left.time - right.time);
+
+            if (normalizedCandles.length === 0) {
+              throw new Error('캔들 데이터가 없습니다.');
+            }
+
+            let baseCandle: Candle | null = null;
+            for (const candle of normalizedCandles) {
+              if (candle.time <= targetTimestamp) {
+                baseCandle = candle;
+                continue;
+              }
+              break;
+            }
+            if (!baseCandle) {
+              baseCandle = normalizedCandles[0];
+            }
+
+            const basePrice = baseCandle.close;
+            const currentPrice = quotePayload.lastPrice;
+            if (!Number.isFinite(basePrice) || !Number.isFinite(currentPrice) || basePrice <= 0) {
+              throw new Error('가격 데이터가 유효하지 않습니다.');
+            }
+
+            const pnl = currentPrice - basePrice;
+            const pnlPct = (pnl / basePrice) * 100;
+            const stopLossPrice = basePrice * (1 - stopLossPct / 100);
+            const takeProfitPrice = basePrice * (1 + takeProfitPct / 100);
+
+            const keepTerminalStatus =
+              options?.resetTerminal !== true && (row.status === 'win' || row.status === 'loss');
+
+            let status: SimulationRowStatus = keepTerminalStatus ? row.status : 'active';
+            if (!keepTerminalStatus) {
+              if (currentPrice <= stopLossPrice) {
+                status = 'loss';
+              } else if (currentPrice >= takeProfitPrice) {
+                status = 'win';
+              }
+            }
+
+            const statusLabel =
+              status === 'win'
+                ? '익절 종료'
+                : status === 'loss'
+                  ? '손절 종료'
+                  : status === 'active'
+                    ? '진행중'
+                    : '종목을 검색하세요';
+
+            return {
+              id: row.id,
+              searching: false,
+              status,
+              statusLabel,
+              basePrice,
+              currentPrice,
+              pnl,
+              pnlPct,
+              stopLossPrice,
+              takeProfitPrice,
+              closedAt: status === 'win' || status === 'loss' ? row.closedAt ?? Date.now() : null,
+              errorMessage: null,
+            };
+          } catch (error) {
+            const message =
+              error instanceof Error && error.message.trim().length > 0
+                ? error.message
+                : '시뮬레이션 계산에 실패했습니다.';
+            return {
+              id: row.id,
+              searching: false,
+              status: 'error' as SimulationRowStatus,
+              statusLabel: '데이터 확인 필요',
+              basePrice: null,
+              currentPrice: null,
+              pnl: null,
+              pnlPct: null,
+              stopLossPrice: null,
+              takeProfitPrice: null,
+              closedAt: null,
+              errorMessage: message,
+            };
+          }
+        }),
+      );
+
+      if (simulationRefreshRunRef.current !== runId) return;
+
+      const patchById = new Map(evaluatedRows.map((row) => [row.id, row]));
+      const errorCount = evaluatedRows.filter((row) => row.status === 'error').length;
+
+      setSimulationRows((previous) => {
+        const next = previous.map((row) => {
+          const patch = patchById.get(row.id);
+          return patch ? { ...row, ...patch } : row;
+        });
+        simulationRowsRef.current = next;
+        return next;
+      });
+      setSimulationPanelMessage(errorCount > 0 ? `일부 종목(${errorCount}개) 데이터 확인이 필요합니다.` : null);
+      setSimulationRefreshing(false);
+    },
+    [simulationBaseDate, simulationStopLossPctInput, simulationTakeProfitPctInput],
+  );
+
+  const handleAddSimulationRow = useCallback(() => {
+    setSimulationRows((previous) => {
+      const next = [...previous, createSimulationRow()];
+      simulationRowsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const handleDeleteSimulationRow = useCallback((rowId: string) => {
+    setSimulationRows((previous) => {
+      const next = previous.filter((row) => row.id !== rowId);
+      simulationRowsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const handleSimulationQueryChange = useCallback((rowId: string, value: string) => {
+    setSimulationRows((previous) => {
+      const next: SimulationRow[] = previous.map((row) =>
+        row.id === rowId
+          ? {
+              ...row,
+              query: value,
+              symbol: null,
+              status: 'idle',
+              statusLabel: '종목을 검색하세요',
+              basePrice: null,
+              currentPrice: null,
+              pnl: null,
+              pnlPct: null,
+              stopLossPrice: null,
+              takeProfitPrice: null,
+              closedAt: null,
+              errorMessage: null,
+            }
+          : row,
+      );
+      simulationRowsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const handleSearchSimulationSymbol = useCallback(
+    async (rowId: string) => {
+      const targetRow = simulationRowsRef.current.find((row) => row.id === rowId);
+      if (!targetRow) return;
+
+      const query = targetRow.query.trim();
+      if (!query) {
+        setSimulationRows((previous) => {
+          const next: SimulationRow[] = previous.map((row) =>
+            row.id === rowId
+              ? {
+                  ...row,
+                  status: 'error',
+                  statusLabel: '검색어를 입력하세요',
+                  errorMessage: '종목명 또는 심볼을 입력한 뒤 검색해주세요.',
+                }
+              : row,
+          );
+          simulationRowsRef.current = next;
+          return next;
+        });
+        return;
+      }
+
+      setSimulationRows((previous) => {
+        const next: SimulationRow[] = previous.map((row) =>
+          row.id === rowId
+            ? {
+                ...row,
+                searching: true,
+                status: 'active',
+                statusLabel: '검색 중...',
+                errorMessage: null,
+              }
+            : row,
+        );
+        simulationRowsRef.current = next;
+        return next;
+      });
+
+      try {
+        const response = await fetch(
+          `${apiBase}/api/search?query=${encodeURIComponent(query)}&market=ALL&limit=8`,
+        );
+
+        if (!response.ok) {
+          throw new Error('종목 검색에 실패했습니다.');
+        }
+
+        const payload = (await response.json()) as { items?: SymbolItem[] };
+        const items = (payload.items ?? []).map(normalizeSymbolItemVenue);
+        const selected = items[0];
+
+        if (!selected) {
+          throw new Error('검색된 종목이 없습니다.');
+        }
+
+        setSimulationRows((previous) => {
+          const next: SimulationRow[] = previous.map((row) =>
+            row.id === rowId
+              ? {
+                  ...row,
+                  query: selected.name,
+                  symbol: selected,
+                  searching: false,
+                  status: 'active',
+                  statusLabel: '계산 중...',
+                  basePrice: null,
+                  currentPrice: null,
+                  pnl: null,
+                  pnlPct: null,
+                  stopLossPrice: null,
+                  takeProfitPrice: null,
+                  closedAt: null,
+                  errorMessage: null,
+                }
+              : row,
+          );
+          simulationRowsRef.current = next;
+          return next;
+        });
+
+        await refreshSimulationRows({ targetIds: [rowId], resetTerminal: true });
+      } catch (error) {
+        const message =
+          error instanceof Error && error.message.trim().length > 0
+            ? error.message
+            : '종목 검색에 실패했습니다.';
+        setSimulationRows((previous) => {
+          const next: SimulationRow[] = previous.map((row) =>
+            row.id === rowId
+              ? {
+                  ...row,
+                  searching: false,
+                  status: 'error',
+                  statusLabel: '검색 실패',
+                  errorMessage: message,
+                }
+              : row,
+          );
+          simulationRowsRef.current = next;
+          return next;
+        });
+      }
+    },
+    [refreshSimulationRows],
+  );
+
   const handleCreateAlertRule = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setAlertsRecovery(null);
@@ -7242,6 +7653,8 @@ function App() {
   const selectedCode = selectedSymbolMeta ? getDisplayCode(selectedSymbolMeta) : shortTicker(selectedSymbol);
   const selectedName = selectedSymbolMeta?.name ?? shortTicker(selectedSymbol);
   const exchangeText = marketExchangeText(selectedMarket);
+  const normalizedSimulationStopLossPct = normalizeSimulationStopLossPercent(simulationStopLossPctInput);
+  const normalizedSimulationTakeProfitPct = normalizeSimulationTakeProfitPercent(simulationTakeProfitPctInput);
   const totalDrawings = horizontalLines.length + verticalLines.length + trendlines.length + rays.length + rectangles.length + notes.length;
   const activeToolDescription =
     activeTool === 'cursor'
@@ -7474,6 +7887,23 @@ function App() {
     () => (strategyResult ? [...strategyResult.trades].slice(-STRATEGY_RECENT_TRADES_LIMIT).reverse() : []),
     [strategyResult],
   );
+  const simulationSummary = useMemo(() => {
+    const targetRows = simulationRows.filter((row) => Boolean(row.symbol));
+    const wins = targetRows.filter((row) => row.status === 'win').length;
+    const losses = targetRows.filter((row) => row.status === 'loss').length;
+    const ended = wins + losses;
+    const total = targetRows.length;
+    const active = Math.max(0, total - ended);
+
+    return {
+      total,
+      wins,
+      losses,
+      active,
+      ended,
+      winRate: total > 0 ? (wins / total) * 100 : 0,
+    };
+  }, [simulationRows]);
   const opsTimelineItems = useMemo<OpsTimelineItem[]>(() => {
     const errorItems: OpsTimelineItem[] = opsErrors.map((eventItem) => ({
       id: `error-${eventItem.id}`,
@@ -9445,6 +9875,175 @@ function App() {
               ) : (
                 <p className="strategy-empty">MA 교차 전략 파라미터를 입력한 뒤 백테스트를 실행하세요.</p>
               )}
+            </div>
+          ) : null}
+
+          {bottomTab === 'simulation' ? (
+            <div className="simulation-panel">
+              <div className="simulation-panel-head">
+                <div className="simulation-controls-grid">
+                  <label>
+                    <span>기준 날짜</span>
+                    <input
+                      type="date"
+                      value={simulationBaseDate}
+                      onChange={(event) => setSimulationBaseDate(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>손절 %</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={99.9}
+                      step="0.1"
+                      value={simulationStopLossPctInput}
+                      onChange={(event) => setSimulationStopLossPctInput(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>익절 %</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={1000}
+                      step="0.1"
+                      value={simulationTakeProfitPctInput}
+                      onChange={(event) => setSimulationTakeProfitPctInput(event.target.value)}
+                    />
+                  </label>
+                </div>
+
+                <div className="simulation-head-actions">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void refreshSimulationRows({ resetTerminal: true });
+                    }}
+                    disabled={simulationRefreshing}
+                  >
+                    {simulationRefreshing ? '계산 중...' : '적용/재계산'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void refreshSimulationRows();
+                    }}
+                    disabled={simulationRefreshing}
+                  >
+                    현재가 갱신
+                  </button>
+                  <button type="button" onClick={handleAddSimulationRow}>
+                    행 추가
+                  </button>
+                </div>
+              </div>
+
+              <div className="simulation-summary-row">
+                <span>대상 {simulationSummary.total}종목</span>
+                <span className="up">승 {simulationSummary.wins}</span>
+                <span className="down">패 {simulationSummary.losses}</span>
+                <span>미종료 {simulationSummary.active}</span>
+                <strong>승률 {simulationSummary.winRate.toFixed(2)}%</strong>
+                <span>
+                  설정: 손절 {normalizedSimulationStopLossPct.toFixed(1)}% / 익절{' '}
+                  {normalizedSimulationTakeProfitPct.toFixed(1)}%
+                </span>
+              </div>
+
+              {simulationPanelMessage ? <p className="simulation-panel-message">{simulationPanelMessage}</p> : null}
+
+              <div className="simulation-table-wrap">
+                <table className="simulation-table">
+                  <thead>
+                    <tr>
+                      <th>종목명 검색</th>
+                      <th>기준가</th>
+                      <th>현재가</th>
+                      <th>현재 수익</th>
+                      <th>수익률</th>
+                      <th>상태</th>
+                      <th>관리</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {simulationRows.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="simulation-empty-cell">
+                          시뮬레이션 행이 없습니다. 행 추가 버튼으로 종목을 추가하세요.
+                        </td>
+                      </tr>
+                    ) : (
+                      simulationRows.map((row) => (
+                        <tr key={row.id} className={`simulation-row status-${row.status}`}>
+                          <td>
+                            <div className="simulation-symbol-field">
+                              <input
+                                type="text"
+                                value={row.query}
+                                onChange={(event) => handleSimulationQueryChange(row.id, event.target.value)}
+                                onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
+                                  if (event.key !== 'Enter') return;
+                                  event.preventDefault();
+                                  void handleSearchSimulationSymbol(row.id);
+                                }}
+                                placeholder="예: 삼성전자 또는 BTCUSDT"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  void handleSearchSimulationSymbol(row.id);
+                                }}
+                                disabled={row.searching}
+                              >
+                                {row.searching ? '검색중...' : '검색'}
+                              </button>
+                            </div>
+                            {row.symbol ? (
+                              <div className="simulation-symbol-meta">
+                                <span>{row.symbol.name}</span>
+                                <span>
+                                  {row.symbol.symbol} · {row.symbol.market}
+                                  {row.symbol.venue ? ` · ${row.symbol.venue}` : ''}
+                                </span>
+                              </div>
+                            ) : null}
+                            {row.errorMessage ? <p className="simulation-row-error">{row.errorMessage}</p> : null}
+                          </td>
+                          <td>{row.basePrice !== null ? formatPrice(row.basePrice) : '--'}</td>
+                          <td>{row.currentPrice !== null ? formatPrice(row.currentPrice) : '--'}</td>
+                          <td className={typeof row.pnl === 'number' ? (row.pnl >= 0 ? 'up' : 'down') : ''}>
+                            {typeof row.pnl === 'number' ? formatSignedCurrency(row.pnl) : '--'}
+                          </td>
+                          <td className={typeof row.pnlPct === 'number' ? (row.pnlPct >= 0 ? 'up' : 'down') : ''}>
+                            {typeof row.pnlPct === 'number' ? `${formatSigned(row.pnlPct, 2)}%` : '--'}
+                          </td>
+                          <td>
+                            <span className={`simulation-status-chip ${row.status}`}>{row.statusLabel}</span>
+                            {row.status === 'win' || row.status === 'loss' ? (
+                              <div className="simulation-status-sub">
+                                {row.status === 'win' ? '익절가' : '손절가'}{' '}
+                                {row.status === 'win'
+                                  ? row.takeProfitPrice !== null
+                                    ? formatPrice(row.takeProfitPrice)
+                                    : '--'
+                                  : row.stopLossPrice !== null
+                                    ? formatPrice(row.stopLossPrice)
+                                    : '--'}
+                              </div>
+                            ) : null}
+                          </td>
+                          <td>
+                            <button type="button" className="simulation-delete" onClick={() => handleDeleteSimulationRow(row.id)}>
+                              삭제
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           ) : null}
 
