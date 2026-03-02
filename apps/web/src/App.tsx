@@ -740,9 +740,9 @@ const compareScaleModeOptions: Array<{ key: CompareScaleMode; label: string }> =
 ];
 const DUPLICATE_COMPARE_SYMBOL_ERROR = '이미 비교 목록에 추가된 심볼입니다.';
 const bottomTabs: Array<{ id: BottomTab; label: string }> = [
+  { id: 'simulation', label: '시뮬레이션' },
   { id: 'pine', label: 'Pine Editor' },
   { id: 'strategy', label: '전략 테스터' },
-  { id: 'simulation', label: '시뮬레이션' },
   { id: 'trading', label: '트레이딩 패널' },
   { id: 'objects', label: '도형 오브젝트' },
   { id: 'ops', label: '운영 로그' },
@@ -763,8 +763,9 @@ const STRATEGY_MAX_FEE_PERCENT = STRATEGY_MAX_FEE_BPS / 100;
 const STRATEGY_MAX_SLIPPAGE_TICK = 1_000_000;
 const STRATEGY_MAX_SLIPPAGE_PERCENT = 10;
 const STRATEGY_MAX_FIXED_QTY = 1_000_000_000;
-const SIMULATION_DEFAULT_STOP_LOSS_PCT = 5;
-const SIMULATION_DEFAULT_TAKE_PROFIT_PCT = 10;
+const SIMULATION_DEFAULT_STOP_LOSS_PCT = 10;
+const SIMULATION_DEFAULT_TAKE_PROFIT_PCT = 20;
+const SIMULATION_CALENDAR_WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토'] as const;
 const HOVER_TOOLTIP_WIDTH = 232;
 const HOVER_TOOLTIP_HEIGHT = 174;
 const HOVER_TOOLTIP_MARGIN = 14;
@@ -1384,6 +1385,61 @@ function getDefaultSimulationDate() {
   return `${year}-${month}-${day}`;
 }
 
+function formatSimulationDateText(date: Date) {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function parseSimulationDateText(dateText: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateText.trim());
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null;
+
+  const parsed = new Date(year, month - 1, day);
+  if (
+    parsed.getFullYear() !== year ||
+    parsed.getMonth() !== month - 1 ||
+    parsed.getDate() !== day ||
+    !Number.isFinite(parsed.getTime())
+  ) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function formatSimulationMonthTitle(monthDate: Date) {
+  return `${monthDate.getFullYear()}년 ${monthDate.getMonth() + 1}월`;
+}
+
+function shiftSimulationCalendarMonth(monthDate: Date, offset: number) {
+  return new Date(monthDate.getFullYear(), monthDate.getMonth() + offset, 1);
+}
+
+function buildSimulationCalendarDays(monthDate: Date) {
+  const firstDay = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
+  const startOffset = firstDay.getDay();
+  const startDate = new Date(firstDay);
+  startDate.setDate(firstDay.getDate() - startOffset);
+
+  return Array.from({ length: 42 }, (_, index) => {
+    const current = new Date(startDate);
+    current.setDate(startDate.getDate() + index);
+
+    return {
+      dateText: formatSimulationDateText(current),
+      label: current.getDate(),
+      inCurrentMonth: current.getMonth() === monthDate.getMonth(),
+    };
+  });
+}
+
 function normalizeSimulationStopLossPercent(value: string) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return SIMULATION_DEFAULT_STOP_LOSS_PCT;
@@ -1583,7 +1639,11 @@ function App() {
   );
   const [simulationRefreshing, setSimulationRefreshing] = useState(false);
   const [simulationPanelMessage, setSimulationPanelMessage] = useState<string | null>(null);
-  const [simulationDatePickerOpen, setSimulationDatePickerOpen] = useState(false);
+  const [simulationDatePickerRowId, setSimulationDatePickerRowId] = useState<string | null>(null);
+  const [simulationDatePickerMonth, setSimulationDatePickerMonth] = useState<Date>(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [indicatorPanelOpen, setIndicatorPanelOpen] = useState(false);
   const [comparisonPanelOpen, setComparisonPanelOpen] = useState(false);
@@ -1740,6 +1800,43 @@ function App() {
   useEffect(() => {
     simulationRowsRef.current = simulationRows;
   }, [simulationRows]);
+
+  useEffect(() => {
+    if (!simulationDatePickerRowId) return;
+    const exists = simulationRows.some((row) => row.id === simulationDatePickerRowId);
+    if (!exists) {
+      setSimulationDatePickerRowId(null);
+    }
+  }, [simulationDatePickerRowId, simulationRows]);
+
+  useEffect(() => {
+    if (bottomTab !== 'simulation' && simulationDatePickerRowId) {
+      setSimulationDatePickerRowId(null);
+    }
+  }, [bottomTab, simulationDatePickerRowId]);
+
+  useEffect(() => {
+    if (!simulationDatePickerRowId) return;
+
+    const handlePointerDown = (event: globalThis.PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest('.simulation-date-cell')) return;
+      setSimulationDatePickerRowId(null);
+    };
+
+    const handleEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setSimulationDatePickerRowId(null);
+    };
+
+    window.addEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('keydown', handleEscape);
+
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, [simulationDatePickerRowId]);
 
   useEffect(() => {
     chartRangeSyncStateRef.current = createChartRangeSyncState();
@@ -5935,6 +6032,25 @@ function App() {
     });
   }, []);
 
+  const handleOpenSimulationDatePicker = useCallback((rowId: string, baseDate: string) => {
+    if (simulationDatePickerRowId === rowId) {
+      setSimulationDatePickerRowId(null);
+      return;
+    }
+
+    const parsedDate = parseSimulationDateText(baseDate) ?? new Date();
+    setSimulationDatePickerMonth(new Date(parsedDate.getFullYear(), parsedDate.getMonth(), 1));
+    setSimulationDatePickerRowId(rowId);
+  }, [simulationDatePickerRowId]);
+
+  const handleSelectSimulationDate = useCallback(
+    (rowId: string, dateText: string) => {
+      handleSimulationDateChange(rowId, dateText);
+      setSimulationDatePickerRowId(null);
+    },
+    [handleSimulationDateChange],
+  );
+
   const handleSearchSimulationSymbol = useCallback(
     async (rowId: string) => {
       const targetRow = simulationRowsRef.current.find((row) => row.id === rowId);
@@ -8046,6 +8162,11 @@ function App() {
     () => (strategyResult ? [...strategyResult.trades].slice(-STRATEGY_RECENT_TRADES_LIMIT).reverse() : []),
     [strategyResult],
   );
+  const simulationTodayDateText = useMemo(() => getDefaultSimulationDate(), []);
+  const simulationCalendarDays = useMemo(
+    () => buildSimulationCalendarDays(simulationDatePickerMonth),
+    [simulationDatePickerMonth],
+  );
   const simulationSummary = useMemo(() => {
     const targetRows = simulationRows.filter((row) => Boolean(row.symbol));
     const wins = targetRows.filter((row) => row.status === 'win').length;
@@ -9617,7 +9738,7 @@ function App() {
 
       <footer
         className={`tv-bottom-panel${bottomPanelResizing ? ' resizing' : ''}${
-          simulationDatePickerOpen ? ' allow-overflow' : ''
+          simulationDatePickerRowId ? ' allow-overflow' : ''
         }`}
       >
         <div
@@ -9635,7 +9756,7 @@ function App() {
           ))}
         </div>
 
-        <div className={`bottom-content${simulationDatePickerOpen ? ' allow-overflow' : ''}`}>
+        <div className={`bottom-content${simulationDatePickerRowId ? ' allow-overflow' : ''}`}>
           {bottomTab === 'pine' ? (
             <div className="pine-editor-panel">
               <div className="pine-editor-main">
@@ -10189,15 +10310,80 @@ function App() {
                             </div>
                             {row.errorMessage ? <p className="simulation-row-error">{row.errorMessage}</p> : null}
                           </td>
-                          <td>
-                            <input
-                              className="simulation-row-date"
-                              type="date"
-                              value={row.baseDate}
-                              onFocus={() => setSimulationDatePickerOpen(true)}
-                              onBlur={() => setSimulationDatePickerOpen(false)}
-                              onChange={(event) => handleSimulationDateChange(row.id, event.target.value)}
-                            />
+                          <td className="simulation-date-cell">
+                            <button
+                              type="button"
+                              className="simulation-row-date-trigger"
+                              onClick={() => handleOpenSimulationDatePicker(row.id, row.baseDate)}
+                            >
+                              {row.baseDate}
+                            </button>
+                            {simulationDatePickerRowId === row.id ? (
+                              <div className="simulation-date-picker-popover" role="dialog" aria-label="기준 날짜 선택">
+                                <div className="simulation-date-picker-head">
+                                  <button
+                                    type="button"
+                                    className="simulation-date-nav"
+                                    onClick={() =>
+                                      setSimulationDatePickerMonth((previous) =>
+                                        shiftSimulationCalendarMonth(previous, -1),
+                                      )
+                                    }
+                                    aria-label="이전 달"
+                                  >
+                                    ‹
+                                  </button>
+                                  <strong>{formatSimulationMonthTitle(simulationDatePickerMonth)}</strong>
+                                  <button
+                                    type="button"
+                                    className="simulation-date-nav"
+                                    onClick={() =>
+                                      setSimulationDatePickerMonth((previous) =>
+                                        shiftSimulationCalendarMonth(previous, 1),
+                                      )
+                                    }
+                                    aria-label="다음 달"
+                                  >
+                                    ›
+                                  </button>
+                                </div>
+                                <div className="simulation-date-weekdays">
+                                  {SIMULATION_CALENDAR_WEEKDAYS.map((weekday) => (
+                                    <span key={`simulation-weekday-${weekday}`}>{weekday}</span>
+                                  ))}
+                                </div>
+                                <div className="simulation-date-grid">
+                                  {simulationCalendarDays.map((day) => {
+                                    const isSelected = day.dateText === row.baseDate;
+                                    const isToday = day.dateText === simulationTodayDateText;
+
+                                    return (
+                                      <button
+                                        key={`${row.id}-${day.dateText}`}
+                                        type="button"
+                                        className={`simulation-date-day${day.inCurrentMonth ? '' : ' outside'}${isToday ? ' today' : ''}${
+                                          isSelected ? ' selected' : ''
+                                        }`}
+                                        onClick={() => handleSelectSimulationDate(row.id, day.dateText)}
+                                      >
+                                        {day.label}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                                <div className="simulation-date-picker-actions">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleSelectSimulationDate(row.id, simulationTodayDateText)}
+                                  >
+                                    오늘
+                                  </button>
+                                  <button type="button" onClick={() => setSimulationDatePickerRowId(null)}>
+                                    닫기
+                                  </button>
+                                </div>
+                              </div>
+                            ) : null}
                           </td>
                           <td>{row.basePrice !== null ? formatPrice(row.basePrice) : '--'}</td>
                           <td>{row.currentPrice !== null ? formatPrice(row.currentPrice) : '--'}</td>
