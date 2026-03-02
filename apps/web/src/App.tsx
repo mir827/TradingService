@@ -512,6 +512,23 @@ type SimulationRow = {
   errorMessage: string | null;
 };
 
+type SimulationStoragePayload = {
+  version?: number;
+  stopLossPctInput?: string;
+  takeProfitPctInput?: string;
+  rows?: Array<{
+    query?: string;
+    baseDate?: string;
+    symbol?: SymbolItem | null;
+  }>;
+};
+
+type SimulationBootstrapState = {
+  rows: SimulationRow[];
+  stopLossPctInput: string;
+  takeProfitPctInput: string;
+};
+
 type HorizontalLine = DrawingFlagState & {
   id: string;
   price: number;
@@ -736,6 +753,7 @@ const WATCH_PREFS_STORAGE_KEY = 'tradingservice.watchprefs.v1';
 const ALERT_AUTO_CHECK_STORAGE_KEY = 'tradingservice.alerts.autocheck.v1';
 const INDICATOR_PREFS_STORAGE_KEY = 'tradingservice.indicators.v2';
 const BOTTOM_PANEL_HEIGHT_STORAGE_KEY = 'tradingservice.bottompanel.height.v1';
+const SIMULATION_STORAGE_KEY = 'tradingservice.simulation.v1';
 const DEFAULT_WATCHLIST_NAME = 'default';
 const ALERT_EVENT_DEDUP_WINDOW_MS = 10_000;
 const ALERT_EVENT_MAX_ITEMS = 20;
@@ -1385,6 +1403,88 @@ function resolveSimulationTargetTimestamp(dateText: string) {
   return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : null;
 }
 
+function normalizeStoredSimulationSymbol(value: unknown): SymbolItem | null {
+  if (!value || typeof value !== 'object') return null;
+
+  const candidate = value as Partial<SymbolItem>;
+  if (typeof candidate.symbol !== 'string' || !candidate.symbol.trim()) return null;
+  if (typeof candidate.name !== 'string' || !candidate.name.trim()) return null;
+  if (candidate.market !== 'CRYPTO' && candidate.market !== 'KOSPI' && candidate.market !== 'KOSDAQ') {
+    return null;
+  }
+
+  return normalizeSymbolItemVenue({
+    symbol: candidate.symbol.trim(),
+    name: candidate.name.trim(),
+    market: candidate.market,
+    ...(typeof candidate.code === 'string' && candidate.code.trim() ? { code: candidate.code.trim() } : {}),
+    ...(typeof candidate.exchange === 'string' && candidate.exchange.trim() ? { exchange: candidate.exchange.trim() } : {}),
+    ...(typeof candidate.venue === 'string' && candidate.venue.trim() ? { venue: candidate.venue as KrVenue } : {}),
+  });
+}
+
+function createSimulationRowFromStorage(value: unknown): SimulationRow | null {
+  if (!value || typeof value !== 'object') return null;
+
+  const payload = value as { query?: unknown; baseDate?: unknown; symbol?: unknown };
+  const row = createSimulationRow();
+  const query = typeof payload.query === 'string' ? payload.query : '';
+  const baseDateCandidate = typeof payload.baseDate === 'string' ? payload.baseDate : '';
+  const baseDate =
+    resolveSimulationTargetTimestamp(baseDateCandidate) === null ? getDefaultSimulationDate() : baseDateCandidate;
+  const symbol = normalizeStoredSimulationSymbol(payload.symbol);
+
+  return {
+    ...row,
+    query,
+    baseDate,
+    symbol,
+    status: symbol ? 'active' : 'idle',
+    statusLabel: symbol ? '재계산 필요' : '종목을 검색하세요',
+  };
+}
+
+function getStoredSimulationState(): SimulationBootstrapState {
+  const defaults: SimulationBootstrapState = {
+    rows: [createSimulationRow()],
+    stopLossPctInput: String(SIMULATION_DEFAULT_STOP_LOSS_PCT),
+    takeProfitPctInput: String(SIMULATION_DEFAULT_TAKE_PROFIT_PCT),
+  };
+
+  if (typeof window === 'undefined') return defaults;
+
+  try {
+    const raw = window.localStorage.getItem(SIMULATION_STORAGE_KEY);
+    if (!raw) return defaults;
+
+    const parsed = JSON.parse(raw) as SimulationStoragePayload;
+
+    const rows =
+      (Array.isArray(parsed.rows)
+        ? parsed.rows
+            .map((item) => createSimulationRowFromStorage(item))
+            .filter((item): item is SimulationRow => item !== null)
+        : []) || [];
+
+    const stopLossPctInput =
+      typeof parsed.stopLossPctInput === 'string' && Number.isFinite(Number(parsed.stopLossPctInput))
+        ? parsed.stopLossPctInput
+        : defaults.stopLossPctInput;
+    const takeProfitPctInput =
+      typeof parsed.takeProfitPctInput === 'string' && Number.isFinite(Number(parsed.takeProfitPctInput))
+        ? parsed.takeProfitPctInput
+        : defaults.takeProfitPctInput;
+
+    return {
+      rows: rows.length > 0 ? rows : defaults.rows,
+      stopLossPctInput,
+      takeProfitPctInput,
+    };
+  } catch {
+    return defaults;
+  }
+}
+
 function App() {
   const chartAreaRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1475,9 +1575,12 @@ function App() {
   const [tradingFormError, setTradingFormError] = useState<string | null>(null);
   const [tradingRecovery, setTradingRecovery] = useState<WorkflowRecoveryState | null>(null);
   const [tradingLastUpdatedAt, setTradingLastUpdatedAt] = useState<number | null>(null);
-  const [simulationRows, setSimulationRows] = useState<SimulationRow[]>(() => [createSimulationRow()]);
-  const [simulationStopLossPctInput, setSimulationStopLossPctInput] = useState(String(SIMULATION_DEFAULT_STOP_LOSS_PCT));
-  const [simulationTakeProfitPctInput, setSimulationTakeProfitPctInput] = useState(String(SIMULATION_DEFAULT_TAKE_PROFIT_PCT));
+  const [simulationBootstrap] = useState<SimulationBootstrapState>(() => getStoredSimulationState());
+  const [simulationRows, setSimulationRows] = useState<SimulationRow[]>(() => simulationBootstrap.rows);
+  const [simulationStopLossPctInput, setSimulationStopLossPctInput] = useState(() => simulationBootstrap.stopLossPctInput);
+  const [simulationTakeProfitPctInput, setSimulationTakeProfitPctInput] = useState(
+    () => simulationBootstrap.takeProfitPctInput,
+  );
   const [simulationRefreshing, setSimulationRefreshing] = useState(false);
   const [simulationPanelMessage, setSimulationPanelMessage] = useState<string | null>(null);
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
@@ -2660,6 +2763,23 @@ function App() {
 
     window.localStorage.setItem(BOTTOM_PANEL_HEIGHT_STORAGE_KEY, String(Math.round(bottomPanelHeight)));
   }, [bottomPanelHeight]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const payload: SimulationStoragePayload = {
+      version: 1,
+      stopLossPctInput: simulationStopLossPctInput,
+      takeProfitPctInput: simulationTakeProfitPctInput,
+      rows: simulationRows.map((row) => ({
+        query: row.query,
+        baseDate: row.baseDate,
+        symbol: row.symbol ? normalizeSymbolItemVenue(row.symbol) : null,
+      })),
+    };
+
+    window.localStorage.setItem(SIMULATION_STORAGE_KEY, JSON.stringify(payload));
+  }, [simulationRows, simulationStopLossPctInput, simulationTakeProfitPctInput]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -7932,6 +8052,18 @@ function App() {
     const ended = wins + losses;
     const total = targetRows.length;
     const active = Math.max(0, total - ended);
+    const rowsWithPnL = targetRows.filter(
+      (row): row is SimulationRow & { basePrice: number; currentPrice: number } =>
+        typeof row.basePrice === 'number' &&
+        Number.isFinite(row.basePrice) &&
+        row.basePrice > 0 &&
+        typeof row.currentPrice === 'number' &&
+        Number.isFinite(row.currentPrice),
+    );
+    const totalBase = rowsWithPnL.reduce((sum, row) => sum + row.basePrice, 0);
+    const totalCurrent = rowsWithPnL.reduce((sum, row) => sum + row.currentPrice, 0);
+    const totalPnl = totalCurrent - totalBase;
+    const totalPnlPct = totalBase > 0 ? (totalPnl / totalBase) * 100 : 0;
 
     return {
       total,
@@ -7940,6 +8072,9 @@ function App() {
       active,
       ended,
       winRate: total > 0 ? (wins / total) * 100 : 0,
+      totalPnl,
+      totalPnlPct,
+      pricedCount: rowsWithPnL.length,
     };
   }, [simulationRows]);
   const opsTimelineItems = useMemo<OpsTimelineItem[]>(() => {
@@ -9975,6 +10110,12 @@ function App() {
                 <span className="up">승 {simulationSummary.wins}</span>
                 <span className="down">패 {simulationSummary.losses}</span>
                 <span>미종료 {simulationSummary.active}</span>
+                <span className={simulationSummary.totalPnl >= 0 ? 'up' : 'down'}>
+                  전체 수익 {formatSignedCurrency(simulationSummary.totalPnl)}
+                </span>
+                <span className={simulationSummary.totalPnlPct >= 0 ? 'up' : 'down'}>
+                  전체 수익률 {formatSigned(simulationSummary.totalPnlPct, 2)}%
+                </span>
                 <span>
                   설정: 손절 {normalizedSimulationStopLossPct.toFixed(1)}% / 익절{' '}
                   {normalizedSimulationTakeProfitPct.toFixed(1)}%
@@ -10048,12 +10189,7 @@ function App() {
                               className="simulation-row-date"
                               type="date"
                               value={row.baseDate}
-                              onChange={(event) => {
-                                handleSimulationDateChange(row.id, event.target.value);
-                                if (row.symbol) {
-                                  void refreshSimulationRows({ targetIds: [row.id], resetTerminal: true });
-                                }
-                              }}
+                              onChange={(event) => handleSimulationDateChange(row.id, event.target.value)}
                             />
                           </td>
                           <td>{row.basePrice !== null ? formatPrice(row.basePrice) : '--'}</td>
