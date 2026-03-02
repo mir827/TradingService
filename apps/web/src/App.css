@@ -453,6 +453,16 @@ select {
   border-radius: 999px;
   padding: 1px 7px;
   font-size: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.chart-inspector-color-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex: 0 0 auto;
 }
 
 .chart-inspector-hint {

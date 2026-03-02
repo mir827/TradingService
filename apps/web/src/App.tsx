@@ -686,6 +686,17 @@ const indicatorConfigs: IndicatorConfig[] = [
   { key: 'macd', label: 'MACD', color: '#4cc9f0' },
   { key: 'bbands', label: 'Bollinger Bands', color: '#9ad1ff' },
 ];
+const inspectorIndicatorColorByKey: Record<string, string> = {
+  sma20: '#f0b429',
+  sma60: '#4da4ff',
+  ema20: '#ff7f50',
+  rsi: '#c792ea',
+  macd: '#4cc9f0',
+  macdSignal: '#8fe4ff',
+  bbBasis: '#9ad1ff',
+  bbUpper: '#7eb9ff',
+  bbLower: '#7eb9ff',
+};
 const compareScaleModeOptions: Array<{ key: CompareScaleMode; label: string }> = [
   { key: 'normalized', label: '% 정규화' },
   { key: 'absolute', label: '절대값' },
@@ -1268,25 +1279,6 @@ function TradingServiceMark() {
       <path d="M5.6 15.2L10 11.4L12.6 12.8L18.4 8.6" className="brand-mark-trend" />
     </svg>
   );
-}
-
-function formatIndicatorLegend(config: IndicatorConfig, settings: IndicatorSettings) {
-  if (config.key === 'rsi') {
-    return `RSI ${settings.rsi.period}`;
-  }
-
-  if (config.key === 'macd') {
-    return `MACD ${settings.macd.fast}/${settings.macd.slow}/${settings.macd.signal}`;
-  }
-
-  if (config.key === 'bbands') {
-    const stdDevText = Number.isInteger(settings.bollinger.stdDev)
-      ? `${settings.bollinger.stdDev}`
-      : settings.bollinger.stdDev.toFixed(1);
-    return `BB ${settings.bollinger.period}, ${stdDevText}`;
-  }
-
-  return config.label;
 }
 
 function toCompareOverlayConfigs(overlays: CompareOverlayState[]): CompareOverlayConfig[] {
@@ -4420,9 +4412,6 @@ function App() {
     return pineActiveScript.name !== normalizedName || pineActiveScript.source !== normalizedSource;
   }, [pineActiveScript, pineEditorName, pineEditorSource]);
 
-  const priceDiff = displayCandle ? displayCandle.close - displayCandle.open : 0;
-  const priceDiffPercent =
-    displayCandle && displayCandle.open !== 0 ? ((displayCandle.close - displayCandle.open) / displayCandle.open) * 100 : 0;
   const marketStatusBadgeText = marketStatus?.status === 'OPEN' ? '장중' : marketStatus?.status === 'CLOSED' ? '휴장' : '상태확인';
   const marketStatusBadgeClass = marketStatus?.status === 'OPEN' ? 'open' : marketStatus?.status === 'CLOSED' ? 'closed' : 'pending';
   const marketStatusHint = marketStatus
@@ -7400,11 +7389,6 @@ function App() {
       tool: pendingShapeStart.tool,
     };
   }, [overlayTick, pendingShapeStart]);
-  const activeIndicatorConfigs = indicatorConfigs.filter((config) => enabledIndicators[config.key]);
-  const activeIndicatorLegends = activeIndicatorConfigs.map((config) => ({
-    ...config,
-    legend: formatIndicatorLegend(config, indicatorSettings),
-  }));
   const compareCandidates = watchlistSymbols;
   const hasAnyCompareCandidate = compareCandidates.some((item) => item.symbol !== selectedSymbol);
   const hasCompareOverlays = compareOverlays.some((overlay) => overlay.symbol);
@@ -7727,33 +7711,6 @@ function App() {
             </div>
 
             <div className="chart-meta-wrap">
-              <div className="chart-meta">
-                <span className={priceDiff >= 0 ? 'up' : 'down'}>
-                  {priceDiff >= 0 ? '+' : ''}
-                  {priceDiff.toFixed(2)} ({priceDiffPercent.toFixed(2)}%)
-                </span>
-                <span>Vol {displayCandle ? formatVolume(displayCandle.volume) : '--'}</span>
-              </div>
-
-              {activeIndicatorLegends.length > 0 || hasCompareOverlays ? (
-                <div className="chart-legend-row">
-                  {activeIndicatorLegends.map((config) => (
-                    <span key={config.key} className="chart-legend-item">
-                      <span className="legend-dot" style={{ backgroundColor: config.color }} />
-                      {config.legend}
-                    </span>
-                  ))}
-                  {compareLegendItems.map((item) => (
-                    <span key={`compare-legend-${item.slotIndex}`} className="chart-legend-item">
-                      <span className="legend-dot" style={{ backgroundColor: COMPARE_OVERLAY_COLORS[item.slotIndex] }} />
-                      비교 {item.symbolMeta ? getDisplayCode(item.symbolMeta) : shortTicker(item.symbol)} ·{' '}
-                      {compareScaleMode === 'normalized' ? '% 정규화' : '절대값'} · {item.status ?? '--'}
-                      {item.visible ? '' : ' (숨김)'}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
-
               <div className="chart-inspector" aria-live="polite">
                 <div className="chart-inspector-head">
                   <strong>Data Window</strong>
@@ -7780,7 +7737,12 @@ function App() {
                 {crosshairInspectorSnapshot.indicators.length > 0 ? (
                   <div className="chart-inspector-extra">
                     {crosshairInspectorSnapshot.indicators.map((item) => (
-                      <span key={`inspector-indicator-${item.key}`} className="chart-inspector-extra-item">
+                      <span key={`inspector-indicator-${item.key}`} className="chart-inspector-extra-item indicator">
+                        <span
+                          className="chart-inspector-color-dot"
+                          style={{ backgroundColor: inspectorIndicatorColorByKey[item.key] ?? '#9eb9df' }}
+                          aria-hidden="true"
+                        />
                         {item.label} {item.value === null ? '--' : formatPrice(item.value)}
                       </span>
                     ))}
