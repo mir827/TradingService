@@ -8210,6 +8210,21 @@ function App() {
     const totalPnl = totalCurrent - totalBase;
     const totalPnlPct = totalBase > 0 ? (totalPnl / totalBase) * 100 : 0;
 
+    const settledRows = rowsWithPnL.filter((row) => row.status === 'win' || row.status === 'loss');
+    const settledBase = settledRows.reduce((sum, row) => sum + row.basePrice, 0);
+    const settledPnl = settledRows.reduce((sum, row) => {
+      const settledPriceCandidate =
+        row.status === 'win'
+          ? typeof row.takeProfitPrice === 'number' && Number.isFinite(row.takeProfitPrice)
+            ? row.takeProfitPrice
+            : row.currentPrice
+          : typeof row.stopLossPrice === 'number' && Number.isFinite(row.stopLossPrice)
+            ? row.stopLossPrice
+            : row.currentPrice;
+      return sum + (settledPriceCandidate - row.basePrice);
+    }, 0);
+    const settledPnlPct = settledBase > 0 ? (settledPnl / settledBase) * 100 : 0;
+
     return {
       total,
       wins,
@@ -8219,7 +8234,10 @@ function App() {
       winRate: total > 0 ? (wins / total) * 100 : 0,
       totalPnl,
       totalPnlPct,
+      settledPnl,
+      settledPnlPct,
       pricedCount: rowsWithPnL.length,
+      settledCount: settledRows.length,
     };
   }, [simulationRows]);
   const opsTimelineItems = useMemo<OpsTimelineItem[]>(() => {
@@ -10260,10 +10278,19 @@ function App() {
                 <span className="down">패 {simulationSummary.losses}</span>
                 <span>미종료 {simulationSummary.active}</span>
                 <span className={simulationSummary.totalPnl >= 0 ? 'up' : 'down'}>
-                  전체 수익 {formatSignedCurrency(simulationSummary.totalPnl)}
+                  전체 평가수익 {formatSignedCurrency(simulationSummary.totalPnl)}
                 </span>
                 <span className={simulationSummary.totalPnlPct >= 0 ? 'up' : 'down'}>
-                  전체 수익률 {formatSigned(simulationSummary.totalPnlPct, 2)}%
+                  전체 평가수익률 {formatSigned(simulationSummary.totalPnlPct, 2)}%
+                </span>
+                <span>
+                  확정 대상 {simulationSummary.settledCount}종목
+                </span>
+                <span className={simulationSummary.settledPnl >= 0 ? 'up' : 'down'}>
+                  확정 수익 {formatSignedCurrency(simulationSummary.settledPnl)}
+                </span>
+                <span className={simulationSummary.settledPnlPct >= 0 ? 'up' : 'down'}>
+                  확정 수익률 {formatSigned(simulationSummary.settledPnlPct, 2)}%
                 </span>
                 <span>
                   설정: 손절 {normalizedSimulationStopLossPct.toFixed(1)}% / 익절{' '}
