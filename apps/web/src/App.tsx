@@ -7244,19 +7244,23 @@ function App() {
   const exchangeText = marketExchangeText(selectedMarket);
   const totalDrawings = horizontalLines.length + verticalLines.length + trendlines.length + rays.length + rectangles.length + notes.length;
   const activeToolDescription =
-    activeTool === 'horizontal'
-      ? `수평선 툴 활성화 · 클릭으로 추가 (${horizontalLines.length})`
-      : activeTool === 'vertical'
-        ? `수직선 툴 활성화 · 클릭으로 추가 (${verticalLines.length})`
-        : activeTool === 'trendline'
-          ? `추세선 툴 활성화 · 2회 클릭으로 추가 (${trendlines.length})`
-          : activeTool === 'ray'
-            ? `레이 툴 활성화 · 2회 클릭으로 추가 (${rays.length})`
-          : activeTool === 'rectangle'
-            ? `사각형 툴 활성화 · 2회 클릭으로 추가 (${rectangles.length})`
-            : activeTool === 'note'
-              ? `노트 툴 활성화 · 클릭 후 텍스트 입력 (${notes.length})`
-              : null;
+    activeTool === 'cursor'
+      ? '커서 모드 · 도형 선택/이동 가능'
+      : activeTool === 'crosshair'
+        ? '크로스헤어 모드 · 데이터 조회 전용 (도형 편집 비활성화)'
+      : activeTool === 'horizontal'
+        ? `수평선 툴 활성화 · 클릭으로 추가 (${horizontalLines.length})`
+        : activeTool === 'vertical'
+          ? `수직선 툴 활성화 · 클릭으로 추가 (${verticalLines.length})`
+          : activeTool === 'trendline'
+            ? `추세선 툴 활성화 · 2회 클릭으로 추가 (${trendlines.length})`
+            : activeTool === 'ray'
+              ? `레이 툴 활성화 · 2회 클릭으로 추가 (${rays.length})`
+            : activeTool === 'rectangle'
+              ? `사각형 툴 활성화 · 2회 클릭으로 추가 (${rectangles.length})`
+              : activeTool === 'note'
+                ? `노트 툴 활성화 · 클릭 후 텍스트 입력 (${notes.length})`
+                : null;
   const drawingChips = useMemo(
     () => [
       ...horizontalLines.map((line) => ({
@@ -7991,7 +7995,7 @@ function App() {
           <div className={`chart-layout ${chartLayoutMode === 'split' ? 'split' : 'single'}`}>
             <div
               ref={chartAreaRef}
-              className={`chart-area chart-area-primary${isDraggingDrawing ? ' is-dragging' : ''}`}
+              className={`chart-area chart-area-primary chart-tool-${activeTool}${isDraggingDrawing ? ' is-dragging' : ''}`}
               onMouseLeave={clearHoveredCandle}
               onPointerDown={handleChartPointerDown}
               onPointerMove={handleChartPointerMove}
@@ -8106,7 +8110,7 @@ function App() {
             </div>
 
             {chartLayoutMode === 'split' ? (
-              <div className="chart-area chart-area-secondary" onMouseLeave={clearHoveredCandle}>
+              <div className={`chart-area chart-area-secondary chart-tool-${activeTool}`} onMouseLeave={clearHoveredCandle}>
                 <div className="chart-canvas" ref={secondaryContainerRef} />
                 <div className="secondary-chart-badge">보조 차트 · 범위 동기화</div>
               </div>

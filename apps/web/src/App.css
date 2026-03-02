@@ -742,6 +742,16 @@ select {
   cursor: grabbing;
 }
 
+.chart-area.chart-tool-cursor .chart-canvas,
+.chart-area.chart-tool-cursor .chart-canvas * {
+  cursor: default !important;
+}
+
+.chart-area.chart-tool-crosshair .chart-canvas,
+.chart-area.chart-tool-crosshair .chart-canvas * {
+  cursor: crosshair !important;
+}
+
 .chart-canvas {
   position: absolute;
   inset: 0;
