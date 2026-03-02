@@ -256,7 +256,7 @@ select {
 .center-panel {
   min-width: 0;
   display: grid;
-  grid-template-rows: 56px 1fr 28px;
+  grid-template-rows: minmax(88px, auto) 1fr 28px;
   background: #131722;
   overflow: hidden;
   isolation: isolate;
