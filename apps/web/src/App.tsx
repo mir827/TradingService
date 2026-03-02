@@ -7728,10 +7728,6 @@ function App() {
 
             <div className="chart-meta-wrap">
               <div className="chart-meta">
-                <span>O {displayCandle ? formatPrice(displayCandle.open) : '--'}</span>
-                <span>H {displayCandle ? formatPrice(displayCandle.high) : '--'}</span>
-                <span>L {displayCandle ? formatPrice(displayCandle.low) : '--'}</span>
-                <span>C {displayCandle ? formatPrice(displayCandle.close) : '--'}</span>
                 <span className={priceDiff >= 0 ? 'up' : 'down'}>
                   {priceDiff >= 0 ? '+' : ''}
                   {priceDiff.toFixed(2)} ({priceDiffPercent.toFixed(2)}%)
